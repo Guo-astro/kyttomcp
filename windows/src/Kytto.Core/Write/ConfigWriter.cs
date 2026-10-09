@@ -55,9 +55,15 @@ public interface IConfigFileWriter
 
 public sealed class AtomicConfigFileWriter : IConfigFileWriter
 {
-    public void Write(byte[] data, string path) => AtomicWriter.Write(data, path);
+    // Through a symbolic link, to the file it names: the link is the user's.
+    public void Write(byte[] data, string path) => AtomicWriter.Write(data, path, throughLinks: true);
 
-    public void Delete(string path) => File.Delete(path);
+    /// <summary>Rolls back a file a failed transaction created.</summary>
+    /// <remarks>
+    /// When the path is a link whose target was missing, the write created the
+    /// target: that goes, and the user's link stays as it was.
+    /// </remarks>
+    public void Delete(string path) => File.Delete(AtomicWriter.ResolvingLinks(path));
 }
 
 public sealed class ConfigWriteException(string message) : Exception(message)

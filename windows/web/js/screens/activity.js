@@ -5,6 +5,7 @@ import { el, button } from '../dom.js';
 
 export function renderActivity(state) {
   const panel = el('div', 'activity-panel');
+  panel.dataset.scrollKey = 'activity';
   const head = el('header', 'panel-head');
   const copy = el('div');
   copy.append(el('h2', null, 'Live Activity'));

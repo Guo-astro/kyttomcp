@@ -239,8 +239,7 @@ public sealed class ToggleService(
             {
                 // The name in this file, which need not match the row's name
                 // character for character — the matrix merges rows by identity.
-                var name = document.ServerNames(serversKey)
-                    .FirstOrDefault(candidate => Server.Identity(candidate) == server.Id);
+                var name = document.ServerName(server.Id, serversKey);
 
                 if (name is null)
                 {
@@ -398,7 +397,7 @@ public sealed class ToggleService(
                 // Discovery said this client does not have it. If the file
                 // disagrees, the file wins: overwriting a definition someone may
                 // have edited by hand is not what a click on an empty cell asked for.
-                if (document.ValueAt(serversKey)?.Member(server.Name) is not null)
+                if (document.ServerKey(server.Id, serversKey) is not null)
                 {
                     return document.SourceText;
                 }
@@ -457,6 +456,7 @@ public sealed class ToggleService(
         var arriving = enabled ? ArrivingFor(server, clientId) : null;
 
         var parked = false;
+        var restored = false;
         var previousParked = parkStore.Parked(clientId, server.Name);
         var expectedDigest = ledger.DigestFor(path);
         WriteReceipt receipt;
@@ -466,22 +466,35 @@ public sealed class ToggleService(
                 path, clientId, display, expectedDigest,
                 document =>
                 {
+                    // The spelling this file uses, which need not be the row's: the
+                    // matrix merges `GitHub` and `github` into one row.
+                    var key = document.ServerKey(server.Id, serversKey);
+
                     if (arriving is not null)
                     {
+                        // Already defined here — put back by hand, or edited in
+                        // place. The file wins; restoring held bytes over it would
+                        // undo whatever is there now.
+                        if (key is not null) return document.SourceText;
+                        restored = true;
+                        // Back under the spelling it was held under, which is this
+                        // file's own — not the merged row's, which may come from
+                        // another client.
                         return document.SettingMember(
-                            server.Name,
+                            previousParked?.ServerName ?? server.Name,
                             [serversKey],
                             Literal(arriving, server, serversKey, document));
                     }
 
+                    if (key is null || document.ValueAt(serversKey)?.Member(key) is not { } member)
+                    {
+                        return document.SourceText;
+                    }
                     // Park the exact bytes before they go, so a crash cannot leave
                     // the definition removed without a restorable copy.
-                    if (document.ValueAt(serversKey)?.Member(server.Name) is { } member)
-                    {
-                        parkStore.Park(clientId, server.Name, document.Slice(member.Value.Span));
-                        parked = true;
-                    }
-                    return document.RemovingMember(server.Name, [serversKey]);
+                    parkStore.Park(clientId, key, document.Slice(member.Value.Span));
+                    parked = true;
+                    return document.RemovingMember(key, [serversKey]);
                 });
         }
         catch
@@ -501,7 +514,9 @@ public sealed class ToggleService(
         }
         ledger.Record(path, receipt.Digest);
 
-        if (enabled) parkStore.Unpark(clientId, server.Name);
+        // Kytto's copy is spent once its bytes are back in the file. If the file
+        // already had a definition, nothing was restored and the copy stays.
+        if (restored) parkStore.Unpark(clientId, server.Name);
 
         return new ToggleResult(
             ClientID: clientId,

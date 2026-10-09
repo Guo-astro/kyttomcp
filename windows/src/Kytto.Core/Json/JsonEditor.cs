@@ -13,6 +13,13 @@ public enum JsonEditErrorKind
     /// planned against no longer applies.
     /// </summary>
     ValueMismatch,
+
+    /// <summary>
+    /// The key appears more than once in its object. Clients resolve that
+    /// last-wins, so editing the first copy would change the one nobody reads;
+    /// guessing which one the user meant is not a splice (§6.3).
+    /// </summary>
+    DuplicateKey,
 }
 
 public sealed class JsonEditException(JsonEditErrorKind kind, IReadOnlyList<string> path)
@@ -30,6 +37,11 @@ public sealed class JsonEditException(JsonEditErrorKind kind, IReadOnlyList<stri
             JsonEditErrorKind.NotAnObject => $"{where} is not an object.",
             JsonEditErrorKind.ValueMismatch =>
                 $"{where} no longer says what Kytto read there, so nothing was changed.",
+            JsonEditErrorKind.DuplicateKey =>
+                $"\"{path[^1]}\" appears more than once in " +
+                $"{(path.Count == 1 ? "the top level" : string.Join(" -> ", path.Take(path.Count - 1)))}. " +
+                "Clients use the last copy, so Kytto will not guess which one to change — " +
+                "remove the duplicate in the file, then try again.",
             _ => $"{where} is not an array.",
         };
     }
@@ -73,7 +85,7 @@ public static class JsonEditor
 
         // Existing key: replace just the value, leaving the key and its formatting
         // alone.
-        if (members.FirstOrDefault(member => member.Key == key) is { } existing)
+        if (SoleMember(key, members, path) is { } existing)
         {
             return document.Replacing(existing.Value.Span, rawValue);
         }
@@ -107,15 +119,56 @@ public static class JsonEditor
         var members = container.Members
             ?? throw new JsonEditException(JsonEditErrorKind.NotAnObject, path);
 
+        if (SoleMember(key, members, path) is null) return self.SourceText;
         var index = -1;
         for (var i = 0; i < members.Count; i++)
         {
             if (members[i].Key == key) { index = i; break; }
         }
-        if (index < 0) return self.SourceText;
 
         var spans = members.Select(member => member.Span).ToArray();
         return self.Replacing(self.RemovalSpan(index, spans), "");
+    }
+
+    /// <summary>The one member called <paramref name="key"/>, or null.</summary>
+    /// <remarks>
+    /// Two of them is an error, not a choice: clients read the last,
+    /// <see cref="JsonNode.Member"/> the first (§6.3).
+    /// </remarks>
+    internal static JsonMember? SoleMember(string key, IReadOnlyList<JsonMember> members, IReadOnlyList<string> path)
+    {
+        JsonMember? found = null;
+        foreach (var member in members)
+        {
+            if (member.Key != key) continue;
+            if (found is not null) throw new JsonEditException(JsonEditErrorKind.DuplicateKey, [.. path, key]);
+            found = member;
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// The key a server goes by in this file's server map, or null if it is not
+    /// there.
+    /// </summary>
+    /// <remarks>
+    /// The matrix merges rows by identity, so a server called <c>GitHub</c> in one
+    /// client and <c>github</c> in another is one row — and every edit to the second
+    /// has to use the spelling that file actually contains, or it silently changes
+    /// nothing (or adds a twin). Two keys answering to the same identity is refused
+    /// rather than resolved: clients read the last, and guessing is not a splice
+    /// (§6.3).
+    /// </remarks>
+    public static string? ServerKey(this JsonDocument self, string identity, string serversKey)
+    {
+        string? found = null;
+        foreach (var key in self.ValueAt(serversKey)?.Keys ?? [])
+        {
+            if (Model.Server.Identity(key) != identity) continue;
+            if (found is not null) throw new JsonEditException(JsonEditErrorKind.DuplicateKey, [serversKey, key]);
+            found = key;
+        }
+        return found;
     }
 
     // MARK: - Arrays
@@ -401,6 +454,6 @@ public static class JsonEditor
         return false;
     }
 
-    private static string Newline(this JsonDocument self) =>
+    internal static string Newline(this JsonDocument self) =>
         self.SourceText.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
 }

@@ -6,7 +6,7 @@ namespace Kytto.App.Tests;
 
 public sealed class ReleaseMetadataTests
 {
-    private const string CurrentRelease = "1.0.7";
+    private const string CurrentRelease = "1.0.7.1";
 
     [Fact]
     public void AppAssemblyAndProjectCarryTheCurrentReleaseVersion()
@@ -18,7 +18,7 @@ public sealed class ReleaseMetadataTests
 
         Assert.NotNull(informational);
         Assert.Equal(CurrentRelease, informational.Split('+', 2)[0]);
-        Assert.Equal(new Version(1, 0, 7, 0), assembly.GetName().Version);
+        Assert.Equal(new Version(1, 0, 7, 1), assembly.GetName().Version);
 
         var project = XDocument.Load(Path.Combine(
             RepositoryRoot(), "src", "Kytto.App", "Kytto.App.csproj"));
@@ -35,7 +35,11 @@ public sealed class ReleaseMetadataTests
         var script = File.ReadAllText(Path.Combine(root, "scripts", "release.ps1"));
         var installer = File.ReadAllText(Path.Combine(root, "scripts", "installer.iss"));
 
-        Assert.Contains("$projectXml.Project.PropertyGroup.Version", script, StringComparison.Ordinal);
+        Assert.Contains(
+            "$projectXml.SelectSingleNode('/Project/PropertyGroup/Version')",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains("$versionNode.InnerText.Trim()", script, StringComparison.Ordinal);
         Assert.Contains("/DAppVersionSlug=$version", script, StringComparison.Ordinal);
         Assert.Contains("AppVersion={#AppVersion}", installer, StringComparison.Ordinal);
         Assert.DoesNotContain(CurrentRelease, installer, StringComparison.Ordinal);

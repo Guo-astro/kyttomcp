@@ -114,9 +114,9 @@ internal static class CommandRegistry
                 : new LibraryDirectoryDto(selection.SessionID, selection.DisplayName);
         });
 
-        router.Register<LibrarySessionPayload, LibraryScanDto>("library.scan", payload =>
+        router.Register<LibrarySessionPayload, LibraryScanDto>("library.scan", async payload =>
         {
-            var result = model.ScanLibrary(LibraryToken(payload.SessionID, payload.Path, "library"));
+            var result = await model.ScanLibraryAsync(LibraryToken(payload.SessionID, payload.Path, "library"));
             return new LibraryScanDto(
                 result.Candidates.Select(ToDto).ToArray(),
                 result.Warnings,

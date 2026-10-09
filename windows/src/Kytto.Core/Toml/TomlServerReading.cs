@@ -41,6 +41,24 @@ public static class TomlServerReading
         return names;
     }
 
+    /// <summary>The name a server goes by in this file, or null if it is not there.</summary>
+    /// <remarks>
+    /// See <c>JsonEditor.ServerKey</c>. Two tables answering to one identity —
+    /// <c>[mcp_servers.GitHub]</c> and <c>[mcp_servers.github]</c> — are refused, as in
+    /// JSON: which one a client reads is a guess.
+    /// </remarks>
+    public static string? ServerName(this TomlDocument document, string identity, string key)
+    {
+        string? found = null;
+        foreach (var name in document.ServerNames(key))
+        {
+            if (Model.Server.Identity(name) != identity) continue;
+            if (found is not null) throw new TomlEditException(TomlEditErrorKind.AmbiguousValue, $"{key}.{name}");
+            found = name;
+        }
+        return found;
+    }
+
     /// <summary>
     /// Every table belonging to one server: its own, plus sub-tables such as
     /// <c>env</c>, which are one thing to the user and two tables to TOML.

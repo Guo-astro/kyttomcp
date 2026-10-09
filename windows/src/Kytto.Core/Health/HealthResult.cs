@@ -263,8 +263,28 @@ public sealed record ServerMetadata(HealthResult? Health = null, TokenWeight? To
     public IReadOnlyList<ToolSummary>? ContractTools { get; init; }
     public IReadOnlyList<ContractChange>? ContractChanges { get; init; }
     public DateTimeOffset? ContractChangedAt { get; init; }
+    /// <summary>The tools from the most recent <em>passing</em> check.</summary>
+    /// <remarks>
+    /// A failed or timed-out check records an empty tool list, but every client still
+    /// runs the server with the contract it last offered. Safety findings and
+    /// acknowledgement read this, so a check that fails — on purpose or not — cannot
+    /// wipe a finding or make an acknowledgement land on the wrong contract. Absent in
+    /// records written before 1.0.7.1, where <see cref="ContractTools"/> held the same
+    /// thing.
+    /// </remarks>
+    public IReadOnlyList<ToolSummary>? LastPassingTools { get; init; }
     /// <summary>Explicit latest-version checks survive a relaunch.</summary>
     public Model.ServerProvenance? Provenance { get; init; }
+
+    /// <summary>
+    /// What the server offers as far as Kytto knows: the last passing check's tools,
+    /// surviving later failures.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<ToolSummary> KnownTools =>
+        Health is { Status: HealthStatus.Passed } health
+            ? health.Tools
+            : LastPassingTools ?? ContractTools ?? [];
 }
 
 public static class Timestamp

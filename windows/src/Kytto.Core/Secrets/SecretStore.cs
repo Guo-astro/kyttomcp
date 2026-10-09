@@ -180,4 +180,12 @@ public sealed class SecretsException(string message) : Exception(message)
 
     public static SecretsException EmptyValue() =>
         new("A secret cannot be set to an empty value.");
+
+    /// <summary>There is no configuration file to restrict.</summary>
+    public static SecretsException NoConfigFile(string pathDisplay) =>
+        new($"There is no configuration file at {pathDisplay}, so its permissions were not changed.");
+
+    /// <summary>The permissions were set and did not take.</summary>
+    public static SecretsException PermissionsUnchanged(string pathDisplay) =>
+        new($"{pathDisplay} is still readable by other users — the file system did not accept the change.");
 }

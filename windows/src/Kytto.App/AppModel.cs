@@ -204,10 +204,17 @@ internal sealed class AppModel : IDisposable
         return new LibraryDirectorySelection(sessionId, Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
     }
 
-    internal McpLibraryScanResult ScanLibrary(string sessionId)
+    /// <remarks>
+    /// Up to 5,000 entries and as many file reads: off the UI thread, so the window
+    /// keeps drawing while a large directory is walked. The session is updated after
+    /// the await, back on the caller's thread, so the dictionary is only ever touched
+    /// from one.
+    /// </remarks>
+    internal async Task<McpLibraryScanResult> ScanLibraryAsync(string sessionId)
     {
         var session = LibrarySessionFor(sessionId);
-        var result = _libraryScanner.Scan(session.Root, _current.Servers);
+        var servers = _current.Servers;
+        var result = await Task.Run(() => _libraryScanner.Scan(session.Root, servers));
         _librarySessions[sessionId] = session with { Candidates = result.Candidates };
         return result;
     }
@@ -640,12 +647,16 @@ internal sealed class AppModel : IDisposable
         // directory), disappear, or move through Settings. Rebuild them whenever
         // discovery is explicitly refreshed instead of pinning the launch-time
         // directory set for the lifetime of the app.
+        // A change the old watcher was still waiting to report is handed to the new
+        // one, rather than dropped with its timer.
+        var pending = false;
         if (_watchConfigs)
         {
+            pending = _watcher?.HasPendingChange ?? false;
             _watcher?.Dispose();
             _watcher = null;
         }
-        _current = Discover();
+        _current = Discover(pending);
         RefreshRestartState();
         return _current;
     }
@@ -730,8 +741,8 @@ internal sealed class AppModel : IDisposable
     {
         RequireDirect(serverId);
         var server = ServerById(serverId);
-        var result = Record(Authoring().Update(
-            draft.MergingSecrets(server), server.Name, server, _current.Servers));
+        var result = Authoring().Update(
+            draft.MergingSecrets(server), server.Name, server, _current.Servers);
         try
         {
             _profiles.RenameServer(server.Id, result.ServerName);
@@ -743,13 +754,36 @@ internal sealed class AppModel : IDisposable
             // must not turn that successful mutation into a false failure.
             Log.Failure("profile rename maintenance", error);
         }
+        try
+        {
+            // The baseline and any unreviewed Contract Guard alert follow the server.
+            _metadata.Rename(server.Id, Server.Identity(result.ServerName));
+        }
+        catch (Exception error) when (
+            error is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            Log.Failure("metadata rename maintenance", error);
+        }
+        Reload();
         return result;
     }
 
     internal AuthoringResult DeleteServer(string serverId)
     {
         RequireDirect(serverId);
-        return Record(Authoring().Delete(ServerById(serverId)));
+        var result = Authoring().Delete(ServerById(serverId));
+        try
+        {
+            // A later server reusing the name must not inherit this one's red dot
+            // or its Contract Guard baseline.
+            _metadata.Forget(serverId);
+        }
+        catch (Exception error) when (
+            error is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            Log.Failure("metadata forget maintenance", error);
+        }
+        return Record(result);
     }
 
     // MARK: - Unify (§7.12)
@@ -923,6 +957,10 @@ internal sealed class AppModel : IDisposable
         var server = ServerById(serverId);
         var (health, weight) = await Task.Run(() => new HealthChecker().Check(server));
 
+        // The check can take ten seconds and the window stays usable meanwhile. A
+        // server deleted (or renamed) in that time must not get its metadata back
+        // from a result nobody is waiting for any more.
+        if (!_current.Servers.Any(candidate => candidate.Id == server.Id)) return health;
         _metadata.Record(server.Id, health, weight);
         Reload();
         return health;
@@ -992,7 +1030,8 @@ internal sealed class AppModel : IDisposable
         writer: new ConfigWriter(Backups),
         ledger: _ledger,
         store: _secretStore,
-        pathOverrides: Settings.ClientPathOverrides);
+        pathOverrides: Settings.ClientPathOverrides,
+        parkStore: _parkStore);
 
     private ServerAuthoring Authoring() => new(
         home: _home,
@@ -1029,7 +1068,30 @@ internal sealed class AppModel : IDisposable
         var target = BackupStore.RestoreTarget(backup, resolver);
 
         GatewayMigration().ValidateBackupRestore(Backups.Contents(backup), clientId);
+        // What the restored file defines, read from the backup itself and before the
+        // restore — which backs up the current file and may prune this one.
+        var restoredNames = Backups.ServerNames(backup, resolver) ?? [];
         Backups.RestoreChecked(backup, _ledger.DigestFor(target), resolver);
+
+        // A server the restored file defines is in that file again, so a copy Kytto
+        // was holding for it is stale and would draw it as off. Only those: a held
+        // server the backup does not define is still only in the park store.
+        var restored = restoredNames.Select(Server.Identity).ToHashSet(StringComparer.Ordinal);
+        foreach (var entry in _parkStore.All())
+        {
+            if (entry.ClientID != clientId || !restored.Contains(Server.Identity(entry.ServerName))) continue;
+            try
+            {
+                _parkStore.Unpark(entry.ClientID, entry.ServerName);
+            }
+            catch (Exception error) when (
+                error is InvalidDataException or IOException or UnauthorizedAccessException)
+            {
+                // The restore landed; discovery already prefers the file over a
+                // stale held copy, so this is housekeeping, not correctness.
+                Log.Failure("park cleanup after restore", error);
+            }
+        }
         Reload();
         GatewayMigration().ReconcileAfterBackupRestore(clientId);
     }
@@ -1140,7 +1202,7 @@ internal sealed class AppModel : IDisposable
         left.Count == right.Count && left.All(pair =>
             right.TryGetValue(pair.Key, out var value) && value == pair.Value);
 
-    private DiscoveryResult Discover()
+    private DiscoveryResult Discover(bool pendingChange = false)
     {
         var discovery = new Discovery(
             home: _home,
@@ -1161,7 +1223,8 @@ internal sealed class AppModel : IDisposable
         {
             _watcher ??= new ConfigWatcher(
                 discovery.WatchTargets(),
-                () => ConfigsChanged?.Invoke());
+                () => ConfigsChanged?.Invoke(),
+                startPending: pendingChange);
         }
 
         return result;

@@ -136,7 +136,10 @@ export function serverOpener(state, server, settled) {
 
   const title = el('div', 'server-title');
   title.append(dot);
-  title.append(el('span', 'server-name', server.name));
+  const name = el('span', 'server-name', server.name);
+  // Badges share the line, and a narrow window ellipsizes the name first.
+  name.title = server.name;
+  title.append(name);
   // One row, several files, and they do not agree. The row has to print one
   // command and cannot print all of them, so it says that the one on screen is
   // not the whole story — the detail sheet has room for the rest.
@@ -154,8 +157,17 @@ export function serverOpener(state, server, settled) {
       'The tools this server offers, or what it says about them, changed since the last check. Open it to review.';
     title.append(badge);
   }
-  if (server.isBundled) title.append(el('span', 'badge', 'extension'));
-  if (server.transport !== 'stdio') title.append(el('span', 'badge', server.transport));
+  // Titled because a narrow row can cut a badge down to a stub.
+  if (server.isBundled) {
+    const badge = el('span', 'badge', 'extension');
+    badge.title = 'Installed Claude Desktop extension';
+    title.append(badge);
+  }
+  if (server.transport !== 'stdio') {
+    const badge = el('span', 'badge', server.transport);
+    badge.title = `Remote server over ${server.transport}`;
+    title.append(badge);
+  }
   if (server.health?.toolCount != null) {
     const count = server.health.toolCount;
     title.append(el('span', 'tool-count', `${count} ${count === 1 ? 'tool' : 'tools'}`));

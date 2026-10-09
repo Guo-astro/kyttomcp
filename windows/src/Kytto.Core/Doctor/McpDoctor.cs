@@ -72,12 +72,12 @@ public static class McpDoctor
             var active = servers
                 .Where(server =>
                     server.EnabledIn.GetValueOrDefault(clientId) == Enablement.Enabled &&
-                    server.Health?.Tools is { Count: > 0 })
+                    server.KnownTools.Count > 0)
                 .ToArray();
             if (active.Length <= 1) continue;
 
             var shadowed = ToolSafetyScanner.ShadowedNames(
-                active.Select(server => (server.Name, server.Health!.Tools)));
+                active.Select(server => (server.Name, server.KnownTools)));
             if (shadowed.Count == 0) continue;
 
             foreach (var server in active)
@@ -189,8 +189,9 @@ public static class McpDoctor
         // What the model was handed, as opposed to what the process did. A server can
         // start cleanly, answer `tools/list` correctly and still have shipped an
         // instruction in a description — every other check in this file would call
-        // that healthy (§7.10).
-        findings.AddRange(ToolSafetyScanner.Scan(health.Tools).Select(Finding));
+        // that healthy (§7.10). The last passing contract, not this check's: a failed
+        // check lists no tools, and failing must not be a way to make a finding go away.
+        findings.AddRange(ToolSafetyScanner.Scan(server.KnownTools).Select(Finding));
 
         if (health.Status == HealthStatus.Passed &&
             server.Command?.Trim() is { Length: > 0 } configured &&

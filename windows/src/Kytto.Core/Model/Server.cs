@@ -220,6 +220,18 @@ public sealed class Server
     /// </remarks>
     public HealthResult? Health { get; set; }
 
+    /// <summary>The tools from the last passing check, kept through later failures.</summary>
+    public IReadOnlyList<ToolSummary>? LastPassingTools { get; set; }
+
+    /// <summary>What the server offers as far as Kytto knows.</summary>
+    /// <remarks>
+    /// <c>Health.Tools</c> is empty after a failed check, yet clients keep running
+    /// the server with what it last offered. The safety scan and tool-name collisions
+    /// read this so a failing check cannot hide a finding (§7.10).
+    /// </remarks>
+    public IReadOnlyList<ToolSummary> KnownTools =>
+        Health is { Status: HealthStatus.Passed } health ? health.Tools : LastPassingTools ?? [];
+
     /// <summary>The last token measurement (§7.4).</summary>
     public TokenWeight? TokenWeight { get; set; }
 

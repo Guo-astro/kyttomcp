@@ -159,65 +159,148 @@ public sealed class MetadataStore(KyttoPaths paths)
     /// <summary>Records one check and advances Contract Guard only on success (§7.10).</summary>
     public void Record(string serverId, HealthResult health, TokenWeight? tokenWeight)
     {
-        Update(serverId, existing =>
+        Mutate(entries =>
         {
+            var existing = entries.GetValueOrDefault(serverId) ?? new ServerMetadata();
+            // Two checks of one server can finish out of order (a single check and
+            // "Check all"). The one that started later describes the server better.
+            if (existing.Health is { } previous && previous.CheckedAt > health.CheckedAt) return false;
+
             var updated = existing;
             if (health.Status == HealthStatus.Passed)
             {
                 var baseline = existing.ContractTools ??
                     (existing.Health?.Status == HealthStatus.Passed ? existing.Health.Tools : null);
-                var changes = baseline is null
-                    ? null
-                    : ContractGuard.Changes(baseline, health.Tools);
-                updated = updated with
+                if (baseline is not null)
                 {
-                    ContractTools = health.Tools,
-                    ContractChanges = changes,
-                    ContractChangedAt = changes is { Count: > 0 } ? health.CheckedAt : null,
-                };
+                    // Every check is measured against the contract the user last
+                    // reviewed, so changes add up until they are acknowledged. Only
+                    // AcknowledgeContract moves the baseline (§7.10); a check that
+                    // moved it would let an unreviewed change vanish on the next run.
+                    var changes = ContractGuard.Changes(baseline, health.Tools);
+                    var wasPending = existing.ContractChanges is { Count: > 0 };
+                    updated = updated with
+                    {
+                        ContractTools = baseline,
+                        ContractChanges = changes,
+                        // A repeat check is not a new change: keep when it was first seen.
+                        ContractChangedAt = changes.Count == 0
+                            ? null
+                            : (wasPending ? existing.ContractChangedAt : null) ?? health.CheckedAt,
+                    };
+                }
+                else
+                {
+                    updated = updated with { ContractTools = health.Tools };
+                }
+                updated = updated with { LastPassingTools = health.Tools };
             }
-            return updated with
+            entries[serverId] = updated with
             {
                 Health = health,
                 // A failed check says nothing new about weight; retain the last
                 // successful measurement rather than making it disappear.
                 TokenWeight = tokenWeight ?? existing.TokenWeight,
             };
+            return true;
         });
     }
 
-    /// <summary>Marks a Contract Guard alert read, and rebaselines on what is there now.</summary>
+    /// <summary>Marks the current tool contract as reviewed (§7.10).</summary>
     /// <remarks>
-    /// Without this an alert cannot end. <c>ContractChanges</c> is rewritten only by a
-    /// check that finds something <em>different</em>, so a change already reviewed and
-    /// accepted goes on being reported until the server happens to change again — and
-    /// an alert that never clears is one nobody reads the second time. Acknowledging
-    /// clears the changes and keeps the tools, so accepting a contract is a statement
-    /// about that contract rather than a dismissal.
+    /// This and the first passing check are the only things that move the baseline.
+    /// Every check compares against <c>ContractTools</c>, so a change keeps being
+    /// reported until it is reviewed here (or the server reverts it). Acknowledging
+    /// makes the last passing contract — the one shown in the diff — the new
+    /// baseline, and the next real change is measured against it.
     /// </remarks>
     public void AcknowledgeContract(string serverId)
     {
-        if (For(serverId)?.ContractChanges is not { Count: > 0 }) return;
-        Update(serverId, existing => existing with
+        Mutate(entries =>
         {
-            ContractChanges = null,
-            ContractChangedAt = null,
-            ContractTools = existing.Health is { Status: HealthStatus.Passed } health
-                ? health.Tools
-                : existing.ContractTools,
+            if (entries.GetValueOrDefault(serverId) is not { ContractChanges.Count: > 0 } existing)
+                return false;
+            entries[serverId] = existing with
+            {
+                ContractChanges = null,
+                ContractChangedAt = null,
+                // The last passing contract, not the last check: a check that failed
+                // after the diff was shown must not leave the old baseline in place.
+                ContractTools = existing.KnownTools,
+            };
+            return true;
         });
     }
 
-    public void Update(string serverId, Func<ServerMetadata, ServerMetadata> change)
+    /// <summary>Carries everything remembered about a server to its new name.</summary>
+    /// <remarks>
+    /// Metadata is keyed by name, so without this a rename would drop the Contract
+    /// Guard baseline and any unreviewed alert — the next check under the new name
+    /// would adopt whatever the server now says — and leave the old entry for a later
+    /// server that reuses the name.
+    /// </remarks>
+    public void Rename(string fromId, string toId)
+    {
+        if (string.Equals(fromId, toId, StringComparison.Ordinal)) return;
+        Mutate(entries =>
+        {
+            if (!entries.Remove(fromId, out var entry)) return false;
+            entries[toId] = entry;
+            return true;
+        });
+    }
+
+    /// <summary>Drops everything remembered about a deleted server.</summary>
+    /// <remarks>So a later server reusing the name does not inherit a stale red dot.</remarks>
+    public void Forget(string serverId) =>
+        Mutate(entries => entries.Remove(serverId));
+
+    public void Update(string serverId, Func<ServerMetadata, ServerMetadata> change) =>
+        Mutate(entries =>
+        {
+            entries[serverId] = change(entries.GetValueOrDefault(serverId) ?? new ServerMetadata());
+            return true;
+        });
+
+    /// <summary>Applies <paramref name="change"/> and saves if it reports a change.</summary>
+    private void Mutate(Func<Dictionary<string, ServerMetadata>, bool> change)
     {
         lock (_lock)
         {
-            var entries = new Dictionary<string, ServerMetadata>(_cached ??= Load());
-            entries[serverId] = change(entries.GetValueOrDefault(serverId) ?? new ServerMetadata());
-            _cached = entries;
+            var entries = new Dictionary<string, ServerMetadata>(LoadForMutation());
+            if (!change(entries)) return;
 
             KyttoStorage.EnsurePrivateRoot(paths);
             AtomicWriter.Write(JsonSerializer.Serialize(entries, Options), paths.MetadataFile);
+            _cached = entries;
+        }
+    }
+
+    /// <summary>
+    /// A malformed store is not an empty store (as in <see cref="ParkStore"/>).
+    /// </summary>
+    /// <remarks>
+    /// Reading screens may show nothing, but a write must stop rather than replace
+    /// every server's Contract Guard baseline and pending alert with an empty file.
+    /// Read from disk rather than the cache, so a store that became readable again
+    /// is not overwritten with what an earlier failed read made of it.
+    /// </remarks>
+    private Dictionary<string, ServerMetadata> LoadForMutation()
+    {
+        if (!File.Exists(paths.MetadataFile)) return [];
+        try
+        {
+            var text = File.ReadAllText(paths.MetadataFile);
+            return JsonSerializer.Deserialize<Dictionary<string, ServerMetadata>>(text, Options) ?? [];
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            throw new InvalidDataException(
+                $"Kytto could not read its own measurements file ({Path.GetFileName(paths.MetadataFile)}), " +
+                "so it left it untouched instead of overwriting it. Move the file out of Kytto's " +
+                "data folder to start fresh.",
+                error);
         }
     }
 

@@ -105,6 +105,26 @@ public sealed class JsonNode
 
     public JsonNode? this[string key] => Member(key)?.Value;
 
+    /// <summary>
+    /// Last member with this key — how the clients' own JSON parsers resolve a
+    /// duplicate.
+    /// </summary>
+    /// <remarks>
+    /// Used where Kytto must read what the <em>model</em> will be shown (a tool's
+    /// name, description, schema), so a second <c>"description"</c> cannot hide
+    /// behind a harmless first one. Config parsing keeps <see cref="Member"/>, which
+    /// surfaces duplicates instead of resolving them.
+    /// </remarks>
+    public JsonNode? LastValue(string key)
+    {
+        if (Members is not { } members) return null;
+        for (var index = members.Count - 1; index >= 0; index--)
+        {
+            if (string.Equals(members[index].Key, key, StringComparison.Ordinal)) return members[index].Value;
+        }
+        return null;
+    }
+
     /// <summary>Walks a chain of object keys, e.g. <c>["mcpServers", "github"]</c>.</summary>
     public JsonNode? ValueAt(params string[] path)
     {

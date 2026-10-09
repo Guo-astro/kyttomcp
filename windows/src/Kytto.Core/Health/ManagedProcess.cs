@@ -47,7 +47,19 @@ public sealed class ManagedProcess : IDisposable
     private readonly IntPtr _job;
     private readonly StringBuilder _stderr = new();
     private readonly Lock _stderrLock = new();
+    private readonly StringBuilder _stdout = new();
+    private readonly char[] _chunk = new char[64 * 1024];
+    private Task<int>? _pendingRead;
+    private int _scannedTo;
+    private bool _stdoutClosed;
     private bool _disposed;
+
+    /// <summary>The longest stdout line accepted, in characters.</summary>
+    /// <remarks>
+    /// stderr is capped; stdout cannot be truncated without breaking the message,
+    /// so a line this long ends the check instead of growing without bound.
+    /// </remarks>
+    internal const int MaxLineChars = 32 * 1_048_576;
 
     public string ResolvedExecutable { get; }
 
@@ -137,18 +149,55 @@ public sealed class ManagedProcess : IDisposable
     /// </summary>
     public string? ReadLine(DateTimeOffset deadline)
     {
-        var remaining = deadline - DateTimeOffset.UtcNow;
-        if (remaining <= TimeSpan.Zero) throw ProcessException.TimedOut(_timeoutSeconds);
-
-        // The read is left running rather than cancelled: a pipe read that is
-        // abandoned mid-line would desynchronise the stream, and the process is
-        // about to be killed by the job object anyway.
-        var read = _process.StandardOutput.ReadLineAsync();
-        if (!read.Wait(remaining))
+        while (true)
         {
-            throw ProcessException.TimedOut(_timeoutSeconds);
+            if (TakeBufferedLine() is { } line) return line;
+            if (_stdoutClosed)
+            {
+                if (_stdout.Length == 0) return null;
+                var rest = _stdout.ToString();
+                _stdout.Clear();
+                _scannedTo = 0;
+                return rest;
+            }
+            if (_stdout.Length > MaxLineChars)
+            {
+                throw new ProcessException(HealthFailureReason.ProtocolError(
+                    $"the server wrote more than {MaxLineChars / 1_048_576} MB without ending a message"));
+            }
+
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) throw ProcessException.TimedOut(_timeoutSeconds);
+
+            // The read is left running rather than cancelled: a pipe read that is
+            // abandoned mid-chunk would desynchronise the stream, and the process is
+            // about to be killed by the job object anyway. The next call picks it up.
+            _pendingRead ??= _process.StandardOutput.ReadAsync(_chunk, 0, _chunk.Length);
+            if (!_pendingRead.Wait(remaining))
+            {
+                throw ProcessException.TimedOut(_timeoutSeconds);
+            }
+            var count = _pendingRead.Result;
+            _pendingRead = null;
+            if (count == 0) _stdoutClosed = true;
+            else _stdout.Append(_chunk, 0, count);
         }
-        return read.Result;
+    }
+
+    /// <summary>One complete line from what has been read, without its terminator.</summary>
+    private string? TakeBufferedLine()
+    {
+        for (var index = _scannedTo; index < _stdout.Length; index++)
+        {
+            if (_stdout[index] != '\n') continue;
+            var end = index > 0 && _stdout[index - 1] == '\r' ? index - 1 : index;
+            var line = _stdout.ToString(0, end);
+            _stdout.Remove(0, index + 1);
+            _scannedTo = 0;
+            return line;
+        }
+        _scannedTo = _stdout.Length;
+        return null;
     }
 
     public bool HasExited

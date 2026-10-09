@@ -85,11 +85,12 @@ public sealed class McpStdioClient
             process.WriteLine("""{"jsonrpc":"2.0","method":"notifications/initialized"}""");
             process.WriteLine("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""");
             var tools = ReadResponse(2, process, deadline);
+            var notes = new List<string>();
+            var pages = MorePages(tools, process, deadline, notes);
 
             var capabilityNames = initialize.ValueAt("result", "capabilities")?.Keys
                 .Order(StringComparer.Ordinal)
                 .ToArray() ?? [];
-            var notes = new List<string>();
             var promptCount = capabilityNames.Contains("prompts", StringComparer.Ordinal)
                 ? ReadOptionalCount("prompts", 3, process, deadline, notes)
                 : null;
@@ -99,7 +100,7 @@ public sealed class McpStdioClient
 
             return (MakeListing(
                 initialize,
-                tools,
+                pages,
                 capabilityNames,
                 promptCount,
                 resourceCount,
@@ -113,6 +114,59 @@ public sealed class McpStdioClient
             throw new HealthFailure(error, process.CapturedStderr, process.ResolvedExecutable);
         }
     }
+
+    /// <summary>Pages <c>tools/list</c> until the server stops returning a cursor.</summary>
+    /// <remarks>
+    /// Unlike prompts and resources, the tool list is what everything else is
+    /// measured on — token weight, the safety scan, Contract Guard — so stopping at
+    /// the first page would make all of them blind to the rest. A page that cannot be
+    /// fetched ends the walk with a note rather than failing a server that did answer.
+    /// </remarks>
+    private static IReadOnlyList<JsonDocument> MorePages(
+        JsonDocument first,
+        ManagedProcess process,
+        DateTimeOffset deadline,
+        ICollection<string> notes)
+    {
+        var pages = new List<JsonDocument> { first };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (pages[^1].ValueAt("result", "nextCursor")?.StringValue is { } cursor)
+        {
+            if (!seen.Add(cursor) || pages.Count >= MaxToolPages)
+            {
+                notes.Add($"Tool count shows the first {pages.Count} pages; the server kept offering more.");
+                break;
+            }
+            var id = 100 + pages.Count;
+            try
+            {
+                process.WriteLine(JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id,
+                    method = "tools/list",
+                    @params = new { cursor },
+                }));
+                var page = ReadResponse(id, process, deadline);
+                if (page.ValueAt("result", "tools")?.Elements is null)
+                {
+                    notes.Add(
+                        $"tools/list page {pages.Count + 1} did not return a tools array; " +
+                        $"counts cover the first {pages.Count}.");
+                    break;
+                }
+                pages.Add(page);
+            }
+            catch (Exception error) when (error is McpException or ProcessException)
+            {
+                notes.Add($"Tool count shows the first {pages.Count} pages; the next could not be read.");
+                break;
+            }
+        }
+        return pages;
+    }
+
+    private const int MaxToolPages = 50;
 
     private static int? ReadOptionalCount(
         string kind,
@@ -220,18 +274,23 @@ public sealed class McpStdioClient
 
     private static ToolListing MakeListing(
         JsonDocument initialize,
-        JsonDocument tools,
+        IReadOnlyList<JsonDocument> pages,
         IReadOnlyList<string> capabilityNames,
         int? promptCount,
         int? resourceCount,
         IReadOnlyList<string> notes,
         string resolvedCommand)
     {
+        var tools = pages[0];
         var node = tools.ValueAt("result", "tools");
-        if (node?.Elements is not { } elements)
+        if (node?.Elements is null)
         {
             throw McpException.Protocol("tools/list did not return a tools array");
         }
+        var entries = pages
+            .SelectMany(page => (page.ValueAt("result", "tools")?.Elements ?? [])
+                .Select(tool => (Page: page, Tool: tool)))
+            .ToArray();
 
         // Measured on each tool's verbatim entry rather than on a re-serialization
         // of Kytto's model, for the same reason `RawToolsJson` is kept: the cost is
@@ -240,22 +299,32 @@ public sealed class McpStdioClient
         // weight — the brackets and separators between them belong to no single
         // tool.
         var tokenizer = BpeTokenizer.Cl100kBase;
-        var summaries = elements
-            .Select(tool => new ToolSummary(
-                tool["name"]?.StringValue ?? "(unnamed)",
-                tool["description"]?.StringValue,
-                tool["inputSchema"] is { } schema ? tools.Slice(schema.Span) : "{}",
-                new ToolAnnotations(
-                    tool.ValueAt("annotations", "readOnlyHint")?.BoolValue,
-                    tool.ValueAt("annotations", "destructiveHint")?.BoolValue,
-                    tool.ValueAt("annotations", "idempotentHint")?.BoolValue,
-                    tool.ValueAt("annotations", "openWorldHint")?.BoolValue),
-                tokenizer?.CountTokens(tools.Slice(tool.Span))))
+        var summaries = entries
+            .Select(entry =>
+            {
+                // Last-wins, as the client that hands these to the model reads them.
+                var tool = entry.Tool;
+                var annotations = tool.LastValue("annotations");
+                return new ToolSummary(
+                    tool.LastValue("name")?.StringValue ?? "(unnamed)",
+                    tool.LastValue("description")?.StringValue,
+                    tool.LastValue("inputSchema") is { } schema ? entry.Page.Slice(schema.Span) : "{}",
+                    new ToolAnnotations(
+                        annotations?.LastValue("readOnlyHint")?.BoolValue,
+                        annotations?.LastValue("destructiveHint")?.BoolValue,
+                        annotations?.LastValue("idempotentHint")?.BoolValue,
+                        annotations?.LastValue("openWorldHint")?.BoolValue),
+                    tokenizer?.CountTokens(entry.Page.Slice(tool.Span)));
+            })
             .ToArray();
 
         return new ToolListing(
             Tools: summaries,
-            RawToolsJson: tools.Slice(node.Span),
+            // One page: the exact bytes. Several: the entries as sent, in one array,
+            // which is what a client that pages hands the model.
+            RawToolsJson: pages.Count == 1
+                ? tools.Slice(node.Span)
+                : "[" + string.Join(",", entries.Select(entry => entry.Page.Slice(entry.Tool.Span))) + "]",
             ServerName: initialize.ValueAt("result", "serverInfo", "name")?.StringValue,
             ServerVersion: initialize.ValueAt("result", "serverInfo", "version")?.StringValue,
             NegotiatedProtocolVersion: initialize.ValueAt("result", "protocolVersion")?.StringValue,

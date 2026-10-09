@@ -7,6 +7,7 @@ using Kytto.Core.Clients;
 using Kytto.Core.Json;
 using Kytto.Core.Model;
 using Kytto.Core.Settings;
+using Kytto.Core.Toml;
 
 namespace Kytto.Core.Secrets;
 
@@ -71,13 +72,18 @@ public sealed record SecretRecord(
 /// Kytto staying installed. The honest version is this: Kytto is where you manage
 /// the value, the file still holds it, and Kytto tells you exactly where "it" is.
 /// </remarks>
+/// <param name="parkStore">
+/// Where switched-off copies live. Without it, a secret held only in a parked copy
+/// is refused rather than written into the file (§7.12).
+/// </param>
 public sealed class SecretsService(
     string home,
     ConfigWriter writer,
     DigestLedger ledger,
     ISecretStore store,
     IReadOnlyList<ClientDescriptor>? descriptors = null,
-    IReadOnlyDictionary<string, string>? pathOverrides = null)
+    IReadOnlyDictionary<string, string>? pathOverrides = null,
+    ParkStore? parkStore = null)
 {
     private readonly ClientPathResolver _resolver = new(home, pathOverrides);
     private readonly IReadOnlyList<ClientDescriptor> _descriptors = descriptors ?? ClientRegistry.All;
@@ -185,6 +191,11 @@ public sealed class SecretsService(
 
         var updated = new List<SecretUsage>();
         var prepared = new List<(PreparedConfigWrite Write, string Path, IReadOnlyList<SecretUsage> Usages)>();
+        // Copies switched off in a presence-only client are not in the file. Writing
+        // the value there would put a half-definition back — a server switched on
+        // with nothing but an `env` — so they are found here and changed where they
+        // live.
+        var parkedUsages = new List<SecretUsage>();
 
         // Grouped per file, so a config holding the same token for two servers is
         // opened, backed up and written once rather than twice.
@@ -211,10 +222,15 @@ public sealed class SecretsService(
                         var text = document.SourceText;
                         foreach (var usage in usages)
                         {
-                            text = JsonDocument.Parse(text).SettingMember(
-                                record.Key,
-                                [source.ServersKey, usage.ServerName, "env"],
-                                JsonText.String(newValue));
+                            var current = JsonDocument.Parse(text);
+                            // The spelling this file uses, which need not be the row's.
+                            if (current.ServerKey(usage.ServerID, source.ServersKey) is not { } name)
+                            {
+                                parkedUsages.Add(usage);
+                                continue;
+                            }
+                            text = ReplacingEnvironmentValue(
+                                current, [source.ServersKey, name], record.Key, newValue);
                             actuallyUpdated.Add(usage);
                         }
                         return text;
@@ -229,7 +245,10 @@ public sealed class SecretsService(
                         {
                             var current = Toml.TomlDocument.Parse(text);
                             var pair = EnvironmentPair(
-                                current, source.ServersKey, usage.ServerName, record.Key);
+                                current,
+                                source.ServersKey,
+                                current.ServerName(usage.ServerID, source.ServersKey) ?? usage.ServerName,
+                                record.Key);
                             if (pair is null) continue;
                             text = current.Replacing(pair.Value.Span, Toml.TomlText.String(newValue));
                             actuallyUpdated.Add(usage);
@@ -239,10 +258,40 @@ public sealed class SecretsService(
             prepared.Add((write, path, actuallyUpdated));
         }
 
+        // Held copies first, keeping what each said: if one cannot be changed, or
+        // the files then fail to commit, every copy goes back the way it was.
+        var parksWritten = new List<ParkStore.Entry>();
+        try
+        {
+            foreach (var usage in parkedUsages)
+            {
+                var entry = parkStore?.Parked(usage.ClientID, usage.ServerName)
+                    ?? throw SecretsException.NotFound();
+                var text = ReplacingEnvironmentValue(JsonDocument.Parse(entry.SourceText), [], record.Key, newValue);
+                parksWritten.Add(entry);
+                parkStore.Park(entry.ClientID, entry.ServerName, text);
+                updated.Add(usage);
+            }
+        }
+        catch
+        {
+            RestoreParks(parksWritten);
+            throw;
+        }
+
         // Rotation means one value everywhere. Preparing every file before the
         // first write, then committing them together, keeps that promise if a later
         // target fails: ConfigWriter restores the earlier files byte for byte (§6).
-        var receipts = writer.Commit(prepared.Select(target => target.Write).ToArray());
+        IReadOnlyList<WriteReceipt> receipts;
+        try
+        {
+            receipts = writer.Commit(prepared.Select(target => target.Write).ToArray());
+        }
+        catch
+        {
+            RestoreParks(parksWritten);
+            throw;
+        }
         var backupIds = new List<string>();
         for (var index = 0; index < prepared.Count; index++)
         {
@@ -268,6 +317,46 @@ public sealed class SecretsService(
         }
 
         return new RotationResult(record.Key, updated, backupIds);
+    }
+
+    private void RestoreParks(IReadOnlyList<ParkStore.Entry> entries)
+    {
+        foreach (var entry in entries.Reverse())
+        {
+            try
+            {
+                parkStore?.Park(entry.ClientID, entry.ServerName, entry.SourceText);
+            }
+            catch (Exception error) when (
+                error is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                // The original error is the one worth reporting; the store refusing a
+                // second write as well leaves nothing better to do here.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Splices a new value over one environment variable of the definition at
+    /// <paramref name="path"/>, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// The variable has to be there already. Rotation changes a value it found; a
+    /// missing path means the file moved since the scan, and creating it would write
+    /// a definition nobody asked for.
+    /// </remarks>
+    private static string ReplacingEnvironmentValue(
+        JsonDocument document,
+        IReadOnlyList<string> path,
+        string key,
+        string value)
+    {
+        string[] envPath = [.. path, "env"];
+        var members = document.ValueAt(envPath)?.Members
+            ?? throw new JsonEditException(JsonEditErrorKind.PathNotFound, [.. envPath, key]);
+        var member = JsonEditor.SoleMember(key, members, envPath)
+            ?? throw new JsonEditException(JsonEditErrorKind.PathNotFound, [.. envPath, key]);
+        return document.Replacing(member.Value.Span, JsonText.String(value));
     }
 
     /// <summary>The value span for an environment key in any TOML spelling Codex accepts.</summary>
@@ -320,16 +409,21 @@ public sealed class SecretsService(
     /// would only make the file look more shared than it is.
     /// </para>
     /// </remarks>
+    /// <remarks>
+    /// Throws rather than reporting success when nothing was changed: the UI tells
+    /// the user the file is now private, and that sentence has to be true.
+    /// </remarks>
     public bool RestrictPermissions(ClientId clientId)
     {
         var source = _descriptors
-            .FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap;
-        if (source is null) return false;
+            .FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap
+            ?? throw SecretsException.NoConfigFile(clientId.Raw());
 
         var path = _resolver.ResolveServerMap(source.File, clientId);
-        if (!File.Exists(path)) return false;
+        var display = _resolver.DisplayServerMap(source.File, clientId);
+        if (!File.Exists(path)) throw SecretsException.NoConfigFile(display);
 
-        if (WindowsIdentity.GetCurrent().User is not { } self) return false;
+        if (WindowsIdentity.GetCurrent().User is not { } self) throw SecretsException.PermissionsUnchanged(display);
 
         // A DACL built from nothing rather than the file's own edited down to size.
         // Editing means enumerating what is there and removing each entry, and the
@@ -343,6 +437,10 @@ public sealed class SecretsService(
             self, FileSystemRights.FullControl, AccessControlType.Allow));
 
         new FileInfo(path).SetAccessControl(security);
+
+        // Checked, not assumed: a volume that does not keep ACLs takes the call
+        // without complaint and stays readable.
+        if (OtherAccountsWithRead(path) is not null) throw SecretsException.PermissionsUnchanged(display);
         return true;
     }
 

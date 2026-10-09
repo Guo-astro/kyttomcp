@@ -109,7 +109,7 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
     {
         if (Parse(line) is not { } message) return new ClientDecision.Forward();
 
-        switch (message["method"]?.GetValue<string>())
+        switch (StringAt(message, "method"))
         {
             case "tools/list":
                 if (RequestId(message["id"]) is { } listId)
@@ -119,7 +119,7 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
                 return new ClientDecision.Forward();
 
             case "tools/call":
-                var name = message["params"]?["name"]?.GetValue<string>();
+                var name = StringAt(message["params"], "name");
                 if (name is null || Allows(name)) return new ClientDecision.Forward();
                 // A notification has no id and therefore no reply to send. Dropping
                 // it silently is still correct: the tool is not available.
@@ -158,6 +158,12 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
     public byte[] RewriteServerLine(byte[] line)
     {
         if (Parse(line) is not { } message) return line;
+        // Only a response can answer a pending request. The server numbers its own
+        // requests (`roots/list`, `sampling/createMessage`) from its own id space,
+        // and one that happens to reuse a pending id must not use it up — the real
+        // tool list would then pass through unfiltered.
+        if (message.ContainsKey("method") ||
+            !(message.ContainsKey("result") || message.ContainsKey("error"))) return line;
         if (RequestId(message["id"]) is not { } id) return line;
 
         bool isListResponse;
@@ -168,7 +174,7 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
         if (result["tools"] is not JsonArray tools) return line;
 
         var kept = tools
-            .Where(tool => tool?["name"]?.GetValue<string>() is { } name && Allows(name))
+            .Where(tool => StringAt(tool, "name") is { } name && Allows(name))
             .Select(tool => tool!.DeepClone())
             .ToArray();
         if (kept.Length == tools.Count) return line;
@@ -177,11 +183,19 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
         return Encoding.UTF8.GetBytes(message.ToJsonString());
     }
 
+    /// <remarks>
+    /// Built member by member, last-wins, rather than with <c>JsonNode.Parse</c>:
+    /// that throws on a repeated key the first time the object is read, and the
+    /// client and server on either side resolve one by keeping the last. Reading it
+    /// the same way is what stops <c>{"name":"read_file","name":"delete_all"}</c> from
+    /// meaning one tool to the filter and another to the server.
+    /// </remarks>
     private static JsonObject? Parse(ReadOnlySpan<byte> line)
     {
         try
         {
-            return JsonNode.Parse(line.ToArray()) as JsonObject;
+            using var document = JsonDocument.Parse(line.ToArray());
+            return Build(document.RootElement) as JsonObject;
         }
         catch (JsonException)
         {
@@ -189,6 +203,36 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
             return null;
         }
     }
+
+    private static JsonNode? Build(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var json = new JsonObject();
+                foreach (var property in element.EnumerateObject()) json[property.Name] = Build(property.Value);
+                return json;
+            case JsonValueKind.Array:
+                return new JsonArray(element.EnumerateArray().Select(Build).ToArray());
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                return null;
+            default:
+                // Cloned: the document this element belongs to is disposed on return.
+                return JsonValue.Create(element.Clone());
+        }
+    }
+
+    /// <summary>A string member of an object, or null for any other shape.</summary>
+    /// <remarks>
+    /// <c>GetValue&lt;string&gt;</c> throws on a number or an object, and one odd
+    /// message from either side must not end the relay for the whole session. A
+    /// value that is not a string is treated as absent.
+    /// </remarks>
+    private static string? StringAt(JsonNode? node, string key) =>
+        node is JsonObject json && json[key] is JsonValue value && value.TryGetValue<string>(out var text)
+            ? text
+            : null;
 
     /// <summary>JSON-RPC ids are strings or numbers; booleans are neither.</summary>
     private static string? RequestId(JsonNode? value)

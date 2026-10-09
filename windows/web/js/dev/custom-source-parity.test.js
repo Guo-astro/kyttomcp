@@ -82,11 +82,16 @@ test('every successful matrix change exposes Undo and refreshes supporting state
 
 test('restart banner is an ordinary flex row that cannot cover the table viewport', async () => {
   const css = await source('css/app.css');
+  // Bounded by the window (min-height 0) and never wider than it. Vertically it
+  // may scroll as a last resort, when the bars' minimums outgrow a minimum-size
+  // window — reachable instead of clipped, and still never an overlay.
   assert.match(cssRule(css, '#content'), /min-height:\s*0/);
-  assert.match(cssRule(css, '#content'), /overflow:\s*hidden/);
-  assert.match(cssRule(css, '.table-scroll'), /min-height:\s*0/);
+  assert.match(cssRule(css, '#content'), /overflow-x:\s*hidden;[^}]*overflow-y:\s*auto/s);
+  // The matrix keeps its header and a few rows however much sits around it.
+  assert.match(cssRule(css, '.table-scroll'), /min-height:\s*calc\(50px \+ 2\.5 \* var\(--row-height\)\)/);
   assert.match(cssRule(css, '.table-scroll'), /padding-bottom:\s*12px/);
-  assert.doesNotMatch(cssRule(css, '.restart-bar'), /(?:position|order)\s*:/);
+  // In the flow, after the matrix — sticky only to #content's own bottom edge.
+  assert.doesNotMatch(css, /\.restart-bar\s*{[^}]*(?:[\s;{]order\s*:|position:\s*(?:fixed|absolute))/s);
 
   const matrix = await source('js/screens/matrix.js');
   assert.ok(

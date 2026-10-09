@@ -31,8 +31,16 @@ public static class AtomicWriter
     public static void Write(string text, string path) =>
         Write(new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text), path);
 
-    public static void Write(byte[] data, string path)
+    /// <param name="throughLinks">
+    /// Write to the file a symbolic link names rather than replacing the link. True
+    /// for a client's config, which people keep in a dotfiles folder and link into
+    /// place: replacing the link with a plain file would quietly fork their config.
+    /// False for Kytto's own storage, where a link nobody made has no business
+    /// steering a write somewhere else.
+    /// </param>
+    public static void Write(byte[] data, string path, bool throughLinks = false)
     {
+        if (throughLinks) path = ResolvingLinks(path);
         var directory = Path.GetDirectoryName(Path.GetFullPath(path));
         if (string.IsNullOrEmpty(directory))
         {
@@ -81,6 +89,29 @@ public static class AtomicWriter
             {
                 // Losing a temp file is not worth failing a write that succeeded.
             }
+        }
+    }
+
+    /// <summary>
+    /// The file <paramref name="path"/> finally names, when its last component is a
+    /// symbolic link; otherwise the path itself.
+    /// </summary>
+    /// <remarks>
+    /// A link whose target does not exist yet still resolves, so the first write
+    /// creates the target and leaves the link in place. The temporary file is then
+    /// staged beside the target, which is what keeps the replace on one volume.
+    /// </remarks>
+    public static string ResolvingLinks(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (info.LinkTarget is null) return path;
+            return info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? path;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return path;
         }
     }
 }

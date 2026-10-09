@@ -16,7 +16,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Kytto.App</RootNamespace>
     <AssemblyName>Kytto</AssemblyName>
-    <Version>1.0.7</Version>
+    <Version>1.0.7.1</Version>
     <!--
       The same drawing as the Mac's AppIcon.appiconset, rebuilt as the one file
       Windows reads it from: frames at 16/20/24/32/40/48/64/128/256 so the tray,
@@ -49,12 +49,16 @@
   <!-- The client config launches this helper directly, so keep its framework-
        dependent development output beside Kytto. The release script replaces it
        with a self-contained single-file publish for the selected architecture. -->
+  <PropertyGroup>
+    <GatewayOutputDirectory>..\Kytto.Gateway\bin\$(Configuration)\net10.0-windows</GatewayOutputDirectory>
+    <GatewayOutputDirectory Condition="'$(RuntimeIdentifier)' != ''">..\Kytto.Gateway\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)</GatewayOutputDirectory>
+  </PropertyGroup>
   <Target Name="CopyGatewayHelper" AfterTargets="Build">
     <ItemGroup>
-      <GatewayHelper Include="..\Kytto.Gateway\bin\$(Configuration)\net10.0-windows\kytto-mcp-proxy.exe" />
-      <GatewayHelper Include="..\Kytto.Gateway\bin\$(Configuration)\net10.0-windows\kytto-mcp-proxy.dll" />
-      <GatewayHelper Include="..\Kytto.Gateway\bin\$(Configuration)\net10.0-windows\kytto-mcp-proxy.deps.json" />
-      <GatewayHelper Include="..\Kytto.Gateway\bin\$(Configuration)\net10.0-windows\kytto-mcp-proxy.runtimeconfig.json" />
+      <GatewayHelper Include="$(GatewayOutputDirectory)\kytto-mcp-proxy.exe" />
+      <GatewayHelper Include="$(GatewayOutputDirectory)\kytto-mcp-proxy.dll" />
+      <GatewayHelper Include="$(GatewayOutputDirectory)\kytto-mcp-proxy.deps.json" />
+      <GatewayHelper Include="$(GatewayOutputDirectory)\kytto-mcp-proxy.runtimeconfig.json" />
     </ItemGroup>
     <Copy SourceFiles="@(GatewayHelper)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>

@@ -44,7 +44,11 @@ export function renderOnboarding(state) {
   const eyebrow = el('div', 'onboarding-eyebrow');
   eyebrow.append(el('span', 'onboarding-eyebrow-dot'), el('span', null, 'First run'));
 
-  const detected = state.clients.filter((client) => client.state !== 'notInstalled');
+  // Read-only entries are project scopes and custom sources, not clients: a
+  // long-used Claude Code alone contributes one per project. They are counted
+  // separately so "supported clients" means the applications Kytto supports.
+  const builtIn = state.clients.filter((client) => !client.isReadOnly);
+  const detected = builtIn.filter((client) => client.state !== 'notInstalled');
   const totalServers = state.servers.length;
   const customSources = state.clients.filter((client) => client.isReadOnly).length;
   const platform = state.app?.platformDisplayName ?? 'this platform';
@@ -87,7 +91,7 @@ export function renderOnboarding(state) {
   panelHeading.append(sectionLabel, foundHeading);
   panelHeader.append(
     panelHeading,
-    el('span', 'onboarding-panel-meta', `${state.clients.length} supported clients`),
+    el('span', 'onboarding-panel-meta', `${builtIn.length} supported clients`),
   );
   panel.append(panelHeader);
 

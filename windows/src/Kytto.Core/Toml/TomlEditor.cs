@@ -26,6 +26,13 @@ public enum TomlEditErrorKind
     /// planned against no longer applies.
     /// </summary>
     ValueMismatch,
+
+    /// <summary>
+    /// A field spelled in a way Kytto reads but will not splice — <c>env.KEY = …</c>
+    /// as dotted keys on the server's own table. Rewriting it would mean
+    /// re-serialising lines Kytto did not write (§6.3).
+    /// </summary>
+    UnsupportedLayout,
 }
 
 public sealed class TomlEditException(TomlEditErrorKind kind, string subject)
@@ -43,6 +50,9 @@ public sealed class TomlEditException(TomlEditErrorKind kind, string subject)
             $"{subject} is written more than once. Kytto will not guess which one counts.",
         TomlEditErrorKind.ValueMismatch =>
             $"{subject} no longer says what Kytto read there, so nothing was changed.",
+        TomlEditErrorKind.UnsupportedLayout =>
+            $"{subject} is written as a dotted key. Kytto will not rewrite that line; " +
+            "move it into its own table, then try again.",
         _ => $"\"{subject}\" is written as an inline table. Kytto will not rewrite that line.",
     };
 }
@@ -66,8 +76,10 @@ public static class TomlEditor
     /// <summary>Adds or replaces a server's definition.</summary>
     /// <param name="block">
     /// A rendered table block, headers and all, as produced by <see cref="TomlBuilder"/>.
-    /// Replacing an existing server swaps the whole block, which is what makes an
-    /// edit that drops an env var actually drop it.
+    /// Replacing an existing server swaps its tables for the block — so only for a
+    /// definition Kytto is putting there wholesale. An edit the user typed goes
+    /// through <c>SplicingToml</c> instead, which keeps every key a draft does not
+    /// describe (§6.3).
     /// </param>
     public static string SettingServer(
         this TomlDocument self,
@@ -81,12 +93,18 @@ public static class TomlEditor
             throw new TomlEditException(TomlEditErrorKind.InlineDefinition, name);
         }
 
-        var existing = self.ServerTables(name, key);
-        if (existing.Count > 0)
+        // A server's tables need not sit together — `[a]`, `[b]`, `[a.env]` is valid
+        // TOML — so they are replaced run by run. One span from the first to the
+        // last would take `[b]` with it.
+        var runs = self.ServerTableRuns(name, key);
+        if (runs.Count > 0)
         {
-            return self.Replacing(
-                new TomlSpan(self.LineStart(existing[0].Span.Start), existing[^1].Span.End),
-                block);
+            string[] own = [key, name];
+            var ownIndex = runs.FindIndex(run => run.Any(table => table.Path.SequenceEqual(own)));
+            if (ownIndex < 0) ownIndex = 0;
+            return self.Replacing(runs.Select((run, index) => index == ownIndex
+                ? (new TomlSpan(self.LineStart(run[0].Span.Start), run[^1].Span.End), block)
+                : (self.RemovalSpan(run[0], run[^1]), "")));
         }
 
         // New server. Keep it with the others if there are others, so the file
@@ -120,11 +138,128 @@ public static class TomlEditor
             throw new TomlEditException(TomlEditErrorKind.InlineDefinition, name);
         }
 
-        var tables = self.ServerTables(name, key);
-        if (tables.Count == 0) return self.SourceText;
+        // Run by run, for the reason SettingServer gives: another server's table
+        // sitting between two of this one's is not this one's to delete.
+        var runs = self.ServerTableRuns(name, key);
+        if (runs.Count == 0) return self.SourceText;
+        return self.Replacing(runs.Select(run => (self.RemovalSpan(run[0], run[^1]), "")));
+    }
 
-        var start = self.LineStart(tables[0].Span.Start);
-        var end = self.EndOfLine(tables[^1].Span.End);
+    /// <summary>
+    /// Removes one table — header, keys, and the blank lines it occupied — and
+    /// nothing under it.
+    /// </summary>
+    public static string RemovingTable(this TomlDocument self, IReadOnlyList<string> path)
+    {
+        var table = self.Table([.. path]);
+        if (table?.HeaderSpan is null) return self.SourceText;
+        return self.Replacing(self.RemovalSpan(table, table), "");
+    }
+
+    /// <summary>
+    /// Gives a server a new name by rewriting the headers of its tables and nothing
+    /// else, so every key under them survives the rename (§6.3).
+    /// </summary>
+    public static string RenamingServer(this TomlDocument self, string name, string newName, string key)
+    {
+        if (self.Table(key)?.Pair(name)?.Value.InlinePairs is not null)
+        {
+            throw new TomlEditException(TomlEditErrorKind.InlineDefinition, name);
+        }
+        var tables = self.ServerTables(name, key);
+        if (tables.Count == 0) throw new TomlEditException(TomlEditErrorKind.TableNotFound, $"{key}.{name}");
+        return self.Replacing(tables
+            .Where(table => table.HeaderSpan is not null)
+            .Select(table =>
+            {
+                var path = TomlText.Path([key, newName, .. table.Path.Skip(2)]);
+                return (table.HeaderSpan!.Value, table.IsArrayElement ? $"[[{path}]]" : $"[{path}]");
+            }));
+    }
+
+    // MARK: - Values inside one table
+
+    /// <summary>
+    /// Sets <paramref name="name"/> in the table at <paramref name="path"/> to
+    /// already-spelled TOML, adding the key after the table's last one if it is not
+    /// there.
+    /// </summary>
+    public static string SettingValue(
+        this TomlDocument self,
+        string name,
+        IReadOnlyList<string> path,
+        string rawValue)
+    {
+        var table = self.Table([.. path])
+            ?? throw new TomlEditException(TomlEditErrorKind.TableNotFound, string.Join(".", path));
+        var matches = table.Pairs.Where(pair => pair.Key.Count == 1 && pair.Key[0] == name).ToArray();
+        if (matches.Length > 1)
+        {
+            throw new TomlEditException(TomlEditErrorKind.AmbiguousValue, string.Join(".", [.. path, name]));
+        }
+        if (matches.Length == 1) return self.Replacing(matches[0].Value.Span, rawValue);
+
+        // At the end of the table's last line rather than straight after its last
+        // value, so a comment trailing that line stays on it.
+        var anchor = self.LineContentEnd(table.Span.End);
+        return self.Replacing(
+            new TomlSpan(anchor, anchor),
+            $"{self.Newline()}{TomlText.Key(name)} = {rawValue}");
+    }
+
+    /// <summary>
+    /// Removes <paramref name="name"/> from the table at <paramref name="path"/>, line
+    /// and all. A missing key is not an error — the desired end state is already true.
+    /// </summary>
+    public static string RemovingValue(this TomlDocument self, string name, IReadOnlyList<string> path)
+    {
+        var table = self.Table([.. path])
+            ?? throw new TomlEditException(TomlEditErrorKind.TableNotFound, string.Join(".", path));
+        var matches = table.Pairs.Where(pair => pair.Key.Count == 1 && pair.Key[0] == name).ToArray();
+        if (matches.Length > 1)
+        {
+            throw new TomlEditException(TomlEditErrorKind.AmbiguousValue, string.Join(".", [.. path, name]));
+        }
+        if (matches.Length == 0) return self.SourceText;
+        return self.Replacing(
+            new TomlSpan(self.LineStart(matches[0].Span.Start), self.EndOfLine(matches[0].Span.End)),
+            "");
+    }
+
+    /// <summary>
+    /// Just past the last line of the table at <paramref name="path"/>, before its
+    /// line ending: where a new table that belongs with it goes.
+    /// </summary>
+    public static int? EndOfTableContent(this TomlDocument self, IReadOnlyList<string> path) =>
+        self.Table([.. path]) is { } table ? self.LineContentEnd(table.Span.End) : null;
+
+    /// <summary>A server's tables grouped into runs that sit together in the file.</summary>
+    private static List<List<TomlTable>> ServerTableRuns(this TomlDocument self, string name, string key)
+    {
+        var own = self.ServerTables(name, key);
+        var runs = new List<List<TomlTable>>();
+        var current = new List<TomlTable>();
+        foreach (var table in self.Tables)
+        {
+            if (own.Any(candidate => ReferenceEquals(candidate, table)))
+            {
+                current.Add(table);
+            }
+            else if (current.Count > 0)
+            {
+                runs.Add(current);
+                current = [];
+            }
+        }
+        if (current.Count > 0) runs.Add(current);
+        return runs;
+    }
+
+    /// <summary>The range that makes a run of tables vanish as if never typed.</summary>
+    private static TomlSpan RemovalSpan(this TomlDocument self, TomlTable first, TomlTable last)
+    {
+        var start = self.LineStart(first.Span.Start);
+        var end = self.EndOfLine(last.Span.End);
 
         // Take the blank lines that followed it. If there were none — because it
         // was last in the file — take the blank line that preceded it instead, so
@@ -138,8 +273,7 @@ public static class TomlEditor
         {
             start = self.StartSkippingBlankLines(start);
         }
-
-        return self.Replacing(new TomlSpan(start, end), "");
+        return new TomlSpan(start, end);
     }
 
     /// <summary>
@@ -227,7 +361,20 @@ public static class TomlEditor
     private static bool EndsWithNewline(this TomlDocument self) =>
         self.SourceBytes.Length > 0 && self.SourceBytes[^1] == 0x0A;
 
-    private static string Newline(this TomlDocument self) =>
+    /// <summary>
+    /// The line ending that ends the line containing an offset, or the end of the
+    /// file — where text belonging at the end of that line goes.
+    /// </summary>
+    private static int LineContentEnd(this TomlDocument self, int offset)
+    {
+        var bytes = self.SourceBytes;
+        var index = Math.Min(offset, bytes.Length);
+        while (index < bytes.Length && bytes[index] != 0x0A) index++;
+        if (index > offset && index < bytes.Length && bytes[index - 1] == 0x0D) index--;
+        return index;
+    }
+
+    internal static string Newline(this TomlDocument self) =>
         self.SourceText.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
 
     private static string WithPreferredLineEndings(this TomlDocument self, string text)

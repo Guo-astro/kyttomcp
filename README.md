@@ -5,12 +5,12 @@
 Free and **open source** under the MIT License — the full source of both the macOS
 and the Windows app lives in this repository. Read it, build it, or send a pull request.
 
-[![Version](https://img.shields.io/badge/beta-1.0.7-blue)](https://github.com/heyitsjakub/KyttoMCP/releases)
+[![Version](https://img.shields.io/badge/beta-1.0.7.1-blue)](https://github.com/heyitsjakub/KyttoMCP/releases)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://kytto.jakubhecht.sk/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 [![Open source](https://img.shields.io/badge/open%20source-yes-brightgreen)](#source-code)
 
-[**Download Beta 1.0.7**](https://kytto.jakubhecht.sk/) · [Website](https://kytto.jakubhecht.sk/) · [Source code](#source-code) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://kytto.jakubhecht.sk/#report-bug)
+[**Download Beta 1.0.7.1**](https://kytto.jakubhecht.sk/) · [Website](https://kytto.jakubhecht.sk/) · [Source code](#source-code) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://kytto.jakubhecht.sk/#report-bug)
 
 ---
 
@@ -91,7 +91,7 @@ Custom sources are read-only and are not an additional writable client. Want ano
 
 ## Install
 
-Download Beta 1.0.7 from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from the [v1.0.7 Release](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.7).
+Download Beta 1.0.7.1 from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from the [v1.0.7.1 Release](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.7.1).
 
 ### macOS
 
@@ -109,12 +109,12 @@ Run the setup file. Microsoft Defender SmartScreen will appear for the same reas
 
 ```sh
 # macOS
-shasum -a 256 KyttoMCP-1.0.7.dmg
-# a6df1c891665c1371499fc5c52b1de1431ae2e1c87c86e3362411492f69d20cb
+shasum -a 256 KyttoMCP-1.0.7.1.dmg
+# f5409e7c8209c344fd5b0981fad0e550051a97547128a94445df0c9b04cc8f7c
 
 # Windows (PowerShell)
-Get-FileHash Kytto-Setup-win-x64-1.0.7.exe -Algorithm SHA256
-# 542ba475c207be303206df47d1087f93bcdee6a6f7964849c607ed77ba73cba3
+Get-FileHash Kytto-Setup-win-x64-1.0.7.1.exe -Algorithm SHA256
+# 5d69ed7216853a9fb14c4db0eaf9f7e1210e28b47cbc738b741d5ef17ae8521f
 ```
 
 ## Local by design

@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.Text;
 using Kytto.Core.Doctor;
+using Kytto.Core.Json;
 
 namespace Kytto.Core.Health;
 
@@ -79,7 +81,12 @@ public static class ToolSafetyScanner
         // where nobody looks.
         var text = string.Join(
             '\n',
-            new[] { tool.Name, tool.Description, tool.InputSchemaJSON }.OfType<string>());
+            new[]
+            {
+                tool.Name,
+                tool.Description,
+                tool.InputSchemaJSON is { } schema ? SchemaText(schema) : null,
+            }.OfType<string>());
 
         if (HiddenCharacter(text) is { } found)
         {
@@ -223,8 +230,86 @@ public static class ToolSafetyScanner
         "password",
     ];
 
-    private static string? Match(string text, string[] needles) =>
-        Array.Find(needles, needle => text.Contains(needle, StringComparison.OrdinalIgnoreCase));
+    private static string? Match(string text, string[] needles)
+    {
+        var haystack = NormalizedForMatching(text);
+        return Array.Find(needles, needle => haystack.Contains(needle, StringComparison.Ordinal));
+    }
+
+    /// <summary>What the model reads, not how the server spelled it.</summary>
+    /// <remarks>
+    /// Characters that do not render — a soft hyphen, a zero-width joiner — and a
+    /// line break or double space in the middle of a phrase change nothing for the
+    /// model, but would each walk a phrase past a plain substring match. Joiners are
+    /// not <em>flagged</em> (see <see cref="HiddenCharacter"/>), only ignored here.
+    /// </remarks>
+    internal static string NormalizedForMatching(string text)
+    {
+        var result = new StringBuilder(text.Length);
+        var lastWasSpace = false;
+        foreach (var rune in text.ToLowerInvariant().EnumerateRunes())
+        {
+            if (rune.Value is 0x00AD or (>= 0x200B and <= 0x200D) or 0x2060 or 0xFEFF) continue;
+            if (Rune.IsWhiteSpace(rune))
+            {
+                if (!lastWasSpace) result.Append(' ');
+                lastWasSpace = true;
+            }
+            else
+            {
+                result.Append(rune.ToString());
+                lastWasSpace = false;
+            }
+        }
+        return result.ToString();
+    }
+
+    /// <summary>
+    /// An input schema as the model reads it: property names and string values, with
+    /// JSON escapes decoded.
+    /// </summary>
+    /// <remarks>
+    /// The stored schema is the raw slice the server sent, where a zero-width space
+    /// can be written as an escape and an instruction can hide behind escapes —
+    /// invisible to a scan of the raw text, and decoded before the model sees it. If
+    /// the slice does not parse, the raw text is scanned instead.
+    /// </remarks>
+    internal static string SchemaText(string json)
+    {
+        JsonNode root;
+        try
+        {
+            root = JsonDocument.Parse(json).Root;
+        }
+        catch (JsonParseException)
+        {
+            return json;
+        }
+
+        var parts = new List<string>();
+        Walk(root);
+        return string.Join('\n', parts);
+
+        void Walk(JsonNode node)
+        {
+            if (node.Members is { } members)
+            {
+                foreach (var member in members)
+                {
+                    parts.Add(member.Key);
+                    Walk(member.Value);
+                }
+            }
+            else if (node.Elements is { } elements)
+            {
+                foreach (var element in elements) Walk(element);
+            }
+            else if (node.StringValue is { } value)
+            {
+                parts.Add(value);
+            }
+        }
+    }
 
     // MARK: - Invisible characters
 
@@ -246,8 +331,8 @@ public static class ToolSafetyScanner
             {
                 // Zero-width space, LTR/RTL marks.
                 0x200B or 0x200E or 0x200F => "zero-width or direction mark",
-                // Bidirectional overrides.
-                >= 0x202A and <= 0x202E => "bidirectional override",
+                // Bidirectional embeddings, overrides and isolates.
+                (>= 0x202A and <= 0x202E) or (>= 0x2066 and <= 0x2069) => "bidirectional control",
                 // Word joiner, invisible operators, BOM.
                 (>= 0x2060 and <= 0x2064) or 0xFEFF => "invisible formatting character",
                 >= 0xE0000 and <= 0xE007F => "Unicode tag character",

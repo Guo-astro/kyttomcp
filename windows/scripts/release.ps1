@@ -33,7 +33,11 @@ if (Test-Path -LiteralPath $dist) {
 New-Item -ItemType Directory -Path $stage | Out-Null
 
 [xml]$projectXml = [System.IO.File]::ReadAllText($project, [System.Text.Encoding]::UTF8)
-$version = [string]$projectXml.Project.PropertyGroup.Version
+$versionNode = $projectXml.SelectSingleNode('/Project/PropertyGroup/Version')
+if ($null -eq $versionNode) {
+    throw 'Kytto.App.csproj has no Version property.'
+}
+$version = $versionNode.InnerText.Trim()
 if ([string]::IsNullOrWhiteSpace($version)) {
     throw 'Kytto.App.csproj has no Version property.'
 }

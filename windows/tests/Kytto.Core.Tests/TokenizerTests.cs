@@ -89,6 +89,28 @@ public sealed class TokenizerTests
         Assert.True((double)(heuristic - measured) / measured > 0.15);
     }
 
+    /// <summary>
+    /// The merge loop is quadratic in a piece's length and a server controls that
+    /// length; unsliced, a run like this held a health check for over a minute.
+    /// </summary>
+    [Fact]
+    public void AHostileRunOfLettersIsCountedInBoundedTime()
+    {
+        var text = new string('a', 100_000);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var count = Tokenizer.CountTokens(text);
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.Elapsed}");
+        Assert.InRange(count, 1, text.Length - 1);
+    }
+
+    [Fact]
+    public void OrdinaryTextIsCountedExactlySlicingOrNot()
+    {
+        const string text = "Read the contents of a file from the allowed directories.";
+        Assert.Equal(Tokenizer.Encode(text).Count, Tokenizer.CountTokens(text));
+    }
+
     [Fact]
     public void TokenWeightReportsTheVocabularyItUsed()
     {

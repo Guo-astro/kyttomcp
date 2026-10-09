@@ -132,6 +132,8 @@ export function render(root) {
 
   const content = el('main');
   content.id = 'content';
+  // Scrolls only when the window is too short for everything in it (app.css).
+  content.dataset.scrollKey = 'content';
 
   const availableUpdate = updateBanner(state);
   if (availableUpdate) content.append(availableUpdate);
@@ -197,8 +199,14 @@ export function render(root) {
   restoreScroll(scrollBeforeRender, root);
 }
 
+// Every scroller that outlives a render carries `data-scroll-key`, and its
+// position is restored by key. A panel missing from the list (Doctor, Profiles,
+// Activity) jumped to the top on every unrelated state change, including each
+// `configs.changed` push. The sheet body keeps its own offset in the sheet.
+const SCROLLERS = '.sidebar, .table-scroll, [data-scroll-key]';
+
 export function scrollSnapshot(root) {
-  return [...root.querySelectorAll('.sidebar, .table-scroll')].map((element, index) => ({
+  return [...root.querySelectorAll(SCROLLERS)].map((element, index) => ({
     key: element.dataset.scrollKey ?? String(index),
     scrollTop: element.scrollTop,
     scrollLeft: element.scrollLeft,
@@ -207,7 +215,7 @@ export function scrollSnapshot(root) {
 
 export function restoreScroll(snapshot, root) {
   const scrollers = new Map(
-    [...root.querySelectorAll('.sidebar, .table-scroll')].map((element, index) => [
+    [...root.querySelectorAll(SCROLLERS)].map((element, index) => [
       element.dataset.scrollKey ?? String(index),
       element,
     ]),
@@ -799,6 +807,7 @@ function errorState(error) {
 
 function diagnostics(items) {
   const box = el('section', 'diagnostics');
+  box.dataset.scrollKey = 'diagnostics';
   box.append(el('h2', null, `Diagnostics (${items.length})`));
   const list = el('ul');
   for (const item of items) {

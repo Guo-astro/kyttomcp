@@ -1,7 +1,7 @@
 // Server detail (§7.5): the full command, resolved environment with secrets
 // masked, transport, per-client enablement, and the way to edit or delete.
 
-import { el, button, sheet, definitionList, formatTokens, clientIcon } from '../dom.js';
+import { el, button, busyButton, sheet, definitionList, formatTokens, clientIcon } from '../dom.js';
 
 const CLIENT_STATE_LABEL = {
   enabled: 'Enabled',
@@ -241,7 +241,7 @@ function contractSection(state, server) {
   // check that finds something *different*, so a change you have read and
   // accepted keeps being reported. Accepting makes this contract the baseline.
   section.append(
-    button('Mark as reviewed', 'acknowledge-contract', {
+    busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
       className: 'button subtle',
       dataset: { serverId: server.id },
     }),
@@ -255,7 +255,9 @@ function healthSection(state, server) {
 
   const heading = el('div', 'section-heading');
   heading.append(el('h3', null, 'Health'));
-  const busy = state.checking.has(server.id);
+  // "Check all" covers this server too; a second run racing it would overwrite
+  // the run's notice, contract report included.
+  const busy = state.checking.has(server.id) || Boolean(state.healthProgress);
   if (server.health) {
     heading.append(
       button('Copy report', 'copy-diagnostic', {
@@ -296,7 +298,7 @@ function healthSection(state, server) {
   if (server.tokenWeight) {
     pairs.push([
       'Context cost',
-      `${server.tokenWeight.isMeasured ? '' : '~'}${formatTokens(server.tokenWeight.estimate)} tokens · ${server.tokenWeight.percentOfContext.toFixed(1)}% of 200k`,
+      `${server.tokenWeight.isMeasured ? '' : '~'}${formatTokens(server.tokenWeight.estimate)} tokens · ${server.tokenWeight.percentOfContext.toFixed(1)}% of ${formatTokens(server.tokenWeight.referenceContextWindow ?? 200_000)}`,
     ]);
   }
   if (health.serverName) {
@@ -460,7 +462,7 @@ export function diagnosticReport(server, state) {
     `Transport: ${server.transport}`,
     server.command
       ? `Command: ${server.command} (${server.args.length} argument${server.args.length === 1 ? '' : 's'} omitted)`
-      : `Endpoint: ${server.url ?? '(not configured)'}`,
+      : `Endpoint: ${server.url ? urlOrigin(server.url) : '(not configured)'}`,
     `Clients: ${clients || 'none'}`,
     `Status: ${health.status}`,
     `Checked: ${new Date(health.checkedAt * 1000).toISOString()}`,
@@ -474,8 +476,9 @@ export function diagnosticReport(server, state) {
     `Executable: ${health.resolvedCommand ?? 'not resolved'}`,
     `Environment source: ${health.environmentSource ?? 'unknown'}`,
   ];
-  if (health.authorizationURL) lines.push(`Authorization page: ${health.authorizationURL}`);
-  if (health.message) lines.push(`Message: ${health.message}`);
+  if (health.authorizationURL) lines.push(`Authorization page: ${urlOrigin(health.authorizationURL)}`);
+  // The message is the server's own words and often repeats the sign-in URL.
+  if (health.message) lines.push(`Message: ${health.message.replace(/https?:\/\/[^\s"'<>)\]]+/gi, urlOrigin)}`);
   for (const note of health.inspectionNotes ?? []) lines.push(`Inspector note: ${note}`);
   lines.push('', 'Tools:');
   for (const tool of health.tools) {
@@ -484,8 +487,21 @@ export function diagnosticReport(server, state) {
     if (tool.description) lines.push(`  ${firstLine(tool.description)}`);
     if (tool.inputSchemaJSON) lines.push(`  Input schema: ${tool.inputSchemaJSON}`);
   }
-  lines.push('', 'Environment values and raw server output are omitted because they may contain secrets.');
+  lines.push('', 'Environment values, raw server output and URL paths and queries are omitted because they may contain secrets.');
   return lines.join('\n');
+}
+
+/// Scheme, host and port only. Remote MCP URLs routinely carry an API key in the
+/// query or a token in the path, and the report is made to be pasted into an
+/// issue. User info goes too. A URL that does not parse is not printed.
+export function urlOrigin(text) {
+  try {
+    const url = new URL(text);
+    const rest = url.pathname.replace(/^\/$/, '') || url.search || url.hash;
+    return `${url.protocol}//${url.host}${rest ? '/…' : ''}`;
+  } catch {
+    return '(omitted — not a parseable URL)';
+  }
 }
 
 const firstLine = (text) => text.split('\n')[0];
@@ -597,12 +613,17 @@ function clientsSection(state, server) {
     // A narrowed route is worth saying out loud: the model in this client is
     // seeing a different set of tools from the one the server offers (§7.11).
     if (route?.exposedTools) {
-      const total = server.health?.tools?.length;
+      // Counted against what the server offers now: a saved list can still name
+      // a tool the server has since dropped ("3 of 2 tools").
+      const offered = (server.health?.tools ?? []).map((tool) => tool.name);
+      const shown = offered.length
+        ? offered.filter((name) => route.exposedTools.includes(name)).length
+        : route.exposedTools.length;
       stateCell.append(
         el(
           'span',
           'badge mask-badge',
-          total ? `${route.exposedTools.length} of ${total} tools` : `${route.exposedTools.length} tools`,
+          offered.length ? `${shown} of ${offered.length} tools` : `${shown} tools`,
         ),
       );
     }
@@ -835,7 +856,7 @@ export function renderRemoveConfirm(state) {
   return sheet('Remove from client', body, [
     button('Cancel', 'close-sheet', { className: 'button subtle' }),
     el('span', 'spacer'),
-    button('Remove', 'confirm-remove-from-client', {
+    busyButton(state.sheet.busy, 'Remove', 'Removing…', 'confirm-remove-from-client', {
       className: 'button danger',
       dataset: { serverId: server.id, clientId: client.id },
     }),
@@ -884,6 +905,9 @@ export function renderDeleteConfirm(state) {
   return sheet('Delete server', body, [
     button('Cancel', 'close-sheet', { className: 'button subtle' }),
     el('span', 'spacer'),
-    button('Delete', 'confirm-delete', { className: 'button danger', dataset: { serverId: server.id } }),
+    busyButton(state.sheet.busy, 'Delete', 'Deleting…', 'confirm-delete', {
+      className: 'button danger',
+      dataset: { serverId: server.id },
+    }),
   ]);
 }

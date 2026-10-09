@@ -465,10 +465,23 @@ without a new argument (`pipx run pkg`), the finding is advice only. Pinning
 fixes the package's own version; its dependencies still resolve within their
 ranges.
 
-Contract Guard compares consecutive successful `tools/list` results. Surface
-added and removed tools plus changes to descriptions, input schemas and safety
-annotations. The compared contract is model-facing behavior and contains no
-tool-call arguments or results.
+Contract Guard compares each successful `tools/list` result against a baseline:
+the contract the user last acknowledged, or the first successful result when
+nothing has been acknowledged yet. Only those two events move the baseline; a
+check never does, so an unreviewed change keeps being reported — and further
+changes add to it — until it is acknowledged or the server reverts it. A failed
+check does not touch the contract. Surface added and removed tools plus changes
+to descriptions, input schemas and safety annotations. Input schemas are compared
+in a canonical form (object keys sorted, insignificant whitespace dropped, array
+order kept), so a server that only re-serializes a schema is not reported. The
+compared contract is model-facing behavior and contains no tool-call arguments or
+results.
+
+The scanner and tool-name collisions read the tools from the last passing check,
+not the last check: a failed check lists none, and failing must not be a way to
+make a finding go away. Tools are read the way clients read them — last-wins on
+a repeated key — and a schema is scanned decoded, so an escape cannot hide a
+phrase or an invisible character.
 
 ### 7.11 Tool masking
 

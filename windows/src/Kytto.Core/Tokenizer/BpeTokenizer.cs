@@ -139,10 +139,31 @@ public sealed partial class BpeTokenizer
         var total = 0;
         foreach (var piece in Pieces(text))
         {
-            total += _bySpan.ContainsKey(piece) ? 1 : MergeBoundaries(piece).Count - 1;
+            if (_bySpan.ContainsKey(piece))
+            {
+                total += 1;
+                continue;
+            }
+            // The merge loop is quadratic in the piece's length, and a server
+            // controls that length: one 400 KB run of letters held a health check
+            // far past its own timeout. Real text never forms pieces this long; for
+            // those that do, counting fixed slices differs from the exact answer by
+            // at most a token per slice.
+            if (piece.Length <= MaxExactPiece)
+            {
+                total += MergeBoundaries(piece).Count - 1;
+                continue;
+            }
+            for (var start = 0; start < piece.Length; start += MaxExactPiece)
+            {
+                var slice = piece[start..Math.Min(start + MaxExactPiece, piece.Length)];
+                total += _bySpan.ContainsKey(slice) ? 1 : MergeBoundaries(slice).Count - 1;
+            }
         }
         return total;
     }
+
+    internal const int MaxExactPiece = 256;
 
     /// <summary>The token ids for <paramref name="text"/>.</summary>
     /// <remarks>

@@ -175,6 +175,59 @@ public sealed class GatewayToolFilterTests
     }
 
     [Fact]
+    public void AServerRequestReusingAPendingIdDoesNotLetTheRealListThroughUnfiltered()
+    {
+        var subject = Filter();
+        subject.InspectClientLine(Json("""{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"""));
+        // The server's own request, numbered from its own id space.
+        var request = Json("""{"jsonrpc":"2.0","id":1,"method":"roots/list"}""");
+        Assert.Equal(request, subject.RewriteServerLine(request));
+
+        var response = Json(
+            """{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"read_file"},{"name":"delete_all"}]}}""");
+        Assert.Equal(["read_file"], ToolNames(Object(subject.RewriteServerLine(response))));
+    }
+
+    /// <summary>
+    /// <c>GetValue&lt;string&gt;</c> throws on a number, and the relay only survives
+    /// I/O errors — one odd message used to end the whole session.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"jsonrpc":"2.0","id":3,"method":42}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":["write_file"]}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":7}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":"write_file"}""")]
+    [InlineData("""[1,2,3]""")]
+    public void OddClientMessagesAreForwardedRatherThanThrown(string line) =>
+        Assert.IsType<GatewayToolFilter.ClientDecision.Forward>(Filter().InspectClientLine(Json(line)));
+
+    /// <summary>Read last-wins, the way the server on the other side reads it.</summary>
+    [Fact]
+    public void ARepeatedNameIsReadTheWayTheServerReadsIt()
+    {
+        var call = Json(
+            """{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","name":"write_file"}}""");
+        Assert.IsType<GatewayToolFilter.ClientDecision.Refuse>(Filter().InspectClientLine(call));
+
+        var subject = Filter();
+        subject.InspectClientLine(Json("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"""));
+        var response = Json(
+            """{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read_file","name":"delete_all"},{"name":"list_directory"}]}}""");
+        Assert.Equal(["list_directory"], ToolNames(Object(subject.RewriteServerLine(response))));
+    }
+
+    [Fact]
+    public void OddToolEntriesInAListAreDroppedRatherThanThrown()
+    {
+        var subject = Filter();
+        subject.InspectClientLine(Json("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"""));
+
+        var response = Json(
+            """{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read_file"},"write_file",{"name":5},null,[1]]}}""");
+        Assert.Equal(["read_file"], ToolNames(Object(subject.RewriteServerLine(response))));
+    }
+
+    [Fact]
     public void AnEmptyAllowListHidesEverything()
     {
         var subject = new GatewayToolFilter([]);

@@ -276,7 +276,7 @@ public sealed class GatewayMigrationService
             Name = member.Key,
             Command = _helperPath,
             Args = ["--route", routeId],
-        }.Definition(document.LineIndent(member.Value.Span.Start), unit);
+        }.Definition(document.LineIndent(member.Value.Span.Start), unit, document.Newline());
         return new DirectDefinition(
             member.Key,
             document.Slice(member.Value.Span),

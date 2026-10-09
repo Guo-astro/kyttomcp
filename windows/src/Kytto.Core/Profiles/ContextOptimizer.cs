@@ -70,7 +70,7 @@ public static class ContextOptimizer
         var owners = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var server in members)
         {
-            foreach (var tool in server.Health?.Tools ?? [])
+            foreach (var tool in server.KnownTools)
             {
                 if (!owners.TryGetValue(tool.Name, out var serverIDs))
                 {

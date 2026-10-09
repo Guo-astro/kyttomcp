@@ -70,6 +70,41 @@ public sealed class GatewayTests
     }
 
     [Fact]
+    public void AToolResultFlaggedAsAnErrorIsNotRecordedAsASuccess()
+    {
+        var sink = new MemoryGatewaySink();
+        var observer = new GatewayMessageObserver("github", "cursor", sink, "session-1");
+
+        observer.Accept(Encoding.UTF8.GetBytes(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"create_issue"}}""" + "\n"),
+            GatewayDirection.ClientToServer);
+        observer.Accept(Encoding.UTF8.GetBytes(
+            """{"jsonrpc":"2.0","id":7,"result":{"isError":true,"content":[]}}""" + "\n"),
+            GatewayDirection.ServerToClient);
+
+        var completed = Assert.Single(sink.Events, item => item.Kind == GatewayEventKind.ToolCallCompleted);
+        Assert.False(completed.Succeeded);
+        Assert.Null(completed.ErrorCode);
+    }
+
+    [Theory]
+    [InlineData("""{"jsonrpc":"2.0","id":7,"method":5}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":7,"method":"tools/call","params":[1]}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":{"x":1}}}""")]
+    [InlineData("""[{"jsonrpc":"2.0"}]""")]
+    [InlineData("""42""")]
+    public void OddMessagesDoNotThrowOutOfTheObserver(string line)
+    {
+        var sink = new MemoryGatewaySink();
+        var observer = new GatewayMessageObserver("github", "cursor", sink, "session-1");
+
+        observer.Accept(Encoding.UTF8.GetBytes(line + "\n"), GatewayDirection.ClientToServer);
+        observer.Accept(Encoding.UTF8.GetBytes(
+            """{"jsonrpc":"2.0","id":7,"error":"not an object"}""" + "\n"),
+            GatewayDirection.ServerToClient);
+    }
+
+    [Fact]
     public void JsonLinesSinkAppendsCompletePrivacySafeRecords()
     {
         using var harness = new GatewayHarness();

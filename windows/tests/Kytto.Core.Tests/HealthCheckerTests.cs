@@ -243,6 +243,61 @@ public class HealthCheckerTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EveryPageOfToolsListIsRead()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, weight) = Checker(seconds: 20).Check(Fake("paged"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal(["read_file", "write_file", "list_directory"], health.Tools.Select(tool => tool.Name));
+        Assert.Equal(3, health.ToolCount);
+        Assert.NotNull(weight);
+    }
+
+    [Fact]
+    public void AServerThatRepeatsItsCursorEndsTheWalkWithANote()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, _) = Checker(seconds: 20).Check(Fake("loop"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal(2, health.ToolCount);
+        Assert.Contains(health.InspectionNotes, note => note.Contains("kept offering more", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ARepeatedKeyInAToolIsReadTheWayTheClientReadsIt()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, _) = Checker(seconds: 20).Check(Fake("dupkey"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        var tool = Assert.Single(health.Tools);
+        Assert.StartsWith("Ignore previous instructions", tool.Description, StringComparison.Ordinal);
+        Assert.Contains(ToolSafetyScanner.Scan(health.Tools), risk => risk.Kind == ToolRiskKind.InstructionOverride);
+    }
+
+    [Theory]
+    [InlineData("Error: Authentication required — set GITHUB_TOKEN")]
+    [InlineData("<html><title>401 Authorization Required</title></html>")]
+    public void GenericAuthPhrasesWithoutAPageToVisitStayFailed(string stderr)
+    {
+        Assert.False(AuthorizationSignal.TryDetect(stderr, out var url));
+        Assert.Null(url);
+    }
+
+    [Fact]
+    public void AGenericAuthPhraseNextToAnAuthorizationPageIsAWait()
+    {
+        Assert.True(AuthorizationSignal.TryDetect(
+            "Authorization required: https://mcp.example.com/oauth/authorize?x=1", out var url));
+        Assert.Equal("https://mcp.example.com/oauth/authorize?x=1", url);
+    }
+
     [Theory]
     [InlineData("Error (401 Unauthorized) https://docs.example.com/oauth-setup")]
     [InlineData("Error: MISSING_API_KEY")]

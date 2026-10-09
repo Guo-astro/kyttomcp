@@ -355,6 +355,17 @@ public sealed class Discovery
 
             if (merged.TryGetValue(key, out var existing))
             {
+                // The file is authoritative (§5). A definition this client's config
+                // still holds — put back by hand, or never removed because the write
+                // that parked it failed — outranks Kytto's held copy, which is stale.
+                // Drawing it as off would be a lie about the file, and the held bytes
+                // are not this client's definition any more.
+                if (existing.DefinitionsByClient.TryGetValue(entry.ClientID, out var inFile) &&
+                    !inFile.IsBundled &&
+                    existing.EnabledIn.ContainsKey(entry.ClientID))
+                {
+                    continue;
+                }
                 existing.EnabledIn[entry.ClientID] = Enablement.Disabled;
                 // A parked definition is still this client's definition — it is what
                 // switching the server back on will put back, byte for byte. Leaving
@@ -395,6 +406,7 @@ public sealed class Discovery
             if (_metadata.TryGetValue(server.Id, out var metadata))
             {
                 server.Health = metadata.Health;
+                server.LastPassingTools = metadata.KnownTools;
                 server.TokenWeight = metadata.TokenWeight;
                 if (metadata.Provenance is { } provenance &&
                     string.Equals(provenance.SourceKind, server.Provenance.SourceKind, StringComparison.Ordinal) &&

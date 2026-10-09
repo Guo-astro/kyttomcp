@@ -64,7 +64,7 @@ public sealed class ServerFields
     /// <c>type</c> when the client states it, otherwise inferred. Clients disagree
     /// on whether <c>type</c> is required, and older entries predate it entirely.
     /// </summary>
-    private Transport ResolveTransport()
+    internal Transport ResolveTransport()
     {
         if (Transports.FromRaw(DeclaredType) is { } declared) return declared;
         if (Url is not { } url) return Transport.Stdio;

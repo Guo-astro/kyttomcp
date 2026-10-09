@@ -15,6 +15,29 @@ public sealed class ShellRobustnessTests : IDisposable
     private readonly string _home = Path.Combine(
         Path.GetTempPath(), "kytto-shell-tests", Guid.NewGuid().ToString("N"));
 
+    private static DiscoveredClient Client(ClientId id, bool installed, int servers, bool readOnly = false) => new(
+        id, id.Raw(), "", installed, true, "", "JSON", "", servers, "", readOnly, ConfigurationScope.Global, "");
+
+    /// <summary>
+    /// A tray client chosen in Settings and uninstalled since used to leave the tray
+    /// with nothing to act on; it falls back to the automatic choice instead.
+    /// </summary>
+    [Fact]
+    public void ATrayClientThatIsNoLongerACandidateFallsBackToTheAutomaticChoice()
+    {
+        DiscoveredClient[] clients =
+        [
+            Client(ClientId.Cursor, installed: false, servers: 9),
+            Client(ClientId.ClaudeCode, installed: true, servers: 3),
+            Client(ClientId.VsCode, installed: true, servers: 5, readOnly: true),
+        ];
+
+        Assert.Equal(ClientId.ClaudeCode, TrayController.PreferredClient("cursor", clients));
+        Assert.Equal(ClientId.ClaudeCode, TrayController.PreferredClient("vsCode", clients));
+        Assert.Equal(ClientId.ClaudeCode, TrayController.PreferredClient(null, clients));
+        Assert.Equal(ClientId.ClaudeCode, TrayController.PreferredClient("claudeCode", clients));
+    }
+
     [Theory]
     [InlineData(true, false, true)]
     [InlineData(true, true, false)]

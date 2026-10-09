@@ -164,7 +164,12 @@ img {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  /* Each panel scrolls itself, so this only ever scrolls as a last resort: at the
+     minimum window with the update banner, a notice, diagnostics and the restart
+     bar all up, the minimums below add up to more than the window, and the
+     overflow has to stay reachable rather than be clipped off the bottom. */
+  overflow-x: hidden;
+  overflow-y: auto;
   background:
     linear-gradient(
       180deg,
@@ -882,7 +887,10 @@ img {
    one, so rows stay at --row-height instead of stretching to fill the window. */
 .table-scroll {
   flex: 1 1 auto;
-  min-height: 0;
+  /* The header and two and a half rows: enough to work in, and the cut row says
+     there is more. Without a floor the banners above and the bars below took
+     everything and left one row of the matrix at the minimum window. */
+  min-height: calc(50px + 2.5 * var(--row-height));
   overflow-y: auto;
   overflow-x: auto;
   box-sizing: border-box;
@@ -1087,6 +1095,18 @@ th.col-client.idle .app-icon {
 .server-name {
   font-weight: 500;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* In a narrow window the name and its badges compete for one line. Left to flex
+   defaults the badges never shrink and the name takes the whole cut — "contract
+   changed" reduced a server to two letters. The badges give way faster and keep
+   only a stub (their tooltip carries the full text), so the name loses no more
+   than it has to. */
+.server-title > .badge {
+  flex-shrink: 4;
+  min-width: 3.5em;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1764,9 +1784,20 @@ th.col-client.idle .app-icon {
 .restart-bar {
   border-bottom: none;
   border-top: 1px solid var(--hairline);
-  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  /* The tint over an opaque base: when a minimum-size window makes #content
+     scroll, the bar sticks to its bottom edge and must not show what scrolls
+     beneath it. With room to spare it sits in place and sticky changes nothing. */
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--warn) 12%, transparent),
+      color-mix(in srgb, var(--warn) 12%, transparent)
+    ),
+    var(--bg);
   color: var(--warn);
   flex-wrap: wrap;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
 }
 
 .read-only-note {
@@ -2996,11 +3027,14 @@ th.col-client.idle .app-icon {
 /* Diagnostics ------------------------------------------------------------ */
 
 .diagnostics {
-  flex: 0 0 auto;
+  /* Gives way before the matrix does: it scrolls, so a short window keeps its
+     heading and first line and the rest is a scroll away. */
+  flex: 0 1 auto;
+  min-height: 56px;
   padding: 10px var(--gutter);
   border-top: 1px solid var(--hairline);
   background: var(--bg-raised);
-  max-height: 180px;
+  max-height: 132px;
   overflow-y: auto;
 }
 

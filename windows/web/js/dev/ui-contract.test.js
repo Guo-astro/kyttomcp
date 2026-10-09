@@ -227,3 +227,24 @@ test('committed mutations isolate list refresh failures and delegated actions su
     /root\.addEventListener\('click',[\s\S]*?try \{[\s\S]*?switch \(target\.dataset\.action\)[\s\S]*?catch \(error\)[\s\S]*?reportFailure\(error\)/,
   );
 });
+
+/// A write in flight owns its sheet until the reply lands: Esc and the backdrop
+/// used to close it, and the failure then rebuilt a phantom sheet with no kind.
+test('a busy sheet cannot be closed and its failure finds the sheet that asked', async () => {
+  const main = await readFile(path.join(webRoot, 'js', 'main.js'), 'utf8');
+  assert.match(main, /case 'close-sheet':[\s\S]*?if \(sheet\?\.busy\) break;/);
+  assert.match(main, /event\.key === 'Escape'[\s\S]*?if \(!getState\(\)\.sheet\.busy\)/);
+  assert.match(main, /function failSheetRequest\(request, error[\s\S]*?reportFailure\(error\)/);
+  // No catch block writes `busy: false` onto whatever sheet happens to be open.
+  assert.doesNotMatch(main, /setState\(\{ sheet: \{ \.\.\.getState\(\)\.sheet, busy: false, error: error\.message \} \}\)/);
+});
+
+test('writes that must not run twice are gated while they run', async () => {
+  const main = await readFile(path.join(webRoot, 'js', 'main.js'), 'utf8');
+  assert.match(main, /async function checkServer[\s\S]*?getState\(\)\.checking\.has\(serverId\) \|\| getState\(\)\.healthProgress/);
+  assert.match(main, /async function checkAll\(\) \{[\s\S]*?if \(getState\(\)\.healthProgress\) return;/);
+  assert.match(main, /async function restoreBackup[\s\S]*?if \(getState\(\)\.restoringBackupId\) return;/);
+  assert.match(main, /case 'acknowledge-contract':[\s\S]*?if \(state\.acknowledgingContract\) break;/);
+  assert.match(main, /async function confirmDelete[\s\S]*?if \(getState\(\)\.sheet\?\.busy\) return;/);
+  assert.match(main, /async function confirmRemoveFromClient[\s\S]*?if \(getState\(\)\.sheet\?\.busy\) return;/);
+});

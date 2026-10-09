@@ -113,7 +113,7 @@ export function renderLibrary(state) {
   } else if (current.candidates.length === 0) {
     body.push(el('p', 'muted', 'No supported MCP definitions or entry suggestions were found.'));
   } else {
-    body.push(candidatePicker(current));
+    body.push(candidatePicker(state, current));
     if (current.selectedCandidateID) {
       body.push(targetPicker(state, current.clientIDs ?? [], 'library-client'));
     }
@@ -140,7 +140,7 @@ export function renderLibrary(state) {
   ]);
 }
 
-function candidatePicker(current) {
+function candidatePicker(state, current) {
   const section = el('section', 'tool-preview');
   section.append(el('h3', null, 'Candidates'));
   const list = el('div', 'library-candidates');
@@ -154,7 +154,7 @@ function candidatePicker(current) {
     item.append(el('span', 'mono muted', candidate.relativeLocation));
     item.append(el('span', 'mono selectable tool-command', candidate.commandSummary));
     const clients = candidate.detectedClientIDs?.length
-      ? `Detected in ${candidate.detectedClientIDs.join(', ')}`
+      ? `Detected in ${targetNames(state, candidate.detectedClientIDs)}`
       : 'Not detected in a built-in client';
     item.append(el('span', 'field-hint', clients));
     if (candidate.warnings?.length) item.append(el('span', 'field-hint', candidate.warnings.join(' ')));

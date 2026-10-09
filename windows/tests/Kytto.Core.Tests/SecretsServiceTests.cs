@@ -302,6 +302,72 @@ public class SecretsRotationTests
         Assert.Equal(vsCodeBefore, File.ReadAllBytes(vsCodePath));
     }
 
+    /// <summary>
+    /// A token held only in a switched-off copy is not in the file. Rotating it
+    /// used to write <c>"github": { "env": { … } }</c> into the file — a server
+    /// switched back on with no command — and leave the old value in the held copy.
+    /// </summary>
+    [Fact]
+    public void RotatingASecretHeldInASwitchedOffCopyChangesTheHeldCopy()
+    {
+        using var harness = MakeHarness();
+        harness.Toggles.SetEnabled(false, harness.Server("github"), ClientId.Cursor);
+        var cursorBefore = harness.Text(@".cursor\mcp.json");
+        var servers = harness.Discover().Servers;
+        var service = new SecretsService(
+            harness.Home,
+            new ConfigWriter(harness.Backups),
+            harness.Ledger,
+            new InMemorySecretStore(),
+            parkStore: harness.ParkStore);
+        var record = Assert.Single(service.Scan(servers));
+
+        var result = service.Rotate(record.Id, "ghp_brandnewtokenvalue", servers, alsoStore: false);
+
+        Assert.Contains(result.Updated, usage => usage.ClientID == ClientId.Cursor);
+        Assert.Equal(cursorBefore, harness.Text(@".cursor\mcp.json"));
+        var held = harness.ParkStore.Parked(ClientId.Cursor, "github")!;
+        Assert.Contains("ghp_brandnewtokenvalue", held.SourceText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ghp_exampletokenvalue", held.SourceText, StringComparison.Ordinal);
+        Assert.Contains("\"command\"", held.SourceText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RotatingAHeldCopyWithoutTheParkStoreIsRefusedWithNothingWritten()
+    {
+        using var harness = MakeHarness();
+        harness.Toggles.SetEnabled(false, harness.Server("github"), ClientId.Cursor);
+        var cursorBefore = harness.Text(@".cursor\mcp.json");
+        var heldBefore = harness.ParkStore.Parked(ClientId.Cursor, "github")!.SourceText;
+        var servers = harness.Discover().Servers;
+        var service = harness.Secrets(new InMemorySecretStore());
+        var record = Assert.Single(service.Scan(servers));
+
+        Assert.Throws<SecretsException>(() =>
+            service.Rotate(record.Id, "ghp_brandnewtokenvalue", servers, alsoStore: false));
+
+        Assert.Equal(cursorBefore, harness.Text(@".cursor\mcp.json"));
+        Assert.Equal(heldBefore, harness.ParkStore.Parked(ClientId.Cursor, "github")!.SourceText);
+    }
+
+    [Fact]
+    public void RotationRefusesToCreateAnEnvironmentKeyThatIsNoLongerThere()
+    {
+        using var harness = MakeHarness();
+        var servers = harness.Discover().Servers;
+        var service = harness.Secrets(new InMemorySecretStore());
+        var record = Assert.Single(service.Scan(servers));
+        // The file moves after the scan: the key is gone.
+        var moved = harness.Text(@".cursor\mcp.json")
+            .Replace("GITHUB_PERSONAL_ACCESS_TOKEN", "OTHER_NAME", StringComparison.Ordinal);
+        harness.Write(moved, @".cursor\mcp.json");
+        harness.Discover();
+
+        Assert.ThrowsAny<Exception>(() =>
+            service.Rotate(record.Id, "ghp_brandnewtokenvalue", servers, alsoStore: false));
+        Assert.Equal(moved, harness.Text(@".cursor\mcp.json"));
+    }
+
     [Fact]
     public void StoringAnUnchangedValueDoesNotDeleteTheStoredCopy()
     {
@@ -366,11 +432,17 @@ public class SecretsExposureTests
             exposure => exposure is SecretExposure.ReadableByOthers);
     }
 
+    /// <summary>
+    /// The UI says "the file is now private" on success, so there is no success
+    /// without a file.
+    /// </summary>
     [Fact]
-    public void RestrictingAClientWithNoFileIsAQuietNo()
+    public void RestrictingAClientWithNoFileIsRefused()
     {
         using var harness = new ToggleHarness();
-        Assert.False(harness.Secrets(new InMemorySecretStore()).RestrictPermissions(ClientId.Cursor));
+        var error = Assert.Throws<SecretsException>(() =>
+            harness.Secrets(new InMemorySecretStore()).RestrictPermissions(ClientId.Cursor));
+        Assert.Contains("no configuration file", error.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

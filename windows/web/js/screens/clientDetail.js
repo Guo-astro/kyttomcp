@@ -119,7 +119,7 @@ export function renderClient(state) {
   // content pane carries them on every screen, and a client's own problem would
   // otherwise be on screen twice at once.
   const backups = state.backups.filter((entry) => entry.clientID === client.id);
-  if (!client.isReadOnly && backups.length > 0) panel.append(recentBackups(backups));
+  if (!client.isReadOnly && backups.length > 0) panel.append(recentBackups(backups, state.restoringBackupId));
 
   return panel;
 }
@@ -324,16 +324,18 @@ function behaviour(client) {
 /// The last few versions of this client's file, revertable from here. The
 /// Backups screen lists every client's; this is the one that is about to matter
 /// after a toggle went wrong.
-function recentBackups(backups) {
+function recentBackups(backups, restoringBackupId) {
   const list = el('ul', 'plain-list');
   for (const backup of backups.slice(0, 5)) {
     const item = el('li');
     item.append(el('span', null, new Date(backup.takenAt * 1000).toLocaleString()));
     item.append(el('span', 'spacer'));
-    const revert = button('Revert', 'restore-backup', {
-      className: 'button subtle',
+    const reverting = restoringBackupId === backup.id;
+    const revert = button(reverting ? 'Reverting…' : 'Revert', restoringBackupId ? 'noop' : 'restore-backup', {
+      className: reverting ? 'button subtle busy' : 'button subtle',
       dataset: { backupId: backup.id, clientId: backup.clientID },
     });
+    revert.disabled = Boolean(restoringBackupId);
     revert.title = 'Put this version back. The current file is backed up first.';
     item.append(revert);
     list.append(item);

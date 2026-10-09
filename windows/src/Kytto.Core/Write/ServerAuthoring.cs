@@ -116,11 +116,57 @@ public sealed class ServerAuthoring(
         var problems = draft.Validate(TakenNames(clients, existing), allowing: originalName);
         if (problems.Count > 0) throw AuthoringException.Invalid(problems);
 
-        // A rename is a delete plus an add, because the name is the key.
+        // A rename changes the key, and only the key.
         var renamedFrom = Server.Identity(originalName) == Server.Identity(draft.TrimmedName)
             ? null
             : originalName;
-        return Write(draft, clients, renamedFrom);
+
+        // A copy that is switched off in a presence-only client is not in that file.
+        // Writing the edit there would switch it back on while the matrix still showed
+        // it off — and the next click on "on" would then overwrite the edit with the
+        // old parked bytes. It is edited where it lives, as Unify does (§7.12).
+        var parked = clients.Where(clientId => IsParked(server, clientId)).ToArray();
+        var inFile = clients.Except(parked).ToArray();
+
+        var result = inFile.Length == 0
+            ? new AuthoringResult(draft.TrimmedName, [], new Dictionary<ClientId, string>(),
+                new Dictionary<ClientId, string>())
+            : Write(draft, inFile, renamedFrom);
+
+        var parkedUpdated = new List<ClientId>();
+        var parkedFailures = new List<ClientId>();
+        foreach (var clientId in parked)
+        {
+            var entry = parkStore.Parked(clientId, server.Name);
+            if (entry is null || FormatOf(clientId) != ConfigFormat.Json)
+            {
+                parkedFailures.Add(clientId);
+                continue;
+            }
+            try
+            {
+                parkStore.Park(
+                    clientId,
+                    renamedFrom is null ? entry.ServerName : draft.TrimmedName,
+                    draft.SplicingJson(entry.SourceText, []));
+                // The park store is keyed by identity, so a rename is a new entry and
+                // the old one has to go or the row would come back twice.
+                if (renamedFrom is not null) parkStore.Unpark(clientId, entry.ServerName);
+                parkedUpdated.Add(clientId);
+            }
+            catch (Exception error) when (
+                error is JsonEditException or JsonParseException or InvalidDataException or
+                         IOException or UnauthorizedAccessException)
+            {
+                parkedFailures.Add(clientId);
+            }
+        }
+
+        return result with
+        {
+            ParkedUpdated = [.. result.ParkedUpdated, .. parkedUpdated],
+            ParkedFailures = [.. result.ParkedFailures, .. parkedFailures],
+        };
     }
 
     // MARK: - Unify
@@ -159,7 +205,7 @@ public sealed class ServerAuthoring(
         var inFile = new List<ClientId>();
         foreach (var clientId in clients)
         {
-            if (parkStore.Parked(clientId, server.Name) is not null) parked.Add(clientId);
+            if (IsParked(server, clientId)) parked.Add(clientId);
             else inFile.Add(clientId);
         }
 
@@ -177,20 +223,23 @@ public sealed class ServerAuthoring(
             // `enabled = false` — but the store is per-client and nothing enforces
             // that, so an unexpected format is left alone rather than overwritten
             // with the wrong syntax.
-            var format = _descriptors
-                .FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap?.Format;
-            if (format != ConfigFormat.Json)
+            var entry = parkStore.Parked(clientId, server.Name);
+            if (entry is null || FormatOf(clientId) != ConfigFormat.Json)
             {
                 parkedFailures.Add(clientId);
                 continue;
             }
 
+            // Spliced into the held bytes rather than rebuilt, for the same reason a
+            // file is (§6.3): what the draft does not describe is kept.
             try
             {
-                parkStore.Park(clientId, server.Name, draft.Definition(baseIndent: "", unit: "  "));
+                parkStore.Park(clientId, entry.ServerName, draft.SplicingJson(entry.SourceText, []));
                 parkedUpdated.Add(clientId);
             }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            catch (Exception error) when (
+                error is JsonEditException or JsonParseException or InvalidDataException or
+                         IOException or UnauthorizedAccessException)
             {
                 parkedFailures.Add(clientId);
             }
@@ -234,7 +283,7 @@ public sealed class ServerAuthoring(
         var inFile = new List<ClientId>();
         foreach (var clientId in edits.Keys.OrderBy(client => client.Raw(), StringComparer.Ordinal))
         {
-            if (parkStore.Parked(clientId, server.Name) is not null) parked.Add(clientId);
+            if (IsParked(server, clientId)) parked.Add(clientId);
             else inFile.Add(clientId);
         }
 
@@ -281,9 +330,7 @@ public sealed class ServerAuthoring(
         {
             var edit = edits[clientId];
             var entry = parkStore.Parked(clientId, server.Name);
-            var format = _descriptors
-                .FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap?.Format;
-            if (entry is null || format != ConfigFormat.Json)
+            if (entry is null || FormatOf(clientId) != ConfigFormat.Json)
             {
                 parkedFailures.Add(clientId);
                 continue;
@@ -360,9 +407,12 @@ public sealed class ServerAuthoring(
             var pathDisplay = _resolver.DisplayServerMap(source.File, clientId);
             var expecting = ledger.DigestFor(path);
 
+            // The spelling this file uses, which need not be the row's.
             var prepared = source.Format == ConfigFormat.Json
                 ? writer.Prepare<JsonDocument>(path, clientId, pathDisplay, expecting,
-                    document => document.RemovingMember(server.Name, [source.ServersKey]))
+                    document => document.ServerKey(server.Id, source.ServersKey) is { } key
+                        ? document.RemovingMember(key, [source.ServersKey])
+                        : document.SourceText)
                 : writer.Prepare<TomlDocument>(path, clientId, pathDisplay, expecting,
                     document => document.RemovingServer(
                         NameOf(server, document, source.ServersKey),
@@ -435,10 +485,29 @@ public sealed class ServerAuthoring(
         string serversKey,
         string? oldName)
     {
-        var text = oldName is not null
-            ? document.RemovingMember(oldName, [serversKey])
-            : document.SourceText;
-        var current = JsonDocument.Parse(text);
+        // Already here: splice the draft into the definition the file has, under the
+        // spelling it has (§6.3).
+        if (document.ServerKey(Server.Identity(oldName ?? draft.TrimmedName), serversKey) is { } key)
+        {
+            var text = document.SourceText;
+            var name = key;
+            if (oldName is not null)
+            {
+                if (document.ServerKey(Server.Identity(draft.TrimmedName), serversKey) is not null)
+                {
+                    throw NameTaken(draft);
+                }
+                // A rename is the key and nothing else.
+                var member = JsonEditor.SoleMember(key, document.ValueAt(serversKey)?.Members ?? [], [serversKey])
+                    ?? throw new JsonEditException(JsonEditErrorKind.PathNotFound, [serversKey, key]);
+                text = document.Replacing(member.KeySpan, JsonText.String(draft.TrimmedName));
+                name = draft.TrimmedName;
+            }
+            return draft.SplicingJson(text, [serversKey, name]);
+        }
+
+        // New to this file: the definition has to be rendered.
+        var current = document;
 
         // Indent to match the siblings this will sit beside, or the map itself when
         // it is the first entry.
@@ -473,22 +542,33 @@ public sealed class ServerAuthoring(
         ConfigSource.ServerMap source,
         string? oldName)
     {
-        // A server that is switched off must stay switched off. The whole block is
-        // rewritten, so a flag nobody carried across would silently turn it back on.
-        var flagKey = (source.Enablement as EnablementStrategy.InlineFlag)?.Key;
-        var previousName = oldName ?? draft.TrimmedName;
-        var wasDisabled = flagKey is not null
-            && document.Table(source.ServersKey, previousName)?.Value(flagKey)?.BoolValue == false;
-
-        var text = oldName is not null
-            ? document.RemovingServer(oldName, source.ServersKey)
-            : document.SourceText;
-
-        return TomlDocument.Parse(text).SettingServer(
-            draft.TrimmedName,
-            source.ServersKey,
-            draft.TomlBlock(source.ServersKey, wasDisabled ? false : null));
+        // Spliced into the server's own tables, so `enabled = false` and every key a
+        // draft does not describe stay put (§6.3).
+        var key = source.ServersKey;
+        if (document.ServerName(Server.Identity(oldName ?? draft.TrimmedName), key) is { } existing)
+        {
+            var text = document.SourceText;
+            var name = existing;
+            if (oldName is not null)
+            {
+                if (document.ServerName(Server.Identity(draft.TrimmedName), key) is not null)
+                {
+                    throw NameTaken(draft);
+                }
+                text = document.RenamingServer(existing, draft.TrimmedName, key);
+                name = draft.TrimmedName;
+            }
+            return draft.SplicingToml(text, name, key);
+        }
+        return document.SettingServer(draft.TrimmedName, key, draft.TomlBlock(key, null));
     }
+
+    private static AuthoringException NameTaken(ServerDraft draft) => AuthoringException.Invalid(
+    [
+        new ServerDraft.Problem(
+            ServerDraft.ValidationError.NameTaken,
+            $"\"{draft.TrimmedName}\" already exists in one of the selected clients."),
+    ]);
 
     /// <summary>Removes a name from any client's deny list.</summary>
     /// <remarks>
@@ -561,13 +641,26 @@ public sealed class ServerAuthoring(
     /// second has to use the spelling that file actually contains.
     /// </remarks>
     private static string NameOf(Server server, TomlDocument document, string key) =>
-        document.ServerNames(key).FirstOrDefault(name => Server.Identity(name) == server.Id)
-        ?? server.Name;
+        document.ServerName(server.Id, key) ?? server.Name;
 
     /// <summary>The same, for a JSON server map.</summary>
     private static string NameOf(Server server, JsonDocument document, string key) =>
-        document.ValueAt(key)?.Keys.FirstOrDefault(name => Server.Identity(name) == server.Id)
-        ?? server.Name;
+        document.ServerKey(server.Id, key) ?? server.Name;
+
+    /// <summary>
+    /// Whether this client's copy of <paramref name="server"/> is one Kytto is
+    /// holding rather than one in the file.
+    /// </summary>
+    /// <remarks>
+    /// Both have to be true: a park the file has since overtaken — the definition put
+    /// back by hand — is stale, and the file wins.
+    /// </remarks>
+    private bool IsParked(Server server, ClientId clientId) =>
+        server.EnabledIn.GetValueOrDefault(clientId) == Enablement.Disabled &&
+        parkStore.Parked(clientId, server.Name) is not null;
+
+    private ConfigFormat? FormatOf(ClientId clientId) =>
+        _descriptors.FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap?.Format;
 
     private static IReadOnlyList<ClientId> ClientsHolding(Server server) =>
         server.EnabledIn

@@ -159,13 +159,16 @@ public sealed class GatewayMessageObserver
         using (document)
         {
             var root = document.RootElement;
+            // Every shape is checked before it is read: an odd message must not throw
+            // out of the relay that carries the whole session.
+            if (root.ValueKind != JsonValueKind.Object) return;
             if (direction == GatewayDirection.ClientToServer &&
-                root.TryGetProperty("method", out var method) && method.GetString() == "tools/call")
+                StringAt(root, "method") == "tools/call")
             {
                 var requestId = RequestID(root);
-                string? toolName = null;
-                if (root.TryGetProperty("params", out var parameters) &&
-                    parameters.TryGetProperty("name", out var name)) toolName = name.GetString();
+                var toolName = root.TryGetProperty("params", out var parameters)
+                    ? StringAt(parameters, "name")
+                    : null;
                 if (requestId is not null)
                 {
                     _pending[requestId] = new PendingCall(toolName, Stopwatch.GetTimestamp());
@@ -177,9 +180,18 @@ public sealed class GatewayMessageObserver
             if (direction != GatewayDirection.ServerToClient || root.TryGetProperty("method", out _) ||
                 RequestID(root) is not { } responseId || !_pending.Remove(responseId, out var pending)) return;
 
-            var succeeded = !root.TryGetProperty("error", out var error);
+            // A tool that ran and reported failure answers with `result.isError`,
+            // not a JSON-RPC error; it did not succeed either.
+            var hasError = root.TryGetProperty("error", out var error);
+            var reportedError = root.TryGetProperty("result", out var result) &&
+                result.ValueKind == JsonValueKind.Object &&
+                result.TryGetProperty("isError", out var isError) &&
+                isError.ValueKind == JsonValueKind.True;
+            var succeeded = !hasError && !reportedError;
             int? errorCode = null;
-            if (!succeeded && error.TryGetProperty("code", out var code) && code.TryGetInt32(out var number))
+            if (hasError && error.ValueKind == JsonValueKind.Object &&
+                error.TryGetProperty("code", out var code) &&
+                code.ValueKind == JsonValueKind.Number && code.TryGetInt32(out var number))
             {
                 errorCode = number;
             }
@@ -214,6 +226,13 @@ public sealed class GatewayMessageObserver
             succeeded,
             errorCode,
             exitCode);
+
+    private static string? StringAt(JsonElement element, string key) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty(key, out var value) &&
+        value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static string? RequestID(JsonElement root)
     {

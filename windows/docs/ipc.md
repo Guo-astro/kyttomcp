@@ -396,15 +396,16 @@ The response is the `servers.unify` shape: `AuthoringResultDTO` plus
 { "serverID": "filesystem" }
 ```
 
-Records that a Contract Guard alert has been read, and makes the current tool
-contract the baseline the next change is measured against.
+Records that a Contract Guard alert has been read, and makes the contract it
+showed the baseline the next change is measured against.
 
-Without it an alert cannot end. `contractChanges` is rewritten only by a check
-that finds something *different*, so a change already reviewed and accepted goes
-on being reported until the server happens to change again — and an alert that
-never clears is one nobody reads the second time. Acknowledging clears the
-changes and keeps the tools, so accepting a contract is a statement about that
-contract rather than a dismissal.
+This and the first passing check are the only things that move the baseline.
+Every passing check compares against it, so an unreviewed change keeps being
+reported — and later changes add to it — until it is acknowledged here or the
+server reverts it. The new baseline is the last *passing* check's tools, so
+acknowledging after a check that failed accepts what the user was shown rather
+than leaving the old baseline in place. Acknowledging a server with no alert
+changes nothing.
 
 ### `activity.list` → `GatewayActivityDTO`
 
@@ -761,6 +762,11 @@ protected access list with inheritance switched off and a single entry for the
 current account. Small, reversible, and the only hardening available while the
 value has to stay in the file.
 
+Fails rather than reporting success when nothing changed: when the client has no
+config file, or when the file is still readable by another account afterwards
+(a volume that does not keep access lists). The UI tells the user the file is now
+private, and that has to be true.
+
 ### `health.check` → `{ health, state }`
 
 ```json
@@ -768,9 +774,13 @@ value has to stay in the file.
 ```
 
 Runs the server, does the MCP handshake, calls `tools/list`, and records what
-came back. When the server advertises prompts or resources, the same inspection
-also requests their first page. Takes up to ten seconds; the native side runs it
-off the main thread.
+came back. A paginated tool list is followed through `nextCursor` within the same
+deadline; a page that cannot be read ends the walk with an inspection note rather
+than failing the check. When the server advertises prompts or resources, the same
+inspection also requests their first page. Takes up to ten seconds; the native
+side runs it off the main thread. A result whose server was deleted or renamed
+meanwhile is returned but not recorded, and a check that started before the one
+already stored does not replace it.
 
 Only ever on request (§6). Nothing is checked on launch or in the background.
 

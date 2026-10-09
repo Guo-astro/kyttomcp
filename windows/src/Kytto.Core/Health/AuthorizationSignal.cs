@@ -7,15 +7,26 @@ namespace Kytto.Core.Health;
 /// </remarks>
 public static class AuthorizationSignal
 {
+    /// <summary>Phrases only a server waiting on a browser round trip prints.</summary>
     private static readonly string[] Markers =
     [
         "please authorize",
         "waiting for authorization",
+        "authorization_pending",
+        "browser opened automatically",
+    ];
+
+    /// <summary>Phrases that also open ordinary failures.</summary>
+    /// <remarks>
+    /// "Authentication required: set GITHUB_TOKEN", an nginx "401 Authorization
+    /// Required" page. They count only next to an authorization URL to visit, which a
+    /// missing API key does not print.
+    /// </remarks>
+    private static readonly string[] WeakMarkers =
+    [
         "authorization required",
         "authorization needed",
         "authentication required",
-        "authorization_pending",
-        "browser opened automatically",
     ];
 
     private static readonly char[] CandidateTerminators = ['"', '\'', '<', '>', '`', ')', ']', '}'];
@@ -27,9 +38,11 @@ public static class AuthorizationSignal
     public static bool TryDetect(string? stderr, out string? authorizationURL)
     {
         authorizationURL = null;
-        if (string.IsNullOrEmpty(stderr) || !ContainsMarker(stderr)) return false;
+        if (string.IsNullOrEmpty(stderr)) return false;
 
-        authorizationURL = ExtractURL(stderr);
+        var url = ExtractURL(stderr);
+        if (!Contains(stderr, Markers) && !(url is not null && Contains(stderr, WeakMarkers))) return false;
+        authorizationURL = url;
         return true;
     }
 
@@ -76,5 +89,8 @@ public static class AuthorizationSignal
     }
 
     private static bool ContainsMarker(string value) =>
-        Markers.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
+        Contains(value, Markers) || Contains(value, WeakMarkers);
+
+    private static bool Contains(string value, string[] markers) =>
+        markers.Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
 }

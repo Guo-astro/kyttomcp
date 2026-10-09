@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.IO;
 using System.Windows;
+using Kytto.Core;
 using Kytto.Core.Clients;
 using Kytto.Core.Model;
 using Kytto.Core.Settings;
@@ -174,17 +175,32 @@ internal sealed class TrayController : IDisposable
     /// The client the tray acts on: the user's choice, or the one carrying the most
     /// servers, recomputed as things change.
     /// </summary>
-    private ClientId? PreferredClient()
+    /// <remarks>
+    /// Only an installed, writable client is a candidate: a read-only source would
+    /// offer toggles that can only ever fail. A saved choice that is no longer a
+    /// candidate — uninstalled since, or read-only — falls back to the automatic
+    /// guess rather than leaving the tray with no client at all.
+    /// </remarks>
+    internal static ClientId? PreferredClient(string? savedChoice, IReadOnlyList<DiscoveredClient> clients)
     {
-        if (ClientIds.FromRaw(_model.Settings.TrayClient) is { } chosen) return chosen;
+        var candidates = clients
+            .Where(client => client.IsInstalled && !client.IsReadOnly && client.Id.BuiltIn is not null)
+            .ToArray();
+        if (ClientIds.FromRaw(savedChoice) is { } chosen &&
+            candidates.Any(client => client.Id.BuiltIn == chosen))
+        {
+            return chosen;
+        }
 
-        var state = _model.Current();
-        return state.Clients
-            .Where(client => client.ServerCount > 0 && client.Id.BuiltIn is not null)
+        return candidates
+            .Where(client => client.ServerCount > 0)
             .OrderByDescending(client => client.ServerCount)
             .Select(client => client.Id.BuiltIn)
             .FirstOrDefault();
     }
+
+    private ClientId? PreferredClient() =>
+        PreferredClient(_model.Settings.TrayClient, _model.Current().Clients);
 
     private string Summary()
     {

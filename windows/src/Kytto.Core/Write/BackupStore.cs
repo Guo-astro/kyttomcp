@@ -173,6 +173,51 @@ public sealed class BackupStore(KyttoPaths paths, int retentionPerClient = Backu
             ?? throw BackupException.NotAManagedFile(backup.OriginalPathDisplay);
     }
 
+    /// <summary>The servers a backup of a client's server map defines.</summary>
+    /// <remarks>
+    /// <para>
+    /// Read from the backup itself, before it is restored, which is what decides
+    /// which switched-off copies a restore makes stale: a server the restored file
+    /// defines is in the file again, and Kytto's held copy of it no longer is that
+    /// client's definition. Reading the reloaded model instead would not work —
+    /// discovery draws held copies into it as that client's definitions.
+    /// </para>
+    /// <para>
+    /// Null for a backup of any other file a client has (a deny list, an extension's
+    /// settings): those name no server definitions, and a restore of one must not
+    /// clear anything. A backup that does not parse names nothing.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string>? ServerNames(
+        Backup backup,
+        ClientPathResolver resolver,
+        IReadOnlyList<ClientDescriptor>? descriptors = null)
+    {
+        var target = RestoreTarget(backup, resolver);
+        var source = (descriptors ?? ClientRegistry.All)
+            .FirstOrDefault(descriptor => descriptor.Id == backup.ClientID)?.EditableServerMap;
+        if (source is null) return null;
+        var serverMap = resolver.ResolveServerMap(source.File, backup.ClientID);
+        if (!string.Equals(Path.GetFullPath(target), Path.GetFullPath(serverMap), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        try
+        {
+            var text = Contents(backup);
+            return source.Format == ConfigFormat.Json
+                ? Json.JsonDocument.Parse(text).ValueAt(source.ServersKey)?.Keys ?? []
+                : Toml.TomlServerReading.ServerNames(Toml.TomlDocument.Parse(text), source.ServersKey);
+        }
+        catch (Exception error) when (
+            error is Json.JsonParseException or Toml.TomlParseException or
+                     IOException or UnauthorizedAccessException or DecoderFallbackException)
+        {
+            return [];
+        }
+    }
+
     /// <summary>
     /// Puts a backup back, atomically, after backing up what is there now — so
     /// reverting is itself reversible.
@@ -205,7 +250,7 @@ public sealed class BackupStore(KyttoPaths paths, int retentionPerClient = Backu
 
         var data = File.ReadAllBytes(backup.Path);
         BackUp(target, backup.ClientID, backup.OriginalPathDisplay);
-        AtomicWriter.Write(data, target);
+        AtomicWriter.Write(data, target, throughLinks: true);
     }
 
     private void Prune(ClientId client)
