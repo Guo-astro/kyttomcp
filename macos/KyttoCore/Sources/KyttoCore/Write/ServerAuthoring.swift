@@ -62,7 +62,9 @@ public struct ServerAuthoring: Sendable {
         let url: URL
         let clientID: ClientID
         let pathDisplay: String
-        let text: String?
+        /// The exact bytes, for rollback. Text decoded from them would lose a
+        /// byte-order mark, and a rollback has to put back what was there.
+        let data: Data?
         let digest: String?
     }
 
@@ -132,11 +134,44 @@ public struct ServerAuthoring: Sendable {
         let errors = draft.validate(takenNames: taken, allowing: originalName)
         guard errors.isEmpty else { throw AuthoringError.invalid(errors) }
 
-        // A rename is a delete plus an add, because the name is the key.
+        // A rename changes the key, and only the key.
         let renamedFrom = Server.identity(for: originalName) == Server.identity(for: draft.trimmedName)
             ? nil
             : originalName
-        return try write(draft, to: clients, replacing: renamedFrom)
+
+        // A copy that is switched off in a presence-only client is not in that
+        // file. Writing the edit there would switch it back on while the matrix
+        // still showed it off — and the next click on "on" would then overwrite
+        // the edit with the old parked bytes. It is edited where it lives, as
+        // `unify` does (§7.12).
+        let parked = clients.filter { isParked(server, in: $0) }
+        let inFile = clients.filter { !parked.contains($0) }
+
+        var result = inFile.isEmpty
+            ? AuthoringResult(serverName: draft.trimmedName, changed: [], backupIDs: [:], pathDisplays: [:])
+            : try write(draft, to: inFile, replacing: renamedFrom)
+
+        for clientID in parked {
+            guard let entry = parkStore.parked(clientID: clientID, serverName: server.name),
+                  descriptors.first(where: { $0.id == clientID })?.editableServerMap?.format == .json,
+                  let text = try? draft.splicingJSON(into: entry.sourceText, at: []),
+                  (try? parkStore.park(
+                      clientID: clientID,
+                      serverName: renamedFrom == nil ? entry.serverName : draft.trimmedName,
+                      sourceText: text
+                  )) != nil
+            else {
+                result.parkedFailures.append(clientID)
+                continue
+            }
+            // The park store is keyed by identity, so a rename is a new entry
+            // and the old one has to go or the row would come back twice.
+            if renamedFrom != nil {
+                try? parkStore.unpark(clientID: clientID, serverName: entry.serverName)
+            }
+            result.parkedUpdated.append(clientID)
+        }
+        return result
     }
 
     // MARK: - Unify
@@ -172,7 +207,7 @@ public struct ServerAuthoring: Sendable {
         var parked: [ClientID] = []
         var inFile: [ClientID] = []
         for clientID in clients {
-            if parkStore.parked(clientID: clientID, serverName: server.name) != nil {
+            if isParked(server, in: clientID) {
                 parked.append(clientID)
             } else {
                 inFile.append(clientID)
@@ -198,11 +233,16 @@ public struct ServerAuthoring: Sendable {
                 continue
             }
 
+            // Spliced into the held bytes rather than rebuilt, for the same
+            // reason a file is (§6.3): what the draft does not describe is kept.
             do {
+                guard let entry = parkStore.parked(clientID: clientID, serverName: server.name) else {
+                    throw AuthoringError.notFound(server.name)
+                }
                 try parkStore.park(
                     clientID: clientID,
-                    serverName: server.name,
-                    sourceText: draft.definition(baseIndent: "", unit: "  ")
+                    serverName: entry.serverName,
+                    sourceText: draft.splicingJSON(into: entry.sourceText, at: [])
                 )
                 result.parkedUpdated.append(clientID)
             } catch {
@@ -249,7 +289,7 @@ public struct ServerAuthoring: Sendable {
         }
 
         let ordered = edits.keys.sorted { $0.rawValue < $1.rawValue }
-        let parked = ordered.filter { parkStore.parked(clientID: $0, serverName: server.name) != nil }
+        let parked = ordered.filter { isParked(server, in: $0) }
         let inFile = ordered.filter { !parked.contains($0) }
 
         let targets = try editableTargets(for: inFile)
@@ -271,8 +311,7 @@ public struct ServerAuthoring: Sendable {
                         url: url, clientID: target.clientID,
                         pathDisplay: target.snapshot.pathDisplay, expecting: expecting
                     ) { document in
-                        let name = document.value(at: [source.serversKey])?.keys
-                            .first { Server.identity(for: $0) == server.id } ?? server.name
+                        let name = try document.serverKey(for: server.id, under: source.serversKey) ?? server.name
                         return try document.replacingString(
                             inArrayAt: [source.serversKey, name, "args"],
                             position: edit.index,
@@ -384,7 +423,11 @@ public struct ServerAuthoring: Sendable {
                     try writer.edit(
                         url: url, clientID: clientID, pathDisplay: pathDisplay, expecting: expecting
                     ) { document in
-                        try document.removingMember(server.name, at: [source.serversKey])
+                        // The spelling this file uses, which need not be the row's.
+                        guard let key = try document.serverKey(for: server.id, under: source.serversKey) else {
+                            return document.sourceText
+                        }
+                        return try document.removingMember(key, at: [source.serversKey])
                     }
                 case .toml:
                     try writer.edit(
@@ -465,11 +508,32 @@ public struct ServerAuthoring: Sendable {
                     try writer.edit(
                         url: url, clientID: clientID, pathDisplay: pathDisplay, expecting: expecting
                     ) { document in
-                        var text = document.sourceText
-                        if let oldName {
-                            text = try document.removingMember(oldName, at: [source.serversKey])
+                        // Already here: splice the draft into the definition the
+                        // file has, under the spelling it has (§6.3).
+                        let identity = Server.identity(for: oldName ?? draft.trimmedName)
+                        if let key = try document.serverKey(for: identity, under: source.serversKey) {
+                            var text = document.sourceText
+                            var name = key
+                            if oldName != nil {
+                                guard try document.serverKey(
+                                    for: Server.identity(for: draft.trimmedName), under: source.serversKey
+                                ) == nil else {
+                                    throw AuthoringError.invalid([.nameTaken(draft.trimmedName)])
+                                }
+                                // A rename is the key and nothing else.
+                                let member = try JSONDocument.soleMember(
+                                    key, in: document.value(at: [source.serversKey])?.members ?? [],
+                                    at: [source.serversKey]
+                                )
+                                guard let member else { throw JSONEditError.pathNotFound([source.serversKey, key]) }
+                                text = document.replacing(member.keySpan, with: JSONText.string(draft.trimmedName))
+                                name = draft.trimmedName
+                            }
+                            return try draft.splicingJSON(into: text, at: [source.serversKey, name])
                         }
-                        let current = try JSONDocument.parse(text)
+
+                        // New to this file: the definition has to be rendered.
+                        let current = document
 
                         // Indent to match the siblings this will sit beside, or the
                         // map itself when it is the first entry.
@@ -494,23 +558,29 @@ public struct ServerAuthoring: Sendable {
                         url: url, clientID: clientID, pathDisplay: pathDisplay, expecting: expecting,
                         as: TOMLDocument.self
                     ) { document in
-                        // A server that is switched off must stay switched off. The
-                        // whole block is rewritten, so a flag nobody carried across
-                        // would silently turn it back on.
-                        let flagKey: String? = if case .inlineFlag(let key) = source.enablement { key } else { nil }
-                        let previousName = oldName ?? draft.trimmedName
-                        let wasDisabled = flagKey.flatMap {
-                            document.table(at: [source.serversKey, previousName])?.value($0)?.boolValue
-                        } == false
-
-                        var text = document.sourceText
-                        if let oldName {
-                            text = try document.removingServer(oldName, under: source.serversKey)
+                        // Spliced into the server's own tables, so `enabled = false`
+                        // and every key a draft does not describe stay put (§6.3).
+                        let identity = Server.identity(for: oldName ?? draft.trimmedName)
+                        if let existing = try document.serverName(for: identity, under: source.serversKey) {
+                            var text = document.sourceText
+                            var name = existing
+                            if oldName != nil {
+                                guard try document.serverName(
+                                    for: Server.identity(for: draft.trimmedName), under: source.serversKey
+                                ) == nil else {
+                                    throw AuthoringError.invalid([.nameTaken(draft.trimmedName)])
+                                }
+                                text = try document.renamingServer(
+                                    existing, to: draft.trimmedName, under: source.serversKey
+                                )
+                                name = draft.trimmedName
+                            }
+                            return try draft.splicingTOML(into: text, server: name, under: source.serversKey)
                         }
-                        return try TOMLDocument.parse(text).settingServer(
+                        return try document.settingServer(
                             draft.trimmedName,
                             under: source.serversKey,
-                            to: draft.tomlBlock(under: source.serversKey, enabled: wasDisabled ? false : nil)
+                            to: draft.tomlBlock(under: source.serversKey, enabled: nil)
                         )
                     }
                 }
@@ -650,9 +720,11 @@ public struct ServerAuthoring: Sendable {
         }
 
         guard exists else {
-            return FileSnapshot(url: url, clientID: clientID, pathDisplay: pathDisplay, text: nil, digest: nil)
+            return FileSnapshot(url: url, clientID: clientID, pathDisplay: pathDisplay, data: nil, digest: nil)
         }
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else {
             throw ConfigWriteError.unreadable(pathDisplay: pathDisplay, reason: "not valid UTF-8")
         }
         do {
@@ -663,7 +735,7 @@ public struct ServerAuthoring: Sendable {
         } catch {
             throw ConfigWriteError.unreadable(pathDisplay: pathDisplay, reason: "\(error)")
         }
-        return FileSnapshot(url: url, clientID: clientID, pathDisplay: pathDisplay, text: text, digest: digest)
+        return FileSnapshot(url: url, clientID: clientID, pathDisplay: pathDisplay, data: data, digest: digest)
     }
 
     private func record(
@@ -688,10 +760,16 @@ public struct ServerAuthoring: Sendable {
                     throw ConfigWriteError.changedOnDisk(pathDisplay: write.snapshot.pathDisplay)
                 }
 
-                if let text = write.snapshot.text {
-                    try AtomicWriter.write(text, to: write.snapshot.url)
-                } else if FileManager.default.fileExists(atPath: write.snapshot.url.path) {
-                    try FileManager.default.removeItem(at: write.snapshot.url)
+                if let data = write.snapshot.data {
+                    try AtomicWriter.write(data, to: write.snapshot.url)
+                } else {
+                    // The file did not exist. If the path is a symbolic link whose
+                    // target was missing, the write created the target: remove
+                    // that, and leave the user's link as it was.
+                    let created = try AtomicWriter.resolvingSymbolicLinks(write.snapshot.url)
+                    if FileManager.default.fileExists(atPath: created.path) {
+                        try FileManager.default.removeItem(at: created)
+                    }
                 }
                 ledger.record(write.snapshot.digest, for: write.snapshot.url)
             } catch {
@@ -715,6 +793,14 @@ public struct ServerAuthoring: Sendable {
     /// second has to use the spelling that file actually contains.
     private static func name(of server: Server, in document: TOMLDocument, under key: String) -> String {
         document.serverNames(under: key).first { Server.identity(for: $0) == server.id } ?? server.name
+    }
+
+    /// Whether this client's copy of `server` is one Kytto is holding rather
+    /// than one in the file. Both have to be true: a park the file has since
+    /// overtaken — the definition put back by hand — is stale, and the file wins.
+    private func isParked(_ server: Server, in clientID: ClientID) -> Bool {
+        server.enabledIn[clientID] == .disabled
+            && parkStore.parked(clientID: clientID, serverName: server.name) != nil
     }
 
     private func takenNames(in clients: [ClientID], from existing: [Server]) -> Set<String> {

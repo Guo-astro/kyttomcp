@@ -55,6 +55,11 @@ public struct MCPLibraryScanResult: Sendable {
 /// The scanner is intentionally conservative: known MCP maps produce candidates;
 /// ordinary entry points are only suggestions with an explicit warning.
 public struct MCPLibraryScanner: Sendable {
+    /// A config map or package.json is a few kilobytes. Anything this large is
+    /// data that happens to end in `.json` (a fixture, a lockfile, a dataset),
+    /// and parsing thousands of those would stall the scan for nothing.
+    public static let maxFileBytes = 1_048_576
+
     private let root: URL
 
     public init(root: URL) {
@@ -73,13 +78,14 @@ public struct MCPLibraryScanner: Sendable {
 
         guard let enumerator = FileManager.default.enumerator(
             at: root,
-            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
             options: []
         ) else {
             return MCPLibraryScanResult(rootPath: root.path, candidates: [], warnings: ["Kytto could not read this directory."])
         }
 
         var inspected = 0
+        var oversized = 0
         while let url = enumerator.nextObject() as? URL {
             inspected += 1
             if inspected > 5_000 {
@@ -100,6 +106,11 @@ public struct MCPLibraryScanner: Sendable {
             guard isRegularFile(url) else { continue }
 
             let fileName = url.lastPathComponent.lowercased()
+            let fileExtension = url.pathExtension.lowercased()
+            if ["json", "jsonc", "toml"].contains(fileExtension), isOversized(url) {
+                oversized += 1
+                continue
+            }
             if ["mcp.json", "mcp.jsonc", "claude_desktop_config.json"].contains(fileName) ||
                 ["json", "jsonc"].contains(url.pathExtension.lowercased()) {
                 let found = scanJSON(url: url, relativePath: relative)
@@ -134,6 +145,11 @@ public struct MCPLibraryScanner: Sendable {
             }
         }
 
+        if oversized > 0 {
+            warnings.append(oversized == 1
+                ? "1 file larger than 1 MB was skipped."
+                : "\(oversized) files larger than 1 MB were skipped.")
+        }
         if candidates.isEmpty {
             warnings.append("No tested MCP definition or likely entry point was found. Kytto did not execute any file.")
         }
@@ -260,6 +276,11 @@ public struct MCPLibraryScanner: Sendable {
 
     private func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    private func isOversized(_ url: URL) -> Bool {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return size > Self.maxFileBytes
     }
 
     private func isRegularFile(_ url: URL) -> Bool {

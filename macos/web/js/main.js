@@ -127,7 +127,14 @@ async function installUpdate() {
       updateProgress: null,
       updateStage: null,
       updateError: null,
-      notice: { kind: 'info', message: `Kytto ${result.version} was verified and is relaunching.` },
+      // `installed` without a relaunch is a real outcome (DTO.swift), not only
+      // the harness's: the new version runs once Kytto is reopened.
+      notice: {
+        kind: 'info',
+        message: result.relaunched
+          ? `Kytto ${result.version} was verified and is relaunching.`
+          : `Kytto ${result.version} was verified and installed. Quit and reopen Kytto to use it.`,
+      },
     });
   } catch (error) {
     setState({
@@ -373,7 +380,8 @@ function openProfileEditor(profile = null) {
 
 async function saveProfile() {
   const current = getState().sheet;
-  setState({ sheet: { ...current, busy: true, error: null } });
+  if (current?.busy) return;
+  const request = beginSheetRequest();
   try {
     const payload = { name: current.name, serverIDs: current.serverIDs, tokenBudget: current.tokenBudget };
     const profiles = current.mode === 'edit'
@@ -385,7 +393,7 @@ async function saveProfile() {
       notice: { kind: 'info', message: `Saved profile “${current.name.trim()}”.` },
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
@@ -399,8 +407,8 @@ function defaultProfileClient(state) {
 }
 
 async function applyProfile(profileId, clientId) {
-  const current = getState().sheet;
-  setState({ sheet: { ...current, busy: true } });
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest({});
   try {
     const result = await invoke('profiles.apply', { profileID: profileId, clientID: clientId });
     applyState(result.state);
@@ -420,8 +428,7 @@ async function applyProfile(profileId, clientId) {
       notice: withRefreshWarning(notice, refreshWarning),
     });
   } catch (error) {
-    reportFailure(error);
-    setState({ sheet: null });
+    closeSheetAfterFailure(request, error);
   }
 }
 
@@ -437,8 +444,8 @@ async function openGatewayPreview(serverId, clientId) {
 }
 
 async function enableGateway(serverId, clientId, routeId) {
-  const current = getState().sheet;
-  setState({ sheet: { ...current, busy: true, error: null } });
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest();
   try {
     const result = await invoke('gateway.enable', {
       serverID: serverId,
@@ -458,13 +465,13 @@ async function enableGateway(serverId, clientId, routeId) {
       ),
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
 async function restoreGateway(routeId) {
-  const current = getState().sheet;
-  setState({ sheet: { ...current, busy: true, error: null } });
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest();
   try {
     const result = await invoke('gateway.restore', { routeID: routeId });
     applyState(result.state);
@@ -480,7 +487,7 @@ async function restoreGateway(routeId) {
       ),
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
@@ -516,11 +523,15 @@ async function saveToolMask(routeId) {
   // (§3.3), rather than leaving a filter in place that currently blocks nothing.
   const keepsEverything = names.length > 0 && names.every((name) => sheet.selected.includes(name));
   const toolNames = keepsEverything ? null : sheet.selected;
+  // Counted against the tools the server offers now. The saved list can still
+  // name a tool the server has since dropped, and subtracting those produced
+  // "hiding -1 of 2".
+  const hidden = toolNames === null ? 0 : names.filter((name) => !toolNames.includes(name)).length;
 
-  setState({ sheet: { ...sheet, busy: true, error: null } });
+  if (sheet.busy) return;
+  const request = beginSheetRequest();
   try {
     applyState(await invoke('gateway.setExposedTools', { routeID: routeId, toolNames }));
-    const hidden = toolNames === null ? 0 : names.length - toolNames.length;
     setState({
       sheet: null,
       notice: {
@@ -532,7 +543,7 @@ async function saveToolMask(routeId) {
       },
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
@@ -551,7 +562,8 @@ async function openUnifyPreview(serverId, sourceClientId) {
 }
 
 async function confirmUnify(serverId, sourceClientId) {
-  setState({ sheet: { ...getState().sheet, busy: true, error: null } });
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest();
   try {
     const result = await invoke('servers.unify', {
       serverID: serverId,
@@ -584,7 +596,7 @@ async function confirmUnify(serverId, sourceClientId) {
       ),
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
@@ -602,8 +614,9 @@ async function previewDoctorFix(serverId, fixAction = 'pinResolvedCommand') {
 async function applyDoctorFix(serverId) {
   // The version travels back so the native side writes only the release this
   // preview showed, not whatever a later lookup found.
-  const { preview } = getState().sheet;
-  setState({ sheet: { ...getState().sheet, busy: true, error: null } });
+  const { preview, busy } = getState().sheet;
+  if (busy) return;
+  const request = beginSheetRequest();
   try {
     const result = await invoke('doctor.applyFix', {
       serverID: serverId,
@@ -626,8 +639,40 @@ async function applyDoctorFix(serverId) {
       ),
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
+}
+
+// A sheet's request can outlive the sheet: a configs.changed push can rebuild
+// the world under it. Each busy request carries a token, so a failure lands on
+// the sheet that started it — or, when that sheet is gone, as a notice instead
+// of resurrecting a sheet with no kind that swallows the error.
+let sheetRequestSerial = 0;
+
+/** Marks the open sheet busy and returns the token naming this request. */
+function beginSheetRequest(changes = { error: null }) {
+  const request = ++sheetRequestSerial;
+  setState({ sheet: { ...getState().sheet, ...changes, busy: true, request } });
+  return request;
+}
+
+/** True while the sheet on screen is still the one that started `request`. */
+const sheetStillOpen = (request) => getState().sheet?.request === request;
+
+/** Puts a failure back on the sheet that asked, or reports it if it is gone. */
+function failSheetRequest(request, error, changes = { error: error.message }) {
+  if (sheetStillOpen(request)) {
+    setState({ sheet: { ...getState().sheet, ...changes, busy: false } });
+  } else {
+    reportFailure(error);
+  }
+}
+
+/** For confirmations that close on failure and say why in a notice. */
+function closeSheetAfterFailure(request, error) {
+  const changedOnDisk = reportFailure(error);
+  if (sheetStillOpen(request)) setState({ sheet: null });
+  return changedOnDisk;
 }
 
 /** Turns a write failure into something the user can act on. */
@@ -772,13 +817,14 @@ async function commitSidebarWidth(width) {
 }
 
 async function confirmToggle(serverId, clientId, currentlyEnabled) {
-  setState({ sheet: { ...getState().sheet, busy: true, error: null } });
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest();
   try {
     const settings = await invoke('settings.confirmMatrixWrites');
     setState({ settings, sheet: null });
     await toggleCell(serverId, clientId, currentlyEnabled);
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
@@ -880,7 +926,8 @@ function pickFromCatalog(catalogId) {
 
 async function submitForm() {
   const sheet = getState().sheet;
-  updateSheet({ busy: true, errors: [] });
+  if (sheet.busy) return;
+  const request = beginSheetRequest({ errors: [] });
 
   // Empty values mean "unchanged" when editing, and nothing at all when
   // creating. Either way an empty string would overwrite a real secret.
@@ -915,11 +962,15 @@ async function submitForm() {
     }
   } catch (error) {
     // Validation failures belong in the form, next to the fields they describe.
-    updateSheet({ busy: false, errors: [error.message] });
+    failSheetRequest(request, error, { errors: [error.message] });
   }
 }
 
 async function confirmDelete(serverId) {
+  // Busy until the reply lands: a second click would ask native to delete a
+  // server that is already gone and report "No such server".
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest({});
   try {
     const result = await invoke('servers.delete', { serverID: serverId });
     applyState(result.state);
@@ -932,8 +983,7 @@ async function confirmDelete(serverId) {
       setState({ notice: withRefreshWarning(getState().notice, refreshWarning) });
     }
   } catch (error) {
-    reportFailure(error);
-    setState({ sheet: null });
+    closeSheetAfterFailure(request, error);
   }
 }
 
@@ -942,6 +992,8 @@ async function confirmRemoveFromClient(serverId, clientId) {
   // empties the last row takes the client's own entry out of the state with it.
   const clientName =
     getState().clients.find((entry) => entry.id === clientId)?.displayName ?? clientId;
+  if (getState().sheet?.busy) return;
+  const request = beginSheetRequest({});
   try {
     const result = await invoke('servers.removeFromClient', {
       serverID: serverId,
@@ -960,8 +1012,7 @@ async function confirmRemoveFromClient(serverId, clientId) {
       setState({ notice: withRefreshWarning(getState().notice, refreshWarning) });
     }
   } catch (error) {
-    reportFailure(error);
-    setState({ sheet: null });
+    closeSheetAfterFailure(request, error);
   }
 }
 
@@ -994,7 +1045,8 @@ async function confirmRotate(secretId) {
     setState({ sheet: { ...sheet, error: 'Enter the new value.' } });
     return;
   }
-  setState({ sheet: { ...sheet, busy: true, error: null } });
+  if (sheet.busy) return;
+  const request = beginSheetRequest();
   try {
     const result = await invoke('secrets.rotate', {
       secretID: secretId,
@@ -1015,7 +1067,7 @@ async function confirmRotate(secretId) {
       ),
     });
   } catch (error) {
-    setState({ sheet: { ...getState().sheet, busy: false, error: error.message } });
+    failSheetRequest(request, error);
   }
 }
 
@@ -1028,12 +1080,47 @@ function setChecking(serverId, busy) {
   setState({ checking: next });
 }
 
+/// Contract alerts present now, keyed so a fresh change to a server that was
+/// already flagged counts as new too.
+const contractAlertKeys = () =>
+  new Set((getState().contractAlerts ?? []).map((alert) => `${alert.serverID}@${alert.changedAt}`));
+
+/// Alerts the last reply raised that were not on screen before it.
+function newContractAlerts(before) {
+  return (getState().contractAlerts ?? []).filter(
+    (alert) => !before.has(`${alert.serverID}@${alert.changedAt}`),
+  );
+}
+
+/// A passing check used to clear the notice, so a check that *raised* a
+/// contract alert was announced only by a small badge on the row.
+function contractNotice(alerts) {
+  if (alerts.length === 0) return null;
+  if (alerts.length === 1) {
+    return {
+      kind: 'warning',
+      message: `“${alerts[0].serverName}” changed what it tells the model — review it in the server’s details.`,
+    };
+  }
+  return {
+    kind: 'warning',
+    message: `${alerts.length} servers changed what they tell the model — review each in its server’s details.`,
+  };
+}
+
 async function checkServer(serverId) {
+  // "Check all" already covers this server, and two runs racing would each
+  // write the notice — a passing single check erased the run's contract report.
+  if (getState().checking.has(serverId) || getState().healthProgress) return;
   setChecking(serverId, true);
+  const alertsBefore = contractAlertKeys();
   try {
     const result = await invoke('health.check', { serverID: serverId });
     applyState(result.state);
     const refreshWarning = await refreshAfterMutation({ profiles: true });
+    const contract = contractNotice(
+      newContractAlerts(alertsBefore).filter((alert) => alert.serverID === serverId),
+    );
     if (result.health.status === 'failed') {
       setState({
         notice: withRefreshWarning(
@@ -1054,7 +1141,7 @@ async function checkServer(serverId) {
         ),
       });
     } else {
-      setState({ notice: withRefreshWarning(null, refreshWarning) });
+      setState({ notice: withRefreshWarning(contract, refreshWarning) });
     }
   } catch (error) {
     reportFailure(error);
@@ -1064,11 +1151,15 @@ async function checkServer(serverId) {
 }
 
 async function checkAll() {
+  // The Doctor and the matrix toolbar both offer this; one run at a time.
+  if (getState().healthProgress) return;
+  const alertsBefore = contractAlertKeys();
   setState({ healthProgress: { serverName: '', index: 0, total: 0 }, notice: null });
   try {
     applyState(await invoke('health.checkAll'));
     const refreshWarning = await refreshAfterMutation({ profiles: true });
-    if (refreshWarning) setState({ notice: withRefreshWarning(null, refreshWarning) });
+    const contract = contractNotice(newContractAlerts(alertsBefore));
+    if (refreshWarning || contract) setState({ notice: withRefreshWarning(contract, refreshWarning) });
   } catch (error) {
     reportFailure(error);
   } finally {
@@ -1099,6 +1190,10 @@ async function checkProvenanceLatest(serverId) {
 const firstLine = (text) => String(text).split('\n')[0];
 
 async function restoreBackup(backupId, clientId) {
+  // One revert at a time: a double click wrote the same backup twice, and two
+  // different reverts racing on one client leave whichever lands last.
+  if (getState().restoringBackupId) return;
+  setState({ restoringBackupId: backupId });
   try {
     applyState(await invoke('backups.restore', { backupID: backupId, clientID: clientId }));
     const refreshWarning = await refreshAfterMutation({ backups: true });
@@ -1110,6 +1205,8 @@ async function restoreBackup(backupId, clientId) {
     });
   } catch (error) {
     reportFailure(error);
+  } finally {
+    setState({ restoringBackupId: null });
   }
 }
 
@@ -1352,6 +1449,8 @@ root.addEventListener('click', async (event) => {
       }
       break;
     case 'acknowledge-contract':
+      if (state.acknowledgingContract) break;
+      setState({ acknowledgingContract: target.dataset.serverId });
       try {
         applyState(await invoke('contract.acknowledge', { serverID: target.dataset.serverId }));
         setState({
@@ -1362,6 +1461,8 @@ root.addEventListener('click', async (event) => {
         });
       } catch (error) {
         reportFailure(error);
+      } finally {
+        setState({ acknowledgingContract: null });
       }
       break;
     case 'unify-server':
@@ -1407,23 +1508,27 @@ root.addEventListener('click', async (event) => {
       setState({ sheet: { kind: 'profileDelete', profileId: target.dataset.profileId } });
       break;
     case 'confirm-profile-delete': {
+      if (sheet?.busy) break;
+      const request = beginSheetRequest({});
       try {
         const profiles = await invoke('profiles.delete', { profileID: target.dataset.profileId });
         setState({ profiles, sheet: null, notice: { kind: 'info', message: 'Profile deleted. Client configurations were not changed.' } });
       } catch (error) {
-        reportFailure(error);
-        setState({ sheet: null });
+        closeSheetAfterFailure(request, error);
       }
       break;
     }
 
     case 'open-server':
-      setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId } });
+      setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId }, openTools: new Set() });
       break;
     case 'close-sheet':
       // Only the backdrop itself closes; clicks inside the panel bubble up here
       // too and must be ignored.
       if (target.classList.contains('sheet-backdrop') && event.target !== target) break;
+      // A sheet with a write in flight stays until the reply lands, so its
+      // outcome has somewhere to go.
+      if (sheet?.busy) break;
       setState({ sheet: null });
       break;
 
@@ -1456,7 +1561,7 @@ root.addEventListener('click', async (event) => {
       if (!server?.health) break;
       try {
         await invoke('clipboard.writeText', { text: diagnosticReport(server, state) });
-        setState({ notice: { kind: 'info', message: `Copied the diagnostic report for “${server.name}”. Secret values and raw server output were omitted.` } });
+        setState({ notice: { kind: 'info', message: `Copied the diagnostic report for “${server.name}”. Secret values, raw server output and URL paths and queries were omitted.` } });
       } catch (error) {
         reportFailure(error);
       }
@@ -1573,13 +1678,26 @@ root.addEventListener('input', (event) => {
       }
       break;
     }
-    case 'import-json':
+    case 'import-json': {
       // As with the form fields, keep the caret in the native state without
-      // rebuilding the tree on every pasted character.
-      state.importText = value;
-      state.importPreview = null;
-      state.importError = null;
+      // rebuilding the tree on every pasted character. Render only when what is
+      // on screen depends on the edit: the Preview button enables once there is
+      // text, and a preview of the old text must not stay up to be imported.
+      const wasEmpty = !(state.importText ?? '').trim();
+      const stale = state.importPreview || state.importError;
+      if (!stale && wasEmpty === !value.trim()) {
+        state.importText = value;
+        break;
+      }
+      const caret = event.target.selectionStart;
+      setState({ importText: value, importPreview: null, importError: null });
+      const field = root.querySelector('[data-action="import-json"]');
+      if (field) {
+        field.focus();
+        field.setSelectionRange(caret, caret);
+      }
       break;
+    }
     case 'draft-name':
       quiet({ name: value });
       break;
@@ -1670,10 +1788,32 @@ root.addEventListener('change', (event) => {
   }
 });
 
+// `toggle` does not bubble, so the one listener for it listens in the capture
+// phase. Which tools are expanded lives in state so a re-render (a copied
+// report, a configs.changed push) does not fold them all shut. The DOM already
+// shows the user's toggle, so state is updated without a render — the same
+// exception the text fields make.
+root.addEventListener(
+  'toggle',
+  (event) => {
+    const details = event.target;
+    if (details?.dataset?.action !== 'toggle-tool-details') return;
+    const key = `${details.dataset.serverId}::${details.dataset.toolName}`;
+    const state = getState();
+    if (details.open === state.openTools.has(key)) return;
+    const next = new Set(state.openTools);
+    if (details.open) next.add(key);
+    else next.delete(key);
+    state.openTools = next;
+  },
+  true,
+);
+
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && getState().sheet) {
     event.preventDefault();
-    setState({ sheet: null });
+    // Same rule as the Close button: not while the sheet is waiting on a write.
+    if (!getState().sheet.busy) setState({ sheet: null });
     return;
   }
 

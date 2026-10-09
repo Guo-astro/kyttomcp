@@ -57,6 +57,33 @@ public struct ConfigWriter: Sendable {
         digest(of: Data(text.utf8))
     }
 
+    static let byteOrderMark = Data([0xEF, 0xBB, 0xBF])
+
+    /// Spells the line breaks an edit inserted the way the file spells its own.
+    ///
+    /// Every splice inserts `\n`. In a file written entirely with `\r\n` that
+    /// leaves mixed endings, which some editors then "fix" across the whole file
+    /// — a diff of every line for a one-key change. Only a file with no bare `\n`
+    /// of its own is converted, so no byte the edit did not produce can change.
+    static func matchingLineEndings(of source: String, in updated: String) -> String {
+        let sourceBytes = Array(source.utf8)
+        var sawCRLF = false
+        for (index, byte) in sourceBytes.enumerated() where byte == 0x0A {
+            guard index > 0, sourceBytes[index - 1] == 0x0D else { return updated }
+            sawCRLF = true
+        }
+        guard sawCRLF else { return updated }
+
+        var result: [UInt8] = []
+        let bytes = Array(updated.utf8)
+        result.reserveCapacity(bytes.count + 16)
+        for (index, byte) in bytes.enumerated() {
+            if byte == 0x0A, index == 0 || bytes[index - 1] != 0x0D { result.append(0x0D) }
+            result.append(byte)
+        }
+        return String(decoding: result, as: UTF8.self)
+    }
+
     /// Applies `transform` to the file and writes the result.
     ///
     /// - Parameter expecting: the digest Kytto saw when it last read the file.
@@ -100,10 +127,16 @@ public struct ConfigWriter: Sendable {
         }
 
         let source: String
+        var byteOrderMark = false
         if exists {
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            // Read as bytes: decoding UTF-8 drops a leading byte-order mark, and
+            // a file that had one must still have it after Kytto touched it.
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8)
+            else {
                 throw ConfigWriteError.unreadable(pathDisplay: pathDisplay, reason: "not valid UTF-8")
             }
+            byteOrderMark = data.starts(with: Self.byteOrderMark)
             source = text
         } else {
             // A client that has never configured MCP has no file. Starting from
@@ -118,7 +151,7 @@ public struct ConfigWriter: Sendable {
             throw ConfigWriteError.unreadable(pathDisplay: pathDisplay, reason: "\(error)")
         }
 
-        let updated = try transform(document)
+        let updated = Self.matchingLineEndings(of: source, in: try transform(document))
 
         // Nothing to do, so nothing to back up. Saves a pointless backup slot
         // every time a toggle is set to the value it already had.
@@ -140,11 +173,12 @@ public struct ConfigWriter: Sendable {
             )
         }
 
+        let bytes = (byteOrderMark ? Self.byteOrderMark : Data()) + Data(updated.utf8)
         let backup = try backups.backUp(url, clientID: clientID, pathDisplay: pathDisplay)
-        try AtomicWriter.write(updated, to: url)
+        try AtomicWriter.write(bytes, to: url)
 
         return WriteReceipt(
-            digest: Self.digest(of: updated),
+            digest: Self.digest(of: bytes),
             backupID: backup?.id,
             pathDisplay: pathDisplay,
             didWrite: true

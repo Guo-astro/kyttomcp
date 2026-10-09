@@ -135,9 +135,18 @@ public struct MCPStdioClient: Sendable {
                 timeout: timeout
             )
 
+            var pageNotes: [String] = []
+            let pages = morePages(
+                after: toolsResponse,
+                process: process,
+                deadline: deadline,
+                timeout: timeout,
+                notes: &pageNotes
+            )
             let listing = try makeListing(
                 initialize: initialize,
-                tools: toolsResponse,
+                pages: pages,
+                pageNotes: pageNotes,
                 process: process,
                 deadline: deadline,
                 timeout: timeout
@@ -204,15 +213,64 @@ public struct MCPStdioClient: Sendable {
         }
     }
 
+    /// Pages `tools/list` until the server stops returning a cursor.
+    ///
+    /// Unlike prompts and resources, the tool list is what everything else is
+    /// measured on — token weight, the safety scan, Contract Guard — so stopping
+    /// at the first page would make all of them blind to the rest. A page that
+    /// cannot be fetched ends the walk with a note rather than failing a server
+    /// that did answer.
+    private func morePages(
+        after first: JSONDocument,
+        process: ManagedProcess,
+        deadline: Date,
+        timeout: TimeInterval,
+        notes: inout [String]
+    ) -> [JSONDocument] {
+        var pages = [first]
+        var seen: Set<String> = []
+        while let cursor = pages.last?.value(at: ["result", "nextCursor"])?.stringValue {
+            guard seen.insert(cursor).inserted, pages.count < Self.maxToolPages else {
+                notes.append("Tool count shows the first \(pages.count) pages; the server kept offering more.")
+                break
+            }
+            let id = 100 + pages.count
+            let params = (try? JSONSerialization.data(withJSONObject: ["cursor": cursor]))
+                .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            do {
+                try process.write(line: #"{"jsonrpc":"2.0","id":\#(id),"method":"tools/list","params":\#(params)}"#)
+                let page = try readResponse(id: id, from: process, deadline: deadline, timeout: timeout)
+                guard page.value(at: ["result", "tools"])?.elements != nil else {
+                    notes.append("tools/list page \(pages.count + 1) did not return a tools array; counts cover the first \(pages.count).")
+                    break
+                }
+                pages.append(page)
+            } catch {
+                notes.append("Tool count shows the first \(pages.count) pages; the next could not be read.")
+                break
+            }
+        }
+        return pages
+    }
+
+    private static let maxToolPages = 50
+
     private func makeListing(
         initialize: JSONDocument,
-        tools: JSONDocument,
+        pages: [JSONDocument],
+        pageNotes: [String],
         process: ManagedProcess,
         deadline: Date,
         timeout: TimeInterval
     ) throws -> ToolListing {
-        guard let toolsNode = tools.value(at: ["result", "tools"]), let elements = toolsNode.elements else {
+        guard let tools = pages.first,
+              let toolsNode = tools.value(at: ["result", "tools"]),
+              toolsNode.elements != nil
+        else {
             throw MCPError.protocolError("tools/list did not return a tools array")
+        }
+        let entries = pages.flatMap { page in
+            (page.value(at: ["result", "tools"])?.elements ?? []).map { (page: page, tool: $0) }
         }
 
         // Measured on each tool's verbatim entry rather than on a
@@ -222,18 +280,19 @@ public struct MCPStdioClient: Sendable {
         // less than the whole-array weight — the brackets and separators
         // between them belong to no single tool.
         let tokenizer = BPETokenizer.cl100kBase
-        let summaries = elements.map { tool in
+        let summaries = entries.map { page, tool in
             ToolSummary(
-                name: tool["name"]?.stringValue ?? "(unnamed)",
-                description: tool["description"]?.stringValue,
-                inputSchemaJSON: tool["inputSchema"].map { tools.slice($0.span) },
-                annotations: annotations(from: tool["annotations"]),
-                tokenCount: tokenizer?.countTokens(tools.slice(tool.span))
+                // Last-wins, as the client that hands these to the model reads them.
+                name: tool.lastValue("name")?.stringValue ?? "(unnamed)",
+                description: tool.lastValue("description")?.stringValue,
+                inputSchemaJSON: tool.lastValue("inputSchema").map { page.slice($0.span) },
+                annotations: annotations(from: tool.lastValue("annotations")),
+                tokenCount: tokenizer?.countTokens(page.slice(tool.span))
             )
         }
 
         let capabilityNames = initialize.value(at: ["result", "capabilities"])?.keys.sorted() ?? []
-        var notes: [String] = []
+        var notes = pageNotes
         let promptCount = optionalListCount(
             capability: "prompts",
             method: "prompts/list",
@@ -259,7 +318,11 @@ public struct MCPStdioClient: Sendable {
 
         return ToolListing(
             tools: summaries,
-            rawToolsJSON: tools.slice(toolsNode.span),
+            // One page: the exact bytes. Several: the entries as sent, in one
+            // array, which is what a client that pages hands the model.
+            rawToolsJSON: pages.count == 1
+                ? tools.slice(toolsNode.span)
+                : "[" + entries.map { $0.page.slice($0.tool.span) }.joined(separator: ",") + "]",
             serverName: initialize.value(at: ["result", "serverInfo", "name"])?.stringValue,
             serverVersion: initialize.value(at: ["result", "serverInfo", "version"])?.stringValue,
             negotiatedProtocolVersion: initialize.value(at: ["result", "protocolVersion"])?.stringValue,
@@ -274,10 +337,10 @@ public struct MCPStdioClient: Sendable {
     private func annotations(from node: JSONNode?) -> ToolAnnotations? {
         guard let node, node.members != nil else { return nil }
         let value = ToolAnnotations(
-            readOnlyHint: node["readOnlyHint"]?.boolValue,
-            destructiveHint: node["destructiveHint"]?.boolValue,
-            idempotentHint: node["idempotentHint"]?.boolValue,
-            openWorldHint: node["openWorldHint"]?.boolValue
+            readOnlyHint: node.lastValue("readOnlyHint")?.boolValue,
+            destructiveHint: node.lastValue("destructiveHint")?.boolValue,
+            idempotentHint: node.lastValue("idempotentHint")?.boolValue,
+            openWorldHint: node.lastValue("openWorldHint")?.boolValue
         )
         guard value.readOnlyHint != nil || value.destructiveHint != nil ||
                 value.idempotentHint != nil || value.openWorldHint != nil

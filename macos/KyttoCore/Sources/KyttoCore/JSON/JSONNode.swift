@@ -94,6 +94,14 @@ public extension JSONNode {
         member(key)?.value
     }
 
+    /// Last member with this key — how the clients' own JSON parsers resolve a
+    /// duplicate. Used where Kytto must read what the *model* will be shown
+    /// (a tool's name, description, schema), so a second `"description"` cannot
+    /// hide behind a harmless first one.
+    func lastValue(_ key: String) -> JSONNode? {
+        members?.last { $0.key == key }?.value
+    }
+
     /// Walks a chain of object keys, e.g. `["mcpServers", "github"]`.
     func value(at path: [String]) -> JSONNode? {
         var node = self

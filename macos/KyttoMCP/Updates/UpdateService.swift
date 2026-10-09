@@ -16,7 +16,7 @@ final class UpdateService {
     private static let latestReleaseNotesURLKey = "updates.latestReleaseNotesURL"
     private static let latestSHA256Key = "updates.latestSHA256"
     private static let maximumManifestSize = 64 * 1024
-    private static let maximumArtifactSize: Int64 = 2 * 1024 * 1024 * 1024
+    nonisolated private static let maximumArtifactSize: Int64 = 2 * 1024 * 1024 * 1024
 
     private let session: URLSession
     private let defaults: UserDefaults
@@ -27,6 +27,8 @@ final class UpdateService {
     private(set) var stagedUpdate: StagedUpdate?
     private var downloadInProgress = false
     private var downloadCancelled = false
+    /// The same request, readable from the streaming loop off the main actor.
+    private var activeCancellation: DownloadCancellation?
 
     init(
         session: URLSession = .shared,
@@ -159,14 +161,6 @@ final class UpdateService {
                 throw UpdateError.cannotPrepareStaging
             }
 
-            let handle = try FileHandle(forWritingTo: temporaryURL)
-            defer { try? handle.close() }
-
-            var hasher = SHA256()
-            var buffer = Data()
-            buffer.reserveCapacity(64 * 1024)
-            var completed: Int64 = 0
-
             await progress(UpdateProgress(
                 phase: .downloading,
                 completedBytes: 0,
@@ -175,38 +169,35 @@ final class UpdateService {
                 message: "Downloading the verified Kytto installer…"
             ))
 
-            for try await byte in bytes {
-                buffer.append(byte)
-                if buffer.count >= 64 * 1024 {
-                    try ensureDownloadActive()
-                    try handle.write(contentsOf: buffer)
-                    hasher.update(data: buffer)
-                    completed += Int64(buffer.count)
-                    buffer.removeAll(keepingCapacity: true)
-                    guard completed <= Self.maximumArtifactSize else {
-                        throw UpdateError.artifactTooLarge
-                    }
-                    await progress(UpdateProgress(
-                        phase: .downloading,
-                        completedBytes: completed,
-                        totalBytes: expectedLength,
-                        fraction: fraction(completed: completed, total: expectedLength),
-                        message: "Downloading the verified Kytto installer…"
-                    ))
-                }
+            // The bytes arrive one at a time; iterating, writing and hashing
+            // millions of them on the main actor stalls the window, so the loop
+            // runs detached and only the progress reports hop back here.
+            let cancellation = DownloadCancellation()
+            activeCancellation = cancellation
+            defer { activeCancellation = nil }
+            let reportChunk: @Sendable (Int64) async -> Void = { @MainActor [weak self] completed in
+                await progress(UpdateProgress(
+                    phase: .downloading,
+                    completedBytes: completed,
+                    totalBytes: expectedLength,
+                    fraction: self?.fraction(completed: completed, total: expectedLength),
+                    message: "Downloading the verified Kytto installer…"
+                ))
             }
-
+            let streaming = Task.detached(priority: .userInitiated) {
+                try await Self.stream(
+                    bytes,
+                    to: temporaryURL,
+                    cancellation: cancellation,
+                    chunkWritten: reportChunk
+                )
+            }
+            let (completed, actualSHA256) = try await withTaskCancellationHandler {
+                try await streaming.value
+            } onCancel: {
+                cancellation.cancel()
+            }
             try ensureDownloadActive()
-            if !buffer.isEmpty {
-                try handle.write(contentsOf: buffer)
-                hasher.update(data: buffer)
-                completed += Int64(buffer.count)
-            }
-            guard completed <= Self.maximumArtifactSize else {
-                throw UpdateError.artifactTooLarge
-            }
-
-            let actualSHA256 = Self.hex(hasher.finalize())
             await progress(UpdateProgress(
                 phase: .verifying,
                 completedBytes: completed,
@@ -248,6 +239,45 @@ final class UpdateService {
     func cancelDownload() {
         guard downloadInProgress else { return }
         downloadCancelled = true
+        activeCancellation?.cancel()
+    }
+
+    /// Writes and hashes the streamed installer. Cancellation is checked between
+    /// 64 KB chunks, so an interrupted download never becomes a usable stage.
+    nonisolated private static func stream(
+        _ bytes: URLSession.AsyncBytes,
+        to fileURL: URL,
+        cancellation: DownloadCancellation,
+        chunkWritten: @Sendable (Int64) async -> Void
+    ) async throws -> (byteCount: Int64, sha256: String) {
+        let handle = try FileHandle(forWritingTo: fileURL)
+        defer { try? handle.close() }
+
+        let chunkSize = 64 * 1024
+        var hasher = SHA256()
+        var buffer = Data()
+        buffer.reserveCapacity(chunkSize)
+        var completed: Int64 = 0
+
+        func flush() throws {
+            guard !cancellation.isCancelled else { throw UpdateError.cancelled }
+            try handle.write(contentsOf: buffer)
+            hasher.update(data: buffer)
+            completed += Int64(buffer.count)
+            buffer.removeAll(keepingCapacity: true)
+            guard completed <= maximumArtifactSize else { throw UpdateError.artifactTooLarge }
+        }
+
+        for try await byte in bytes {
+            buffer.append(byte)
+            if buffer.count >= chunkSize {
+                try flush()
+                await chunkWritten(completed)
+            }
+        }
+        guard !cancellation.isCancelled else { throw UpdateError.cancelled }
+        if !buffer.isEmpty { try flush() }
+        return (completed, hex(hasher.finalize()))
     }
 
     func installStaged(
@@ -263,7 +293,9 @@ final class UpdateService {
               stagedVersion > current else {
             throw UpdateError.noUpdateAvailable
         }
-        guard Self.sha256(of: stagedUpdate.fileURL) == stagedUpdate.sha256.lowercased() else {
+        let stagedFile = stagedUpdate.fileURL
+        let digest = await Task.detached(priority: .userInitiated) { Self.sha256(of: stagedFile) }.value
+        guard digest == stagedUpdate.sha256.lowercased() else {
             throw UpdateError.checksumMismatch
         }
 
@@ -421,11 +453,11 @@ final class UpdateService {
         value.count == 64 && value.allSatisfy { $0.isHexDigit }
     }
 
-    private static func hex(_ digest: SHA256.Digest) -> String {
+    nonisolated private static func hex(_ digest: SHA256.Digest) -> String {
         digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func sha256(of url: URL) -> String? {
+    nonisolated private static func sha256(of url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -448,6 +480,25 @@ final class UpdateService {
         guard !downloadCancelled, !Task.isCancelled else {
             throw UpdateError.cancelled
         }
+    }
+}
+
+/// A cancel request the detached download loop can read; the service's own
+/// flag is main-actor state.
+nonisolated private final class DownloadCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
     }
 }
 
@@ -506,10 +557,34 @@ final class UpdateInstaller {
         destinationAppURL: URL,
         progress: @escaping @MainActor (UpdateProgress) -> Void = { _ in }
     ) async throws -> InstalledUpdate {
-        let (sourceAppURL, mountURL) = try applicationURL(for: artifactURL)
-        defer {
-            if let mountURL { detach(mountURL) }
+        let (sourceAppURL, mountURL) = try await applicationURL(for: artifactURL)
+        // Detaching cannot be awaited from a `defer`, and it must finish before
+        // a successful install relaunches and terminates this process.
+        var mounted = mountURL
+        do {
+            return try await install(
+                sourceAppURL: sourceAppURL,
+                expectedVersion: expectedVersion,
+                destinationAppURL: destinationAppURL,
+                progress: progress,
+                beforeRelaunch: {
+                    if let mount = mounted { await Self.detach(mount) }
+                    mounted = nil
+                }
+            )
+        } catch {
+            if let mounted { await Self.detach(mounted) }
+            throw error
         }
+    }
+
+    private func install(
+        sourceAppURL: URL,
+        expectedVersion: String,
+        destinationAppURL: URL,
+        progress: @escaping @MainActor (UpdateProgress) -> Void,
+        beforeRelaunch: @MainActor () async -> Void
+    ) async throws -> InstalledUpdate {
 
         guard sourceAppURL.standardizedFileURL != destinationAppURL.standardizedFileURL else {
             throw UpdateError.invalidArtifact
@@ -529,7 +604,12 @@ final class UpdateInstaller {
         defer { try? fileManager.removeItem(at: transaction) }
 
         do {
-            try fileManager.copyItem(at: sourceAppURL, to: replacement)
+            // A whole application bundle; copied detached so the window keeps
+            // drawing while it happens.
+            let fileManager = self.fileManager
+            try await Task.detached(priority: .userInitiated) {
+                try fileManager.copyItem(at: sourceAppURL, to: replacement)
+            }.value
             guard bundleVersion(at: replacement) == expectedVersion else {
                 throw UpdateError.artifactVersionMismatch
             }
@@ -557,6 +637,7 @@ final class UpdateInstaller {
                     fraction: 1,
                     message: "The new version is verified. Relaunching Kytto…"
                 ))
+                await beforeRelaunch()
                 guard await relaunchHandler(destination) else {
                     throw UpdateError.relaunchFailed
                 }
@@ -580,7 +661,7 @@ final class UpdateInstaller {
         }
     }
 
-    private func applicationURL(for artifactURL: URL) throws -> (URL, URL?) {
+    private func applicationURL(for artifactURL: URL) async throws -> (URL, URL?) {
         if isApplicationBundle(artifactURL) {
             return (artifactURL, nil)
         }
@@ -588,9 +669,9 @@ final class UpdateInstaller {
             throw UpdateError.invalidArtifact
         }
 
-        let mountURL = try attach(artifactURL)
+        let mountURL = try await Self.attach(artifactURL)
         guard let application = applicationBundles(in: mountURL).single else {
-            detach(mountURL)
+            await Self.detach(mountURL)
             throw UpdateError.invalidArtifact
         }
         return (application, mountURL)
@@ -619,23 +700,18 @@ final class UpdateInstaller {
         return result
     }
 
-    private func attach(_ artifactURL: URL) throws -> URL {
-        let output = Pipe()
-        let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/hdiutil")
-        process.arguments = ["attach", "-plist", "-nobrowse", "-readonly", artifactURL.path]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
+    private static func attach(_ artifactURL: URL) async throws -> URL {
+        // Attaching verifies the image, which takes a while on a slow disk;
+        // two minutes is far beyond that and still ends a wedged hdiutil.
+        guard let (status, output) = await hdiutil(
+            ["attach", "-plist", "-nobrowse", "-readonly", artifactURL.path],
+            timeout: 120
+        ), status == 0 else {
             throw UpdateError.invalidArtifact
         }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw UpdateError.invalidArtifact }
 
         guard let propertyList = try? PropertyListSerialization.propertyList(
-            from: output.fileHandleForReading.readDataToEndOfFile(),
+            from: output,
             options: [],
             format: nil
         ) as? [String: Any],
@@ -646,14 +722,42 @@ final class UpdateInstaller {
         return URL(filePath: mountPath)
     }
 
-    private func detach(_ mountURL: URL) {
+    private static func detach(_ mountURL: URL) async {
+        _ = await hdiutil(["detach", mountURL.path, "-force"], timeout: 30)
+    }
+
+    /// Runs `hdiutil` on a background queue so the main actor never waits on a
+    /// disk image, and gives up after `timeout` seconds rather than hanging the
+    /// update with it. Returns nil when it could not run or did not finish.
+    private static func hdiutil(_ arguments: [String], timeout: TimeInterval) async -> (Int32, Data)? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: runHdiutil(arguments, timeout: timeout))
+            }
+        }
+    }
+
+    nonisolated private static func runHdiutil(_ arguments: [String], timeout: TimeInterval) -> (Int32, Data)? {
+        let output = Pipe()
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/hdiutil")
-        process.arguments = ["detach", mountURL.path, "-force"]
-        process.standardOutput = FileHandle.nullDevice
+        process.arguments = arguments
+        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        // The -plist output is a few kilobytes, well inside the pipe's buffer,
+        // so reading after exit cannot deadlock.
+        guard finished.wait(timeout: .now() + timeout) == .success else {
+            process.terminate()
+            return nil
+        }
+        return (process.terminationStatus, output.fileHandleForReading.readDataToEndOfFile())
     }
 
     private func ensureWritable(_ directory: URL) throws {

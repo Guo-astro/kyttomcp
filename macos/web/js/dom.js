@@ -20,6 +20,18 @@ export function button(label, action, { className = 'button', dataset = {} } = {
   return node;
 }
 
+/// A confirm button that stops answering while its write is in flight. The
+/// action becomes `noop` as well as the button disabled, so a click queued
+/// before the re-render cannot send the command twice.
+export function busyButton(busy, label, busyLabel, action, { className = 'button', dataset = {} } = {}) {
+  const node = button(busy ? busyLabel : label, busy ? 'noop' : action, {
+    className: busy ? `${className} busy` : className,
+    dataset,
+  });
+  node.disabled = Boolean(busy);
+  return node;
+}
+
 export function field(labelText, control, hint) {
   const wrapper = el('label', 'field');
   wrapper.append(el('span', 'field-label', labelText));

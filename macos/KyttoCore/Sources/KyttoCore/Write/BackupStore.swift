@@ -149,7 +149,17 @@ public struct BackupStore: Sendable {
     /// that client, so an edited sidecar cannot aim a restore at any other file
     /// the user can write. `home` and `pathOverrides` must be the ones the write
     /// services were built with.
-    public func restore(_ backup: Backup, home: URL, pathOverrides: [String: String] = [:]) throws {
+    ///
+    /// - Parameter ledger: what Kytto last saw on disk. When given, a target
+    ///   that changed since is refused rather than overwritten — a restore is a
+    ///   write like any other, and §6.4 does not make an exception for it. The
+    ///   ledger is updated to the restored bytes on success.
+    public func restore(
+        _ backup: Backup,
+        home: URL,
+        pathOverrides: [String: String] = [:],
+        ledger: DigestLedger? = nil
+    ) throws {
         try MutationCoordinator.sync {
         let resolver = ClientPathResolver(home: home, overrides: pathOverrides)
         guard let descriptor = ClientRegistry.descriptorIfKnown(for: backup.clientID),
@@ -158,9 +168,45 @@ public struct BackupStore: Sendable {
             throw BackupError.unknownRestoreTarget(pathDisplay: backup.originalPathDisplay)
         }
 
-        let text = try contents(of: backup)
+        // Before anything is written — no pre-restore backup either.
+        if let ledger, ConfigWriter.digest(of: target) != ledger.digest(for: target) {
+            throw ConfigWriteError.changedOnDisk(pathDisplay: backup.originalPathDisplay)
+        }
+
+        // Bytes, not text: decoding would drop a byte-order mark, and a restore
+        // puts back exactly what was there.
+        let data = try Data(contentsOf: backup.url)
         try backUp(target, clientID: backup.clientID, pathDisplay: backup.originalPathDisplay)
-        try AtomicWriter.write(text, to: target)
+        try AtomicWriter.write(data, to: target)
+        ledger?.record(ConfigWriter.digest(of: data), for: target)
+        }
+    }
+
+    /// The servers a backup defines, by name, when the file it was taken from
+    /// is its client's server map. Nil for any other file — a deny list, an
+    /// extension's settings — and for one that does not parse.
+    ///
+    /// Restoring decides from this which of Kytto's parked copies the restored
+    /// file has made redundant. It cannot decide from discovery: discovery draws
+    /// a parked copy into the model as that client's definition, so every
+    /// parked server would look restored and lose its only copy.
+    public func serverNames(in backup: Backup, home: URL, pathOverrides: [String: String] = [:]) -> [String]? {
+        let resolver = ClientPathResolver(home: home, overrides: pathOverrides)
+        guard let descriptor = ClientRegistry.descriptorIfKnown(for: backup.clientID),
+              let source = descriptor.editableServerMap,
+              resolver.resolveServerMap(source.file, for: backup.clientID).standardizedFileURL.path
+                == backup.originalURL.standardizedFileURL.path,
+              let data = try? Data(contentsOf: backup.url),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        switch source.format {
+        case .json:
+            guard let document = try? JSONDocument.parse(text) else { return nil }
+            return document.value(at: [source.serversKey])?.keys ?? []
+        case .toml:
+            guard let document = try? TOMLDocument.parse(text) else { return nil }
+            return document.serverNames(under: source.serversKey)
         }
     }
 

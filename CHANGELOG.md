@@ -26,7 +26,141 @@ without a backup.
             trailing comma
 -->
 
-Planned work is tracked in [Issues](https://github.com/heyitsjakub/KyttoMCP/issues).
+### Fixed
+
+- **Contract Guard alerts disappeared after the next health check.** Every
+  successful check quietly made the tools it had just seen the new baseline, so
+  a changed tool description was reported only until the following check, even
+  if you never reviewed it. A server that changed its tools while you were not
+  looking could go unreported. Now only two things move the baseline: the first
+  successful check and your acknowledgement. An unreviewed change stays on screen,
+  further changes are added to it, the alert keeps the time the change was first
+  seen, and it clears on its own only if the server goes back to the contract you
+  approved.
+- **Reordered keys in a tool's input schema were reported as a breaking change**
+  ([#12](https://github.com/heyitsjakub/KyttoMCP/issues/12)). Contract Guard now
+  compares schemas by content, so a server that only re-serializes its schema is
+  quiet. Reordered array items (for example the values of an `enum`) still count.
+- **The Tool Safety Scanner missed bidirectional isolate characters**
+  ([#13](https://github.com/heyitsjakub/KyttoMCP/issues/13)), U+2066–U+2069, half
+  of the "Trojan Source" technique. They are now reported like the bidirectional
+  overrides it already caught.
+- **A server that listed two tools with the same name crashed Kytto** on its
+  second health check. The duplicate is now resolved the way clients resolve it.
+- **A tool could hide its real description behind a repeated key.** When a
+  tool's JSON said `"description"` twice, Kytto read the first and the client
+  showed the model the second. Kytto now reads tools the way clients do, so the
+  scanner and Contract Guard see what the model sees.
+- **The Tool Safety Scanner missed text written with JSON escapes in an input
+  schema**, such as `\u200b` or an instruction spelled with escapes, and phrases
+  split by a soft hyphen, a zero-width joiner or a line break.
+- **A failed health check made safety findings disappear.** The scanner and the
+  tool-name collision check now use the tools from the last passing check, so a
+  server cannot clear a finding by failing its next check. Acknowledging a
+  Contract Guard change after a failed check now accepts the contract you were
+  shown instead of re-reporting it later.
+- **Renaming a server dropped its Contract Guard baseline and any unreviewed
+  alert.** They now move with the server.
+- **Health checks read only the first page of a paginated tool list.** Tool
+  count, token weight, the scanner and Contract Guard now cover every page.
+- **Ordinary sign-in errors were shown as "waiting for authorization".** A
+  server that said "Authentication required — set GITHUB_TOKEN" is a real
+  failure and is now shown as one.
+- **A huge tool description could hold a health check far past its timeout.**
+- **Gateway tool masking could let hidden tools through** when the server sent
+  a request of its own with the same id as the client's pending `tools/list`.
+  Gateway activity also now counts a tool call that returned `isError` as failed.
+- **Two overlapping checks of one server could save the older result.**
+- **An unreadable measurements file was silently replaced with an empty one**,
+  losing every Contract Guard baseline. Kytto now leaves the file alone and says so.
+- **Health-checked servers inherited Kytto's open files.** A spawned server now
+  receives only its standard input, output and error.
+- **Editing a switched-off server switched it back on.** In Cursor, VS Code and
+  Claude Desktop, where switching off removes the definition, saving an edit
+  wrote the server back into the file while the matrix still showed it off, and
+  switching it on later restored the old definition over your edit. Edits to a
+  switched-off server now go to Kytto's held copy, and it stays off.
+- **Restoring a backup could delete switched-off servers.** Restoring a client's
+  config removed the held copy of every switched-off server that was not in the
+  backup, which was often the only copy left. Kytto now reads the backup to see
+  what it restores and leaves other held copies alone.
+- **Saving a server dropped settings Kytto does not edit.** Editing (or
+  unifying) a server rebuilt its definition from command, arguments, URL and
+  environment, so `headers` (including `Authorization`), `cwd`, `envFile`, and
+  in Codex `startup_timeout_sec`, `enabled_tools`, `http_headers` or
+  `bearer_token_env_var` disappeared, even when you saved without changes. Kytto
+  now changes only the fields you edited; saving without changes writes nothing.
+- **A config file that was a symbolic link was replaced by a plain file**, which
+  broke the link to a dotfiles repository and could make the copy readable by
+  other users. Kytto now writes through the link and keeps the file's permissions.
+- **Codex: editing or deleting one server could delete another** when the
+  server's tables in `config.toml` were not next to each other (for example
+  `[mcp_servers.a]`, `[mcp_servers.b]`, then `[mcp_servers.a.env]`).
+- **Rotating a secret of a switched-off server** wrote an incomplete server into
+  the config, switched it on, and left the old value in the held copy. The held
+  copy is now updated instead.
+- **A server spelled differently in two clients** (`GitHub` in one, `github` in
+  another) could not be switched off or deleted in one of them although Kytto
+  reported success, and editing it added a duplicate entry. Kytto now uses each
+  file's own spelling.
+- **A switch-off that failed to write still showed the server as off.**
+- **Edits made in place by another program were not noticed**, so the matrix went
+  stale and the next change was refused as "changed on disk". Kytto now watches
+  the config files themselves, not only their folders, and no longer drops a
+  change that arrives while it is re-reading.
+- **Restoring a backup overwrote changes made since Kytto last read the file**
+  without asking. It now refuses, like every other write. Edits also keep a
+  UTF-8 byte-order mark and match a file's Windows line endings.
+- **A config that names the same server twice is no longer edited.** Kytto
+  edited the first entry while the client uses the last; it now asks you to fix
+  the duplicate first.
+- **"Restrict permissions" on a secret's config file reported success** when
+  there was nothing to change. Checking whether a config is ignored by git no
+  longer freezes Kytto in a slow repository.
+- **macOS: "Reveal" on a stored secret did nothing.** The confirmation dialog
+  never appeared and was answered "Cancel" automatically.
+- **macOS: MCP Doctor, Live Activity, Profiles, MCP Library and Skills pushed
+  their own last items, the restart bar and the status bar out of the window.**
+- **Scroll position jumped to the top** of MCP Doctor and the server detail after
+  pressing a button in them, and whenever a client rewrote its config; an
+  expanded tool collapsed. Scrolling the matrix also carried over into the next
+  screen you opened.
+- **Pressing Esc while a sheet was saving hid its error**, and double-clicking
+  Delete, Remove, Revert or a health-check button ran the action twice.
+- **A health check that found a Contract Guard change said nothing** beyond a
+  small badge. It now shows a notice naming the server.
+- **Agent JSON import:** the **Preview** button stayed disabled after pasting,
+  and an old preview could import text you had changed since.
+- **The diagnostic report included the server's full URL**, which for remote
+  servers can carry an API key. It now shows only the scheme and host.
+- Client ids such as `claudeCode` appeared instead of client names in MCP Doctor
+  and the MCP Library; the context share always said "of 200k"; the tool mask
+  could show "3 of 2 tools"; onboarding counted project scopes as supported
+  clients; and at the smallest window size the matrix showed about one row.
+- **macOS: changes made from the menu bar did not reach the open window.**
+  Switching a server, applying a profile or checking all servers from the menu
+  bar item left the window showing the old matrix and health until you clicked
+  something. The window now updates straight away, and re-reads your configs
+  whenever you bring it forward.
+- **macOS: the menu bar item could be set to a read-only source**, such as a
+  custom source or a Claude Code project scope, whose toggles could only fail.
+  Those are no longer offered, and a chosen client that is uninstalled or
+  removed falls back to the automatic choice instead of "No client detected".
+- **macOS: one unfinished field stopped every Settings change from saving.**
+  While a path override was half typed or a custom source had no name, changes
+  to the theme, login item or menu bar looked applied but were lost. Everything
+  valid now saves, and the unfinished field keeps its last saved value until it
+  is fixed. A change made just before closing Settings is no longer dropped.
+- **macOS: "Open Kytto" in the menu bar could do nothing** after the main window
+  had been closed.
+- **macOS: Help → Kytto Help opened an unrelated domain.** It now opens the
+  project's documentation on GitHub.
+- **macOS: a health check that finished after its server was deleted brought
+  the server's measurements back.**
+- **macOS: scanning a large directory for MCP servers, and downloading or
+  installing an update, could freeze the window.** That work now runs in the
+  background, the library scan skips files over 1 MB, and a disk image that
+  will not attach or detach no longer hangs the update.
 
 ---
 

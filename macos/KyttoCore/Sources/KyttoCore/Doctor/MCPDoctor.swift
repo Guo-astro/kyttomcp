@@ -91,12 +91,12 @@ public enum MCPDoctor {
 
         for clientID in clients {
             let active = servers.filter {
-                $0.enabledIn[clientID] == .enabled && !($0.health?.tools.isEmpty ?? true)
+                $0.enabledIn[clientID] == .enabled && !$0.knownTools.isEmpty
             }
             guard active.count > 1 else { continue }
 
             let shadowed = ToolSafetyScanner.shadowedNames(
-                across: active.map { (name: $0.name, tools: $0.health?.tools ?? []) }
+                across: active.map { (name: $0.name, tools: $0.knownTools) }
             )
             guard !shadowed.isEmpty else { continue }
 
@@ -204,7 +204,9 @@ public enum MCPDoctor {
         // server can start cleanly, answer `tools/list` correctly and still have
         // shipped an instruction in a description — every other check in this
         // file would call that healthy (§7.10).
-        findings.append(contentsOf: ToolSafetyScanner.scan(health.tools).map(finding(for:)))
+        // The last passing contract, not this check's: a failed check lists no
+        // tools, and failing must not be a way to make a finding go away.
+        findings.append(contentsOf: ToolSafetyScanner.scan(server.knownTools).map(finding(for:)))
 
         if health.status == .passed,
            let configured = server.command?.trimmingCharacters(in: .whitespacesAndNewlines),

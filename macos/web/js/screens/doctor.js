@@ -3,14 +3,22 @@
 // it never guesses paths, commands or edits.
 
 import { el, button, sheet } from '../dom.js';
+import { clientNames } from '../state.js';
 
 export function renderDoctor(state) {
   const panel = el('div', 'doctor-panel');
+  panel.dataset.scrollKey = 'doctor';
   const head = el('header', 'panel-head');
   const copy = el('div');
   copy.append(el('h2', null, 'MCP Doctor'));
   copy.append(el('p', 'muted', 'Find startup, environment and portability problems before opening every client log.'));
-  head.append(copy, el('span', 'spacer'), button('Check all servers', 'check-all'));
+  // The same run the matrix toolbar starts; both wait on it.
+  const checkingAll = Boolean(state.healthProgress);
+  const checkAll = button(checkingAll ? 'Checking…' : 'Check all servers', checkingAll ? 'noop' : 'check-all', {
+    className: checkingAll ? 'button busy' : 'button',
+  });
+  checkAll.disabled = checkingAll;
+  head.append(copy, el('span', 'spacer'), checkAll);
   panel.append(head);
 
   const reports = state.doctorReports ?? [];
@@ -36,9 +44,13 @@ export function renderDoctor(state) {
       item.append(el('p', null, finding.detail));
       item.append(el('p', 'muted', finding.remediation));
       if (finding.action === 'runHealthCheck') {
-        item.append(button('Run health check', 'check-server', {
+        const checking = state.checking.has(report.serverID) || checkingAll;
+        const check = button(checking ? 'Checking…' : 'Run health check', checking ? 'noop' : 'check-server', {
+          className: checking ? 'button busy' : 'button',
           dataset: { serverId: report.serverID },
-        }));
+        });
+        check.disabled = checking;
+        item.append(check);
       } else if (finding.action === 'pinResolvedCommand') {
         item.append(button('Preview safe fix…', 'doctor-preview-fix', {
           className: 'button primary',
@@ -89,7 +101,7 @@ export function renderDoctorFix(state) {
   comparison.append(commandBlock('Configured now', preview.currentCommand));
   comparison.append(commandBlock('After', preview.replacementCommand));
   body.push(comparison);
-  body.push(el('p', 'muted', `Affected client definitions: ${preview.clientIDs.join(', ')}. Kytto will preview this here, back up every affected config, preserve unrelated content and write atomically.`));
+  body.push(el('p', 'muted', `Affected client definitions: ${clientNames(state, preview.clientIDs)}. Kytto will preview this here, back up every affected config, preserve unrelated content and write atomically.`));
   if (state.sheet.error) body.push(el('p', 'failure-message', state.sheet.error));
 
   return sheet('Safe repair preview', body, [
@@ -136,12 +148,6 @@ function renderPackagePin(state, preview) {
       dataset: { serverId: preview.serverID },
     }),
   ]);
-}
-
-function clientNames(state, clientIDs) {
-  return clientIDs
-    .map((id) => state.clients.find((client) => client.id === id)?.displayName ?? id)
-    .join(', ');
 }
 
 function commandBlock(label, command) {

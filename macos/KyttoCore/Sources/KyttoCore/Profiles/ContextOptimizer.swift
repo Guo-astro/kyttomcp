@@ -93,7 +93,7 @@ public enum ContextOptimizer {
 
         var owners: [String: [String]] = [:]
         for server in members {
-            for tool in server.health?.tools ?? [] {
+            for tool in server.knownTools {
                 owners[tool.name, default: []].append(server.id)
             }
         }

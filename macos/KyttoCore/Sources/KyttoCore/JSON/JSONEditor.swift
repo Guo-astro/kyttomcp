@@ -7,6 +7,35 @@ public enum JSONEditError: Error, Equatable {
     /// The value is not what the caller last read there, so the edit it was
     /// planned against no longer applies.
     case valueMismatch([String])
+    /// The key appears more than once in its object. Clients resolve that
+    /// last-wins, so editing the first copy would change the one nobody reads;
+    /// guessing which one the user meant is not a splice (§6.3).
+    case duplicateKey([String])
+}
+
+extension JSONEditError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .pathNotFound(let path):
+            "\(Self.display(path)) is not in the file."
+        case .notAnObject(let path):
+            "\(Self.display(path)) is not a JSON object."
+        case .notAnArray(let path):
+            "\(Self.display(path)) is not a JSON array."
+        case .valueMismatch(let path):
+            "\(Self.display(path)) changed since Kytto read it."
+        case .duplicateKey(let path):
+            """
+            "\(path.last ?? "")" appears more than once in \(Self.display(Array(path.dropLast()))). \
+            Clients use the last copy, so Kytto will not guess which one to change — \
+            remove the duplicate in the file, then try again.
+            """
+        }
+    }
+
+    private static func display(_ path: [String]) -> String {
+        path.isEmpty ? "The top level" : path.map { "\"\($0)\"" }.joined(separator: " → ")
+    }
 }
 
 /// Structural edits, expressed as splices.
@@ -37,7 +66,7 @@ public extension JSONDocument {
 
         // Existing key: replace just the value, leaving the key and its
         // formatting alone.
-        if let existing = members.first(where: { $0.key == key }) {
+        if let existing = try Self.soleMember(key, in: members, at: path) {
             return document.replacing(existing.value.span, with: rawValue)
         }
 
@@ -59,10 +88,20 @@ public extension JSONDocument {
     func removingMember(_ key: String, at path: [String]) throws -> String {
         guard let container = root.value(at: path) else { throw JSONEditError.pathNotFound(path) }
         guard let members = container.members else { throw JSONEditError.notAnObject(path) }
-        guard let index = members.firstIndex(where: { $0.key == key }) else { return sourceText }
+        guard try Self.soleMember(key, in: members, at: path) != nil,
+              let index = members.firstIndex(where: { $0.key == key })
+        else { return sourceText }
 
         let spans = members.map(\.span)
         return replacing(removalSpan(of: index, in: spans, container: container), with: "")
+    }
+
+    /// The one member called `key`, or nil. Two of them is an error, not a
+    /// choice: clients read the last, `JSONNode.member` the first (§6.3).
+    internal static func soleMember(_ key: String, in members: [JSONMember], at path: [String]) throws -> JSONMember? {
+        let matches = members.filter { $0.key == key }
+        guard matches.count <= 1 else { throw JSONEditError.duplicateKey(path + [key]) }
+        return matches.first
     }
 
     // MARK: - Arrays

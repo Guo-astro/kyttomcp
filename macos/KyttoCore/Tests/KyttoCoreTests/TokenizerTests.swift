@@ -29,6 +29,24 @@ struct TokenizerTests {
         return try JSONDecoder().decode([Vector].self, from: Data(contentsOf: url))
     }
 
+    @Test("A hostile run of letters is counted in bounded time")
+    func longPieceIsBounded() throws {
+        let tokenizer = try tokenizer
+        let text = String(repeating: "a", count: 100_000)
+        let started = Date()
+        let count = tokenizer.countTokens(text)
+        // Unsliced, this took over a minute (quadratic merge loop).
+        #expect(Date().timeIntervalSince(started) < 10)
+        #expect(count > 0 && count < text.count)
+    }
+
+    @Test("Ordinary text is counted exactly, slicing or not")
+    func slicingDoesNotChangeOrdinaryCounts() throws {
+        let tokenizer = try tokenizer
+        let text = "Read the contents of a file from the allowed directories."
+        #expect(tokenizer.countTokens(text) == tokenizer.encode(text).count)
+    }
+
     @Test("Every byte value is representable")
     func tableIsComplete() throws {
         let tokenizer = try tokenizer

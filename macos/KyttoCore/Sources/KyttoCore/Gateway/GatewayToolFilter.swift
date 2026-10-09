@@ -137,7 +137,13 @@ public final class GatewayToolFilter: @unchecked Sendable {
     /// result with something to remove.
     public func rewriteServerLine(_ line: Data) -> Data {
         guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let id = GatewayJSONRPC.requestID(object["id"])
+              let id = GatewayJSONRPC.requestID(object["id"]),
+              // Only a response answers the client's request. The server's own
+              // requests (`roots/list`, `sampling/createMessage`) number from
+              // their own id space and can reuse the id of a pending `tools/list`;
+              // consuming it here would let the real reply through unfiltered.
+              object["method"] == nil,
+              object["result"] != nil || object["error"] != nil
         else { return line }
 
         lock.lock()

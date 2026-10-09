@@ -33,7 +33,15 @@ public enum AtomicWriter {
     ///   the mode of the file being replaced, so a config the user had locked
     ///   down does not come back world-readable; a file that did not exist yet
     ///   gets the process default.
-    public static func write(_ data: Data, to url: URL, permissions: Int? = nil) throws {
+    public static func write(_ data: Data, to requested: URL, permissions: Int? = nil) throws {
+        // A config kept in a dotfiles folder and linked into place is a symbolic
+        // link. Renaming over the link would replace it with a regular file —
+        // cutting the dotfiles copy loose — and the mode read off the link is
+        // the link's own, not the file's. So the write goes to the file the link
+        // names, staged beside *it*. Callers keep the path the client reads:
+        // backups and the digest ledger key on that, and reading through the
+        // link gives them the same bytes.
+        let url = try resolvingSymbolicLinks(requested)
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -85,6 +93,23 @@ public enum AtomicWriter {
         }
         try handle.synchronize()
         try handle.close()
+    }
+
+    /// Follows a chain of symbolic links at the final path component to the
+    /// file at the end of it, which need not exist yet. Links in the directory
+    /// part are left to the kernel: a rename through them lands in the right
+    /// place already.
+    static func resolvingSymbolicLinks(_ url: URL) throws -> URL {
+        var current = url.standardizedFileURL
+        for _ in 0..<32 {
+            guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path) else {
+                return current
+            }
+            current = destination.hasPrefix("/")
+                ? URL(filePath: destination).standardizedFileURL
+                : current.deletingLastPathComponent().appending(path: destination).standardizedFileURL
+        }
+        throw WriteError.couldNotCreateTemporaryFile(POSIXError(.ELOOP).localizedDescription)
     }
 
     private static func existingPermissions(of url: URL) -> Int? {

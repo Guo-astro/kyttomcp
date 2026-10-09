@@ -25,6 +25,7 @@ function storeName(state) {
 
 export function renderSecrets(state) {
   const panel = el('div', 'table-scroll');
+  panel.dataset.scrollKey = 'secrets';
 
   if (state.secrets.length === 0) {
     const empty = el('div', 'placeholder');

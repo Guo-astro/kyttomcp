@@ -31,6 +31,7 @@ function metric(value, label) {
 
 export function renderOnboarding(state) {
   const wrapper = el('div', 'onboarding');
+  wrapper.dataset.scrollKey = 'onboarding';
   const shell = el('div', 'onboarding-shell');
 
   const hero = el('section', 'onboarding-hero');
@@ -44,7 +45,11 @@ export function renderOnboarding(state) {
   const eyebrow = el('div', 'onboarding-eyebrow');
   eyebrow.append(el('span', 'onboarding-eyebrow-dot'), el('span', null, 'First run'));
 
-  const detected = state.clients.filter((client) => client.state !== 'notInstalled');
+  // Read-only entries are project scopes and custom sources, not clients: a
+  // long-used Claude Code alone contributes one per project. They are counted
+  // separately so "supported clients" means the applications Kytto supports.
+  const builtIn = state.clients.filter((client) => !client.isReadOnly);
+  const detected = builtIn.filter((client) => client.state !== 'notInstalled');
   const totalServers = state.servers.length;
   const customSources = state.clients.filter((client) => client.isReadOnly).length;
   const platform = state.app?.platformDisplayName ?? 'this platform';
@@ -87,11 +92,12 @@ export function renderOnboarding(state) {
   panelHeading.append(sectionLabel, foundHeading);
   panelHeader.append(
     panelHeading,
-    el('span', 'onboarding-panel-meta', `${state.clients.length} supported clients`),
+    el('span', 'onboarding-panel-meta', `${builtIn.length} supported clients`),
   );
   panel.append(panelHeader);
 
   const list = el('ul', 'onboarding-clients');
+  list.dataset.scrollKey = 'onboarding-clients';
   for (const client of state.clients) {
     const item = el('li', `onboarding-client${client.state === 'notInstalled' ? ' is-idle' : ''}`);
     const copy = el('div', 'onboarding-client-copy');

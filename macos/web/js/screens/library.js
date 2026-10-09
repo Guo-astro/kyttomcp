@@ -5,9 +5,11 @@
 // values and never executes a discovered entry point.
 
 import { el, button } from '../dom.js';
+import { clientNames } from '../state.js';
 
 export function renderLibrary(state) {
   const panel = el('div', 'library-panel');
+  panel.dataset.scrollKey = 'library';
   const head = el('header', 'panel-head');
   const copy = el('div');
   copy.append(el('h2', null, 'MCP Library & agent import'));
@@ -52,7 +54,7 @@ function candidateCard(state, candidate) {
   card.append(heading);
 
   card.append(el('div', 'library-command mono', candidate.commandSummary || 'No command summary'));
-  card.append(definitionMeta(candidate));
+  card.append(definitionMeta(state, candidate));
   for (const warning of candidate.warnings ?? []) card.append(message('warning', warning));
 
   const targets = targetPicker(
@@ -79,11 +81,11 @@ function candidateCard(state, candidate) {
   return card;
 }
 
-function definitionMeta(candidate) {
+function definitionMeta(state, candidate) {
   const meta = el('div', 'library-meta');
   meta.append(metaItem('Environment keys', candidate.environmentKeys?.length ? candidate.environmentKeys.join(', ') : 'None'));
-  meta.append(metaItem('Found in', candidate.detectedClientIDs?.length ? candidate.detectedClientIDs.join(', ') : 'No known client map'));
-  if (candidate.missingClientIDs?.length) meta.append(metaItem('Not found in', candidate.missingClientIDs.join(', ')));
+  meta.append(metaItem('Found in', candidate.detectedClientIDs?.length ? clientNames(state, candidate.detectedClientIDs) : 'No known client map'));
+  if (candidate.missingClientIDs?.length) meta.append(metaItem('Not found in', clientNames(state, candidate.missingClientIDs)));
   return meta;
 }
 

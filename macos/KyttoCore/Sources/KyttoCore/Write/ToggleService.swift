@@ -471,7 +471,7 @@ public struct ToggleService: Sendable {
             // Discovery said this client does not have it. If the file disagrees,
             // the file wins: overwriting a definition someone may have edited by
             // hand is not what a click on an empty cell asked for.
-            guard document.value(at: [serversKey])?.member(server.name) == nil else {
+            guard try document.serverKey(for: server.id, under: serversKey) == nil else {
                 return document.sourceText
             }
             return try document.settingMember(
@@ -541,35 +541,75 @@ public struct ToggleService: Sendable {
         // fails without anything having been opened.
         let arriving = enabled ? try arrivingDefinition(for: server, in: clientID) : nil
 
+        let expecting = ledger.digest(for: url)
+        let previousPark = parkStore.parked(clientID: clientID, serverName: server.name)
         var parked = false
-        let receipt = try writer.edit(
-            url: url,
-            clientID: clientID,
-            pathDisplay: display,
-            expecting: ledger.digest(for: url)
-        ) { document in
-            if let arriving {
-                return try document.settingMember(
-                    server.name,
-                    at: [serversKey],
-                    to: literal(for: arriving, server: server, serversKey: serversKey, in: document)
-                )
-            }
-            // Park the exact bytes before they go, so switching back is a
-            // restoration rather than a reconstruction.
-            if let member = document.value(at: [serversKey])?.member(server.name) {
+        var restored = false
+        let receipt: WriteReceipt
+        do {
+            receipt = try writer.edit(
+                url: url,
+                clientID: clientID,
+                pathDisplay: display,
+                expecting: expecting
+            ) { document in
+                // The spelling this file uses, which need not be the row's: the
+                // matrix merges `GitHub` and `github` into one row.
+                let key = try document.serverKey(for: server.id, under: serversKey)
+
+                if let arriving {
+                    // Already defined here — put back by hand, or edited in place.
+                    // The file wins; restoring held bytes over it would undo
+                    // whatever is there now.
+                    guard key == nil else { return document.sourceText }
+                    restored = true
+                    // Back under the spelling it was held under, which is this
+                    // file's own — not the merged row's, which may come from
+                    // another client.
+                    return try document.settingMember(
+                        previousPark?.serverName ?? server.name,
+                        at: [serversKey],
+                        to: literal(for: arriving, server: server, serversKey: serversKey, in: document)
+                    )
+                }
+                guard let key, let member = document.value(at: [serversKey])?.member(key) else {
+                    return document.sourceText
+                }
+                // Park the exact bytes before they go, so switching back is a
+                // restoration rather than a reconstruction, and a crash cannot
+                // leave the definition removed without a restorable copy.
                 try parkStore.park(
                     clientID: clientID,
-                    serverName: server.name,
+                    serverName: key,
                     sourceText: document.slice(member.value.span)
                 )
                 parked = true
+                return try document.removingMember(key, at: [serversKey])
             }
-            return try document.removingMember(server.name, at: [serversKey])
+        } catch {
+            // The park happened inside the transaction. If the write was then
+            // refused or failed, the definition is still in the file, and a
+            // park left behind would draw a server that is on as off. Put the
+            // store back the way it was — but only while the file still says
+            // what it said, so a park can never outlive its definition.
+            if parked, ConfigWriter.digest(of: url) == expecting {
+                if let previousPark {
+                    try? parkStore.park(
+                        clientID: previousPark.clientID,
+                        serverName: previousPark.serverName,
+                        sourceText: previousPark.sourceText
+                    )
+                } else {
+                    try? parkStore.unpark(clientID: clientID, serverName: server.name)
+                }
+            }
+            throw error
         }
         ledger.record(receipt.digest, for: url)
 
-        if enabled {
+        // Kytto's copy is spent once its bytes are back in the file. If the file
+        // already had a definition, nothing was restored and the copy stays.
+        if restored {
             try? parkStore.unpark(clientID: clientID, serverName: server.name)
         }
 

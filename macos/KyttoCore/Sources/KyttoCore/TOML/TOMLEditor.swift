@@ -11,6 +11,10 @@ public enum TOMLEditError: Error, Equatable {
     case ambiguousValue([String])
     /// The value is not what the caller last read there.
     case valueMismatch([String])
+    /// A field spelled in a way Kytto reads but will not splice — `env.KEY = …`
+    /// as dotted keys on the server's own table. Rewriting it would mean
+    /// re-serialising lines Kytto did not write (§6.3).
+    case unsupportedLayout([String])
 }
 
 /// Structural edits, expressed as splices.
@@ -145,19 +149,29 @@ public extension TOMLDocument {
     /// Adds or replaces a server's definition.
     ///
     /// `block` is a rendered table block, headers and all, as produced by
-    /// `TOMLBuilder`. Replacing an existing server swaps the whole block, which
-    /// is what makes an edit that drops an env var actually drop it.
+    /// `TOMLBuilder`. Replacing an existing server swaps its tables for the
+    /// block — so only for a definition Kytto is putting there wholesale. An
+    /// edit the user typed goes through `ServerDraft.splicingTOML` instead,
+    /// which keeps every key a draft does not describe (§6.3).
     func settingServer(_ name: String, under key: String, to block: String) throws -> String {
         if table(at: [key])?.pair(name)?.value.inlinePairs != nil {
             throw TOMLEditError.inlineDefinition(name)
         }
 
-        let existing = serverTables(name, under: key)
-        if let first = existing.first, let last = existing.last {
-            return replacing(
-                TOMLSpan(start: lineStart(of: first.span.start), end: last.span.end),
-                with: block
-            )
+        // A server's tables need not sit together — `[a]`, `[b]`, `[a.env]` is
+        // valid TOML — so they are replaced run by run. One span from the first
+        // to the last would take `[b]` with it.
+        let runs = serverTableRuns(name, under: key)
+        if let own = runs.firstIndex(where: { $0.contains { $0.path == [key, name] } }) ?? runs.indices.first {
+            var edits: [(span: TOMLSpan, replacement: String)] = []
+            for (index, run) in runs.enumerated() {
+                if index == own {
+                    edits.append((TOMLSpan(start: lineStart(of: run[0].span.start), end: run[run.count - 1].span.end), block))
+                } else {
+                    edits.append((removalSpan(first: run[0], last: run[run.count - 1]), ""))
+                }
+            }
+            return replacing(edits)
         }
 
         // New server. Keep it with the others if there are others, so the file
@@ -180,9 +194,94 @@ public extension TOMLDocument {
             throw TOMLEditError.inlineDefinition(name)
         }
 
-        let tables = serverTables(name, under: key)
-        guard let first = tables.first, let last = tables.last else { return sourceText }
+        // Run by run, for the reason `settingServer` gives: another server's
+        // table sitting between two of this one's is not this one's to delete.
+        let runs = serverTableRuns(name, under: key)
+        guard !runs.isEmpty else { return sourceText }
+        return replacing(runs.map { (removalSpan(first: $0[0], last: $0[$0.count - 1]), "") })
+    }
 
+    /// Removes one table — header, keys, and the blank lines it occupied —
+    /// and nothing under it.
+    func removingTable(at path: [String]) -> String {
+        guard let table = table(at: path), table.headerSpan != nil else { return sourceText }
+        return replacing(removalSpan(first: table, last: table), with: "")
+    }
+
+    /// Gives a server a new name by rewriting the headers of its tables and
+    /// nothing else, so every key under them survives the rename (§6.3).
+    func renamingServer(_ name: String, to newName: String, under key: String) throws -> String {
+        if table(at: [key])?.pair(name)?.value.inlinePairs != nil {
+            throw TOMLEditError.inlineDefinition(name)
+        }
+        let tables = serverTables(name, under: key)
+        guard !tables.isEmpty else { throw TOMLEditError.tableNotFound([key, name]) }
+        return replacing(tables.compactMap { table in
+            guard let header = table.headerSpan else { return nil }
+            let path = TOMLText.path([key, newName] + table.path.dropFirst(2))
+            return (header, table.isArrayElement ? "[[\(path)]]" : "[\(path)]")
+        })
+    }
+
+    // MARK: - Values inside one table
+
+    /// Sets `name` in the table at `path` to `rawValue` (already-spelled TOML),
+    /// adding the key after the table's last one if it is not there.
+    func settingValue(_ name: String, inTable path: [String], to rawValue: String) throws -> String {
+        guard let table = table(at: path) else { throw TOMLEditError.tableNotFound(path) }
+        let matches = table.pairs.filter { $0.key == [name] }
+        guard matches.count <= 1 else { throw TOMLEditError.ambiguousValue(path + [name]) }
+        if let pair = matches.first {
+            return replacing(pair.value.span, with: rawValue)
+        }
+        // At the end of the table's last line rather than straight after its
+        // last value, so a comment trailing that line stays on it.
+        let anchor = lineContentEnd(from: table.span.end)
+        return replacing(
+            TOMLSpan(start: anchor, end: anchor),
+            with: "\n\(TOMLText.key(name)) = \(rawValue)"
+        )
+    }
+
+    /// Removes `name` from the table at `path`, line and all. A missing key is
+    /// not an error — the desired end state is already true.
+    func removingValue(_ name: String, inTable path: [String]) throws -> String {
+        guard let table = table(at: path) else { throw TOMLEditError.tableNotFound(path) }
+        let matches = table.pairs.filter { $0.key == [name] }
+        guard matches.count <= 1 else { throw TOMLEditError.ambiguousValue(path + [name]) }
+        guard let pair = matches.first else { return sourceText }
+        return replacing(
+            TOMLSpan(start: lineStart(of: pair.span.start), end: endOfLine(from: pair.span.end)),
+            with: ""
+        )
+    }
+
+    /// Just past the last line of the table at `path`, before its line ending:
+    /// where a new table that belongs with it goes.
+    func endOfTableContent(at path: [String]) -> Int? {
+        table(at: path).map { lineContentEnd(from: $0.span.end) }
+    }
+
+    /// A server's tables grouped into runs that sit together in the file, in
+    /// file order.
+    private func serverTableRuns(_ name: String, under key: String) -> [[TOMLTable]] {
+        let own = Set(serverTables(name, under: key).map(\.path))
+        var runs: [[TOMLTable]] = []
+        var current: [TOMLTable] = []
+        for table in tables {
+            if own.contains(table.path) {
+                current.append(table)
+            } else if !current.isEmpty {
+                runs.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty { runs.append(current) }
+        return runs
+    }
+
+    /// The range that makes a run of tables vanish as if never typed.
+    private func removalSpan(first: TOMLTable, last: TOMLTable) -> TOMLSpan {
         var start = lineStart(of: first.span.start)
         var end = endOfLine(from: last.span.end)
 
@@ -195,8 +294,7 @@ public extension TOMLDocument {
         } else {
             start = startSkippingBlankLines(before: start)
         }
-
-        return replacing(TOMLSpan(start: start, end: end), with: "")
+        return TOMLSpan(start: start, end: end)
     }
 
     /// Sets a boolean on the server's own table, creating the key if it is not
@@ -244,6 +342,15 @@ public extension TOMLDocument {
     private func lineStart(of offset: Int) -> Int {
         var index = min(offset, sourceBytes.count)
         while index > 0, sourceBytes[index - 1] != 0x0A { index -= 1 }
+        return index
+    }
+
+    /// The line ending that ends the line containing `offset`, or the end of
+    /// the file — where text belonging at the end of that line goes.
+    private func lineContentEnd(from offset: Int) -> Int {
+        var index = min(offset, sourceBytes.count)
+        while index < sourceBytes.count, sourceBytes[index] != 0x0A { index += 1 }
+        if index > offset, index < sourceBytes.count, sourceBytes[index - 1] == 0x0D { index -= 1 }
         return index
     }
 

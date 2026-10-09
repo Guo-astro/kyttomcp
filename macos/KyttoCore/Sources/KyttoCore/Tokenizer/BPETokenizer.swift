@@ -82,10 +82,27 @@ public final class BPETokenizer: @unchecked Sendable {
     public func countTokens(_ text: String) -> Int {
         var total = 0
         forEachPiece(in: text) { bytes in
-            total += ranks[bytes] != nil ? 1 : mergeBoundaries(bytes).count - 1
+            if ranks[bytes] != nil {
+                total += 1
+                return
+            }
+            // The merge loop is quadratic in the piece's length, and a server
+            // controls that length: one 400 KB run of letters held a health
+            // check for over a minute, past its own timeout. Real text never
+            // forms pieces this long; for those that do, counting fixed slices
+            // differs from the exact answer by at most a token per slice.
+            var start = 0
+            while start < bytes.count {
+                let end = min(start + Self.maxExactPiece, bytes.count)
+                let slice = Array(bytes[start..<end])
+                total += ranks[slice] != nil ? 1 : mergeBoundaries(slice).count - 1
+                start = end
+            }
         }
         return total
     }
+
+    static let maxExactPiece = 256
 
     /// The token ids for `text`. Only the count is used in the app; this exists
     /// so the merge loop can be tested against known vectors rather than

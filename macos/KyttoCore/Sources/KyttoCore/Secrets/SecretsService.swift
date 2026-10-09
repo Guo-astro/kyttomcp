@@ -53,12 +53,16 @@ public struct SecretsService: Sendable {
     private let ledger: DigestLedger
     private let store: any SecretStoring
     private let descriptors: [ClientDescriptor]
+    /// Where switched-off copies live. Without it, a secret held only in a
+    /// parked copy is refused rather than written into the file (§7.12).
+    private let parkStore: ParkStore?
 
     public init(
         home: URL,
         writer: ConfigWriter,
         ledger: DigestLedger,
         store: any SecretStoring,
+        parkStore: ParkStore? = nil,
         descriptors: [ClientDescriptor] = ClientRegistry.all,
         pathOverrides: [String: String] = [:]
     ) {
@@ -67,6 +71,7 @@ public struct SecretsService: Sendable {
         self.writer = writer
         self.ledger = ledger
         self.store = store
+        self.parkStore = parkStore
         self.descriptors = descriptors
     }
 
@@ -166,6 +171,7 @@ public struct SecretsService: Sendable {
         var backupIDs: [String] = []
         var originals: [URL: Data?] = [:]
         var written: [URL] = []
+        var parksWritten: [ParkStore.Entry] = []
         let oldStoredValue = record.isInSecretStore ? reveal(secretID: secretID, servers: servers) : nil
 
         // Grouped per file, so a config holding the same token for two servers is
@@ -181,6 +187,11 @@ public struct SecretsService: Sendable {
             originals[url] = try? Data(contentsOf: url)
             let display = resolver.displayServerMap(source.file, for: clientID)
             let receipt: WriteReceipt
+            // Copies switched off in a presence-only client are not in the file.
+            // Writing the value there would put a half-definition back — a server
+            // switched on with nothing but an `env` — so they are found here and
+            // changed where they live, after the files.
+            var parkedUsages: [SecretUsage] = []
             switch source.format {
             case .json:
                 receipt = try writer.edit(
@@ -192,10 +203,13 @@ public struct SecretsService: Sendable {
                     var text = document.sourceText
                     for usage in usages {
                         let current = try JSONDocument.parse(text)
-                        text = try current.settingMember(
-                            record.key,
-                            at: [source.serversKey, usage.serverName, "env"],
-                            to: JSONText.string(newValue)
+                        // The spelling this file uses, which need not be the row's.
+                        guard let name = try current.serverKey(for: usage.serverID, under: source.serversKey) else {
+                            parkedUsages.append(usage)
+                            continue
+                        }
+                        text = try Self.replacingEnvironmentValue(
+                            record.key, with: newValue, in: current, at: [source.serversKey, name]
                         )
                     }
                     return text
@@ -214,7 +228,8 @@ public struct SecretsService: Sendable {
                         text = try current.settingServerEnvironmentValue(
                             record.key,
                             to: newValue,
-                            forServer: usage.serverName,
+                            forServer: try current.serverName(for: usage.serverID, under: source.serversKey)
+                                ?? usage.serverName,
                             under: source.serversKey
                         )
                     }
@@ -222,7 +237,18 @@ public struct SecretsService: Sendable {
                 }
             }
             ledger.record(receipt.digest, for: url)
-            written.append(url)
+            if receipt.didWrite { written.append(url) }
+
+            for usage in parkedUsages {
+                guard let parkStore,
+                      let entry = parkStore.parked(clientID: clientID, serverName: usage.serverName)
+                else { throw SecretsError.notFound }
+                let text = try Self.replacingEnvironmentValue(
+                    record.key, with: newValue, in: JSONDocument.parse(entry.sourceText), at: []
+                )
+                try parkStore.park(clientID: clientID, serverName: entry.serverName, sourceText: text)
+                parksWritten.append(entry)
+            }
 
             if let backupID = receipt.backupID { backupIDs.append(backupID) }
             updated.append(contentsOf: usages)
@@ -233,6 +259,15 @@ public struct SecretsService: Sendable {
         }
         } catch {
             var rollbackFailures: [String] = []
+            for entry in parksWritten.reversed() {
+                do {
+                    try parkStore?.park(
+                        clientID: entry.clientID, serverName: entry.serverName, sourceText: entry.sourceText
+                    )
+                } catch {
+                    rollbackFailures.append("\(entry.clientID.rawValue) (switched-off copy of \(entry.serverName))")
+                }
+            }
             for url in written.reversed() {
                 do {
                     if let original = originals[url] ?? nil {
@@ -258,6 +293,25 @@ public struct SecretsService: Sendable {
         }
     }
 
+    /// Splices a new value over one environment variable of the definition at
+    /// `path`, and nothing else.
+    ///
+    /// The variable has to be there already. Rotation changes a value it found;
+    /// a missing path means the file moved since the scan, and creating it would
+    /// write a definition nobody asked for.
+    private static func replacingEnvironmentValue(
+        _ key: String,
+        with value: String,
+        in document: JSONDocument,
+        at path: [String]
+    ) throws -> String {
+        let envPath = path + ["env"]
+        guard let members = document.value(at: envPath)?.members,
+              let member = try JSONDocument.soleMember(key, in: members, at: envPath)
+        else { throw JSONEditError.pathNotFound(envPath + [key]) }
+        return document.replacing(member.value.span, with: JSONText.string(value))
+    }
+
     /// Keeps a copy of the current value, so a later scrub or mistake is recoverable.
     public func adopt(secretID: String, servers: [Server]) throws {
         guard let value = reveal(secretID: secretID, servers: servers) else {
@@ -277,15 +331,31 @@ public struct SecretsService: Sendable {
     /// Small, reversible, and the only hardening available while the value has to
     /// stay in the file: a token in a `0644` file is readable by anything running
     /// as another user on the machine.
+    ///
+    /// Throws rather than reporting success when nothing was changed: the UI
+    /// tells the user the file is now private, and that sentence has to be true.
     @discardableResult
     public func restrictPermissions(clientID: ClientID) throws -> Bool {
         guard let descriptor = descriptors.first(where: { $0.id == clientID }),
               let source = descriptor.editableServerMap
-        else { return false }
+        else { throw SecretsError.noConfigFile(clientID.rawValue) }
 
         let url = resolver.resolveServerMap(source.file, for: clientID)
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let display = resolver.displayServerMap(source.file, for: clientID)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw SecretsError.noConfigFile(display)
+        }
+        // `setAttributes` follows a symbolic link, so a config kept in a dotfiles
+        // folder is tightened where it actually lives.
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+
+        // Checked, not assumed: a file on a volume that ignores modes takes the
+        // call without complaint and stays readable.
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.resolvingSymlinksInPath().path)
+        let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777
+        guard mode & 0o077 == 0 else {
+            throw SecretsError.permissionsUnchanged(display)
+        }
         return true
     }
 
@@ -341,6 +411,13 @@ public struct SecretsService: Sendable {
         return nil
     }
 
+    /// How long `git check-ignore` gets before the answer counts as unknown.
+    /// The scan runs on the main thread behind every secrets screen, and a
+    /// slow repository or a stuck credential helper must not freeze the app.
+    static let gitCheckTimeout: TimeInterval = 3
+
+    /// Unknown — no git, or no answer in time — is treated as not ignored, so
+    /// the exposure is still reported. Not knowing is not the same as safe.
     private func isIgnoredByGit(_ url: URL, in repository: URL) -> Bool {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/git")
@@ -348,8 +425,13 @@ public struct SecretsService: Sendable {
         process.arguments = ["check-ignore", "-q", url.path]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
         guard (try? process.run()) != nil else { return false }
-        process.waitUntilExit()
+        guard finished.wait(timeout: .now() + Self.gitCheckTimeout) == .success else {
+            process.terminate()
+            return false
+        }
         return process.terminationStatus == 0
     }
 
@@ -398,11 +480,19 @@ public enum SecretsError: Error, LocalizedError, Equatable {
     case notFound
     case emptyValue
     case rollbackFailed(paths: [String], backupIDs: [String])
+    /// There is no configuration file to restrict.
+    case noConfigFile(String)
+    /// The mode was set and did not take, so the file is still readable by others.
+    case permissionsUnchanged(String)
 
     public var errorDescription: String? {
         switch self {
         case .notFound: "That secret is no longer in any configuration."
         case .emptyValue: "A secret cannot be set to an empty value."
+        case .noConfigFile(let path):
+            "There is no configuration file at \(path), so its permissions were not changed."
+        case .permissionsUnchanged(let path):
+            "\(path) is still readable by other users — the file system did not accept the change."
         case .rollbackFailed(let paths, let backupIDs):
             "Secret rotation could not be fully rolled back. Recovery copies remain for \(paths.joined(separator: ", ")). Backup IDs: \(backupIDs.joined(separator: ", "))."
         }

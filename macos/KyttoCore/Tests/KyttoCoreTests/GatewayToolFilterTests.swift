@@ -126,6 +126,20 @@ struct GatewayToolFilterTests {
         #expect(tools.first?["description"] as? String == "Read.")
     }
 
+    @Test("A server request reusing a pending id does not let the real list through unfiltered")
+    func serverRequestDoesNotConsumePendingID() throws {
+        let subject = filter()
+        _ = subject.inspectClientLine(json(#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#))
+        // The server's own request, numbered from its own id space.
+        let request = json(#"{"jsonrpc":"2.0","id":1,"method":"roots/list"}"#)
+        #expect(subject.rewriteServerLine(request) == request)
+
+        let response = json(#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"read_file"},{"name":"delete_all"}]}}"#)
+        let rewritten = try object(subject.rewriteServerLine(response))
+        let tools = try #require((rewritten["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        #expect(tools.compactMap { $0["name"] as? String } == ["read_file"])
+    }
+
     @Test("A result with nothing to remove is returned byte for byte")
     func untouchedWhenNothingHidden() {
         let subject = filter()

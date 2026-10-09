@@ -127,6 +127,32 @@ struct WebView: NSViewRepresentable {
             return nil
         }
 
+        /// `confirm()` from the page. Without this WebKit answers "Cancel" on the
+        /// user's behalf, so every guarded action (revealing a secret) silently
+        /// did nothing. Only Kytto's own page gets a dialog.
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            guard frame.isMainFrame,
+                  let url = frame.request.url,
+                  KyttoSchemeHandler.isInternalURL(url),
+                  let window = webView.window
+            else {
+                completionHandler(false)
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = message
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { response in
+                completionHandler(response == .alertFirstButtonReturn)
+            }
+        }
+
         @available(macOS 12.0, *)
         func webView(
             _ webView: WKWebView,

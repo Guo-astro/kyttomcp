@@ -15,6 +15,11 @@ final class MenuBarController {
     private let model: AppModel
     private var statusItem: NSStatusItem?
     private let openWindow: @MainActor () -> Void
+    /// Raised after an action here has changed what is on disk or what Kytto
+    /// knows about a server. The window does not hear about these any other
+    /// way: the write re-arms the file watcher before the watcher reports it,
+    /// and health results live in Kytto's own directory, which is not watched.
+    var onModelChanged: (@MainActor () -> Void)?
 
     init(model: AppModel, openWindow: @escaping @MainActor () -> Void) {
         self.model = model
@@ -206,6 +211,7 @@ final class MenuBarController {
 
     @objc private func checkAll() {
         Task {
+            defer { onModelChanged?() }
             do {
                 try await model.checkAllHealth { _, _, _ in }
             } catch {
@@ -245,6 +251,8 @@ final class MenuBarController {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
 
             let result = try model.applyProfile(id: profileID, to: clientID)
+            // Before any alert below: a partly applied profile still wrote.
+            onModelChanged?()
             guard !result.failures.isEmpty else { return }
 
             // Never claim the client matches the profile when it does not (§7.9).
@@ -304,6 +312,7 @@ final class MenuBarController {
         let enabled = server.enabledIn[clientID] != .enabled
         do {
             _ = try model.setEnabled(enabled, serverID: serverID, clientID: clientID)
+            onModelChanged?()
         } catch {
             // A failure here has no window to report into, so it gets a real
             // alert rather than disappearing.

@@ -5,6 +5,7 @@ import { el, button } from '../dom.js';
 
 export function renderSkills(state) {
   const panel = el('div', 'skills-panel');
+  panel.dataset.scrollKey = 'skills';
   const head = el('header', 'panel-head');
   const copy = el('div');
   copy.append(el('h2', null, 'Skills inventory'));

@@ -105,7 +105,11 @@ final class ManagedProcess {
         // pgroup 0 makes the child the leader of a brand new group, so a single
         // kill(-pid) later reaches it and everything it started.
         posix_spawnattr_setpgroup(&attributes, 0)
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
+        // CLOEXEC_DEFAULT: the child gets stdin/out/err and nothing else. Without
+        // it a server inherits every descriptor Kytto has open — the other ends
+        // of its own pipes, another check's pipes, watcher handles — and a
+        // grandchild holding the stderr write end keeps the drain thread alive.
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
 
         let argv: [String] = [resolved] + arguments
         let envp = environment.map { "\($0.key)=\($0.value)" }
@@ -184,6 +188,11 @@ final class ManagedProcess {
             let count = read(stdoutFD, &chunk, chunk.count)
             if count > 0 {
                 stdoutBuffer.append(contentsOf: chunk[0..<count])
+                // stderr is capped; stdout cannot be truncated without breaking
+                // the message, so a line this long ends the check instead.
+                if stdoutBuffer.count > Self.maxLineBytes, stdoutBuffer.firstIndex(of: 0x0A) == nil {
+                    throw MCPError.protocolError("the server wrote more than \(Self.maxLineBytes / 1_048_576) MB without ending a message")
+                }
                 continue
             }
             // EOF: hand back anything left, then report closure.
@@ -191,6 +200,8 @@ final class ManagedProcess {
             return nil
         }
     }
+
+    private static let maxLineBytes = 32 * 1_048_576
 
     private func takeBufferedLine() -> String? {
         guard let index = stdoutBuffer.firstIndex(of: 0x0A) else { return nil }

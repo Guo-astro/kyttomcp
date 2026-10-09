@@ -32,3 +32,32 @@ extension TOMLDocument: ConfigDocument {
     public static var emptySource: String { "" }
     public static var formatName: String { "TOML" }
 }
+
+// MARK: - Finding a server by identity
+
+extension JSONDocument {
+    /// The key a server goes by in this file's server map, or nil if it is not
+    /// there.
+    ///
+    /// The matrix merges rows by identity, so a server called `GitHub` in one
+    /// client and `github` in another is one row — and every edit to the second
+    /// has to use the spelling that file actually contains, or it silently
+    /// changes nothing (or adds a twin). Two keys answering to the same identity
+    /// is refused rather than resolved: clients read the last, and guessing is
+    /// not a splice (§6.3).
+    func serverKey(for identity: String, under serversKey: String) throws -> String? {
+        let matches = (value(at: [serversKey])?.keys ?? []).filter { Server.identity(for: $0) == identity }
+        guard matches.count <= 1 else { throw JSONEditError.duplicateKey([serversKey, matches[0]]) }
+        return matches.first
+    }
+}
+
+extension TOMLDocument {
+    /// The name a server goes by in this file — see `JSONDocument.serverKey`.
+    /// Two tables answering to one identity are refused, as in JSON.
+    func serverName(for identity: String, under serversKey: String) throws -> String? {
+        let matches = serverNames(under: serversKey).filter { Server.identity(for: $0) == identity }
+        guard matches.count <= 1 else { throw TOMLEditError.ambiguousValue([serversKey, matches[0]]) }
+        return matches.first
+    }
+}

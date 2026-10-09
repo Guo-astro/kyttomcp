@@ -253,14 +253,32 @@ public struct ServerMetadata: Codable, Equatable, Sendable {
     public var contractTools: [ToolSummary]?
     public var contractChanges: [ContractChange]?
     public var contractChangedAt: Date?
+    /// The tools from the most recent *passing* check.
+    ///
+    /// A failed or timed-out check records an empty tool list, but every client
+    /// still runs the server with the contract it last offered. Safety findings
+    /// and acknowledgement read this, so a check that fails — on purpose or not —
+    /// cannot wipe a finding or make an acknowledgement land on the wrong contract.
+    /// Absent in records written before 1.0.7.1, where `contractTools` held the
+    /// same thing.
+    public var lastPassingTools: [ToolSummary]?
+
+    /// What the server offers as far as Kytto knows: the last passing check's
+    /// tools, surviving later failures.
+    public var knownTools: [ToolSummary] {
+        if let health, health.status == .passed { return health.tools }
+        return lastPassingTools ?? contractTools ?? []
+    }
 
     public init(
         health: HealthResult? = nil,
         tokenWeight: TokenWeight? = nil,
         contractTools: [ToolSummary]? = nil,
         contractChanges: [ContractChange]? = nil,
-        contractChangedAt: Date? = nil
+        contractChangedAt: Date? = nil,
+        lastPassingTools: [ToolSummary]? = nil
     ) {
+        self.lastPassingTools = lastPassingTools
         self.health = health
         self.tokenWeight = tokenWeight
         self.contractTools = contractTools

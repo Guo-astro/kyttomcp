@@ -34,6 +34,7 @@ const CLIENT_NOTE = {
 
 export function renderSidebar(state, selectionChanged = false) {
   const sidebar = el('nav', 'sidebar');
+  sidebar.dataset.scrollKey = 'sidebar';
   sidebar.setAttribute('aria-label', 'Sections');
 
   sidebar.append(brand());

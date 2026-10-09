@@ -64,7 +64,10 @@ test('the matrix preserves readable client columns and scrolls horizontally', ()
 test('client icons are legible and the restart bar cannot cover matrix content', () => {
   const css = source('css/app.css');
   assert.match(css, /\.app-icon\s*{[^}]*width:\s*22px;[^}]*height:\s*22px/s);
-  assert.match(css, /#content\s*{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden/s);
+  // Bounded by the window (min-height 0) and never wider than it. Vertically it
+  // may scroll as a last resort, when the bars' minimums outgrow a minimum-size
+  // window — reachable instead of clipped, and still never an overlay.
+  assert.match(css, /#content\s*{[^}]*min-height:\s*0;[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto/s);
   assert.match(css, /#content:has\(\.restart-bar\) \.table-scroll\s*{[^}]*padding-bottom:\s*12px/s);
   assert.doesNotMatch(css, /\.restart-bar\s*{[^}]*order:\s*99/s);
 });

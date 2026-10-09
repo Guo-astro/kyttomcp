@@ -212,12 +212,15 @@ public final class GatewayMessageObserver: @unchecked Sendable {
 
         let elapsed = DispatchTime.now().uptimeNanoseconds - pending.startedAt
         let error = object["error"] as? [String: Any]
+        // A tool that ran and reported failure answers with a result carrying
+        // `isError: true`, not a JSON-RPC error. Both are failed calls.
+        let toolFailed = (object["result"] as? [String: Any])?["isError"] as? Bool == true
         sink.record(event(
             kind: .toolCallCompleted,
             toolName: pending.toolName,
             requestID: requestID,
             durationMilliseconds: Int(elapsed / 1_000_000),
-            succeeded: error == nil,
+            succeeded: error == nil && !toolFailed,
             errorCode: (error?["code"] as? NSNumber)?.intValue
         ))
     }

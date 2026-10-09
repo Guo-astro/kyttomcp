@@ -208,14 +208,22 @@ public struct HealthChecker: Sendable {
 /// token or a missing API key are real failures whose fix is not a browser, so
 /// none of them may match.
 enum AuthorizationSignal {
+    /// Phrases only a server waiting on a browser round trip prints.
     private static let markers = [
         "please authorize",
         "waiting for authorization",
+        "authorization_pending",
+        "browser opened automatically",
+    ]
+
+    /// Phrases that also open ordinary failures — "Authentication required:
+    /// set GITHUB_TOKEN", an nginx "401 Authorization Required" page. They count
+    /// only next to an authorization URL to visit, which a missing API key
+    /// does not print.
+    private static let weakMarkers = [
         "authorization required",
         "authorization needed",
         "authentication required",
-        "authorization_pending",
-        "browser opened automatically",
     ]
 
     /// Markers only, on purpose. An oauth-looking URL alone is not evidence of
@@ -224,7 +232,8 @@ enum AuthorizationSignal {
     /// of bug this state exists to remove.
     static func isAwaiting(_ stderr: String) -> Bool {
         let lowered = stderr.lowercased()
-        return markers.contains(where: lowered.contains)
+        if markers.contains(where: lowered.contains) { return true }
+        return weakMarkers.contains(where: lowered.contains) && url(in: stderr) != nil
     }
 
     /// The page the server asked the user to visit, if its output named one:

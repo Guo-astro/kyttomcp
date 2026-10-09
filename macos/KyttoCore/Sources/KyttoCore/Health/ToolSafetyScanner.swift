@@ -63,7 +63,7 @@ public enum ToolSafetyScanner {
         // The schema counts. A description is what gets read out loud, but a
         // parameter's `description` field reaches the model just as directly and
         // is where nobody looks.
-        let surfaces = [tool.name, tool.description, tool.inputSchemaJSON].compactMap { $0 }
+        let surfaces = [tool.name, tool.description, tool.inputSchemaJSON.map(schemaText)].compactMap { $0 }
         let text = surfaces.joined(separator: "\n")
 
         if let found = hiddenCharacter(in: text) {
@@ -206,8 +206,61 @@ public enum ToolSafetyScanner {
     ]
 
     private static func match(in text: String, against needles: [String]) -> String? {
-        let haystack = text.lowercased()
+        let haystack = normalizedForMatching(text)
         return needles.first { haystack.contains($0) }
+    }
+
+    /// What the model reads, not how the server spelled it.
+    ///
+    /// Characters that do not render — a soft hyphen, a zero-width joiner — and
+    /// a line break or double space in the middle of a phrase change nothing for
+    /// the model, but would each walk a phrase past a plain substring match.
+    /// Joiners are not *flagged* (see `hiddenCharacter`), only ignored here.
+    static func normalizedForMatching(_ text: String) -> String {
+        var result = String.UnicodeScalarView()
+        var lastWasSpace = false
+        for scalar in text.lowercased().unicodeScalars {
+            switch scalar.value {
+            case 0x00AD, 0x200B...0x200D, 0x2060, 0xFEFF:
+                continue
+            default:
+                break
+            }
+            if scalar.properties.isWhitespace {
+                if !lastWasSpace { result.append(" ") }
+                lastWasSpace = true
+            } else {
+                result.append(scalar)
+                lastWasSpace = false
+            }
+        }
+        return String(result)
+    }
+
+    /// An input schema as the model reads it: property names and string values,
+    /// with JSON escapes decoded.
+    ///
+    /// The stored schema is the raw slice the server sent, where a zero-width
+    /// space can be written as `\u200b` and an instruction can hide behind
+    /// escapes — invisible to a scan of the raw text, and decoded before the model
+    /// sees it. If the slice does not parse, the raw text is scanned instead.
+    static func schemaText(_ json: String) -> String {
+        guard let document = try? JSONDocument.parse(json) else { return json }
+        var parts: [String] = []
+        func walk(_ node: JSONNode) {
+            if let members = node.members {
+                for member in members {
+                    parts.append(member.key)
+                    walk(member.value)
+                }
+            } else if let elements = node.elements {
+                elements.forEach(walk)
+            } else if let string = node.stringValue {
+                parts.append(string)
+            }
+        }
+        walk(document.root)
+        return parts.joined(separator: "\n")
     }
 
     // MARK: - Invisible characters
@@ -223,8 +276,8 @@ public enum ToolSafetyScanner {
             switch scalar.value {
             case 0x200B, 0x200E, 0x200F: // zero-width space, LTR/RTL marks
                 return label("zero-width or direction mark", scalar)
-            case 0x202A...0x202E: // bidirectional overrides
-                return label("bidirectional override", scalar)
+            case 0x202A...0x202E, 0x2066...0x2069: // bidi embeddings, overrides, isolates
+                return label("bidirectional control", scalar)
             case 0x2060...0x2064, 0xFEFF: // word joiner, invisible operators, BOM
                 return label("invisible formatting character", scalar)
             case 0xE0000...0xE007F: // Unicode tag characters

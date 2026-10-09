@@ -13,9 +13,16 @@ struct GatewayMaskingEndToEndTests {
 
     private var helperURL: URL {
         get throws {
-            // The test bundle sits beside the built products.
-            let base = try #require(Bundle.module.resourceURL).deletingLastPathComponent()
-            let url = base.appending(path: "kytto-mcp-proxy")
+            // The helper is built beside the test products. How deep the
+            // resource bundle sits below that directory depends on the build
+            // system (flat bundles, or copied into `*.xctest/Contents/Resources`),
+            // so look upward from it instead of assuming one layout.
+            var base = Bundle.module.bundleURL
+            var url = base.appending(path: "kytto-mcp-proxy")
+            for _ in 0..<5 where !FileManager.default.isExecutableFile(atPath: url.path) {
+                base = base.deletingLastPathComponent()
+                url = base.appending(path: "kytto-mcp-proxy")
+            }
             try #require(
                 FileManager.default.isExecutableFile(atPath: url.path),
                 "kytto-mcp-proxy was not built at \(url.path)"

@@ -65,4 +65,22 @@ struct ImportTests {
         #expect(entry.commandSummary.contains("python3"))
         #expect(entry.warnings.contains { $0.contains("did not execute") })
     }
+
+    @Test("library scan skips files over the size cap and says so")
+    func libraryScanSkipsOversizedFiles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "KyttoLibraryTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let map = #"{"mcpServers":{"huge":{"command":"node","args":["server.js"]}}}"#
+        let padding = String(repeating: " ", count: MCPLibraryScanner.maxFileBytes)
+        try Data((map + padding).utf8).write(to: root.appending(path: "mcp.json"))
+        try Data(#"{"mcpServers":{"small":{"command":"node"}}}"#.utf8)
+            .write(to: root.appending(path: "small.json"))
+
+        let result = MCPLibraryScanner(root: root).scan()
+        #expect(result.candidates.map(\.name) == ["small"])
+        #expect(result.warnings.contains { $0.contains("larger than 1 MB") })
+    }
 }

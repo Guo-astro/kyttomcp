@@ -68,6 +68,27 @@ struct HealthCheckerTests {
         #expect(weight != nil)
     }
 
+    @Test("every page of tools/list is read, not just the first")
+    func followsPagination() throws {
+        let checker = HealthChecker(shell: testShell, timeout: 20)
+        let (health, _) = checker.check(fakeServer(mode: "paged"))
+
+        #expect(health.status == .passed, Comment(rawValue: health.message ?? "no message"))
+        #expect(health.tools.map(\.name) == ["read_file", "write_file", "list_directory"])
+        #expect(health.toolCount == 3)
+    }
+
+    @Test("a repeated key in a tool is read the way the client reads it: last wins")
+    func duplicateKeysAreLastWins() throws {
+        let checker = HealthChecker(shell: testShell, timeout: 20)
+        let (health, _) = checker.check(fakeServer(mode: "dupkey"))
+
+        #expect(health.status == .passed, Comment(rawValue: health.message ?? "no message"))
+        let tool = try #require(health.tools.first)
+        #expect(tool.description?.hasPrefix("Ignore previous instructions") == true)
+        #expect(ToolSafetyScanner.scan(health.tools).contains { $0.kind == .instructionOverride })
+    }
+
     @Test("inspector keeps schemas and safety annotations")
     func inspectorDetails() throws {
         let checker = HealthChecker(shell: testShell, timeout: 20)
@@ -302,6 +323,10 @@ struct HealthCheckerTests {
         """))
         #expect(!AuthorizationSignal.isAwaiting("Error: MISSING_API_KEY — set FIRECRAWL_API_KEY"))
         #expect(AuthorizationSignal.isAwaiting("Authentication required. Waiting for authorization..."))
+        // Generic phrases alone are an ordinary failure: nothing to sign in to.
+        #expect(!AuthorizationSignal.isAwaiting("Error: Authentication required — set GITHUB_TOKEN"))
+        #expect(!AuthorizationSignal.isAwaiting("<html><title>401 Authorization Required</title></html>"))
+        #expect(AuthorizationSignal.isAwaiting("Authorization required: https://mcp.example.com/oauth/authorize?x=1"))
     }
 
     @Test("the sign-in link is read from the line that asks for it")

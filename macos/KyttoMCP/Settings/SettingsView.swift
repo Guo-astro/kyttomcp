@@ -38,13 +38,11 @@ struct SettingsView: View {
             } catch {
                 return
             }
-            guard settings.clientPathOverrides.values.allSatisfy(Self.isSavablePath),
-                  settings.customConfigSources.allSatisfy({
-                      Self.isSavablePath($0.path) && !$0.displayName.trimmingCharacters(in: .whitespaces).isEmpty
-                  })
-            else { return }
-            save(settings)
+            flush()
         }
+        // Closing the window cancels the debounce above; without this the last
+        // change made just before closing would look applied and be lost.
+        .onDisappear { flush() }
         .alert("Could not save", isPresented: .constant(error != nil)) {
             Button("OK") { error = nil }
         } message: {
@@ -67,7 +65,7 @@ struct SettingsView: View {
                 Toggle("Show Kytto in the menu bar", isOn: $settings.menuBarEnabled)
                 Picker("Menu bar toggles servers in", selection: menuBarClientBinding) {
                     Text("Whichever has the most").tag(nil as ClientID?)
-                    ForEach(model.current().clients.filter(\.isInstalled), id: \.id) { client in
+                    ForEach(model.menuBarCandidates, id: \.id) { client in
                         Text(client.displayName).tag(client.id as ClientID?)
                     }
                 }
@@ -138,6 +136,12 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.borderless)
                             .help("Remove this source from Kytto. The configuration file is not deleted.")
+                        }
+
+                        if !Self.isSavable(source) {
+                            Text("A source needs a name. Until it has one, Kytto keeps the last saved name.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
                         }
 
                         Text(source.path)
@@ -215,8 +219,17 @@ struct SettingsView: View {
 
     // MARK: - Bindings
 
+    /// A saved choice that is no longer a candidate reads as automatic, because
+    /// that is what the menu bar item is actually doing (`AppModel.menuBarClient`).
     private var menuBarClientBinding: Binding<ClientID?> {
-        Binding(get: { settings.menuBarClient }, set: { settings.menuBarClient = $0 })
+        Binding(
+            get: {
+                settings.menuBarClient.flatMap { chosen in
+                    model.menuBarCandidates.contains { $0.id == chosen } ? chosen : nil
+                }
+            },
+            set: { settings.menuBarClient = $0 }
+        )
     }
 
     private func pathBinding(for client: ClientID) -> Binding<String> {
@@ -233,7 +246,28 @@ struct SettingsView: View {
         )
     }
 
-    private func save(_ new: KyttoSettings) {
+    /// Saves whatever in the draft is valid now. A field that is still invalid —
+    /// a half-typed path, a source whose name was cleared — keeps its last saved
+    /// value instead of holding every other change in the window hostage, and
+    /// keeps showing its error until it is fixed.
+    private func flush() {
+        guard settings != model.settings else { return }
+        let saved = model.settings
+        var savable = settings
+        savable.clientPathOverrides = settings.clientPathOverrides.filter { Self.isSavablePath($0.value) }
+        for (key, value) in saved.clientPathOverrides
+        where settings.clientPathOverrides[key].map(Self.isSavablePath) == false {
+            savable.clientPathOverrides[key] = value
+        }
+        savable.customConfigSources = settings.customConfigSources.compactMap { source in
+            Self.isSavable(source) ? source : saved.customConfigSources.first { $0.id == source.id }
+        }
+        // Only a fully valid draft is reflected back; otherwise the field the
+        // user is still typing in would be replaced under their cursor.
+        save(savable, reflectingBack: savable == settings)
+    }
+
+    private func save(_ new: KyttoSettings, reflectingBack: Bool) {
         do {
             // These belong to web-layer flows — onboarding, the write
             // confirmation, the custom-sources fold, the sidebar width — not to
@@ -247,7 +281,7 @@ struct SettingsView: View {
             let saved = try model.updateSettings { $0 = merged }
             // The store sanitizes, so reflect back what was actually kept rather
             // than leaving the field showing something that was rejected.
-            if saved != new { settings = saved }
+            if reflectingBack, saved != new { settings = saved }
         } catch {
             self.error = error.localizedDescription
         }
@@ -261,6 +295,10 @@ struct SettingsView: View {
 
     nonisolated private static func isSavablePath(_ value: String) -> Bool {
         value.hasPrefix("/") || value.hasPrefix("~/")
+    }
+
+    nonisolated private static func isSavable(_ source: CustomConfigSource) -> Bool {
+        isSavablePath(source.path) && !source.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func chooseCustomSource() {

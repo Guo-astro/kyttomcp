@@ -157,6 +157,17 @@ public struct Server: Identifiable, Sendable {
     /// Never populated automatically: §6 forbids spawning on launch, so a server
     /// nobody has checked stays honestly grey.
     public var health: HealthResult?
+    /// The tools from the last passing check, kept through later failures.
+    public var lastPassingTools: [ToolSummary]?
+    /// What the server offers as far as Kytto knows.
+    ///
+    /// `health.tools` is empty after a failed check, yet clients keep running
+    /// the server with what it last offered. The safety scan and tool-name
+    /// collisions read this so a failing check cannot hide a finding (§7.10).
+    public var knownTools: [ToolSummary] {
+        if let health, health.status == .passed { return health.tools }
+        return lastPassingTools ?? []
+    }
     /// The last token measurement (§7.4).
     public var tokenWeight: TokenWeight?
     /// The definition's verbatim JSON source, as found.

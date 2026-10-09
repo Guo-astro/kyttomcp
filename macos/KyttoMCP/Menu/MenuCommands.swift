@@ -25,7 +25,9 @@ struct MenuCommands: Commands {
         }
 
         CommandGroup(replacing: .help) {
-            Link("Kytto Help", destination: URL(string: "https://kytto.app/help")!)
+            // The project README is the user documentation. Only a domain the
+            // project controls belongs here; the updater's host is the other one.
+            Link("Kytto Help", destination: URL(string: "https://github.com/heyitsjakub/KyttoMCP#readme")!)
         }
     }
 }

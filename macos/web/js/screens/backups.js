@@ -11,6 +11,7 @@ const formatBytes = (count) =>
 
 export function renderBackups(state) {
   const panel = el('div', 'table-scroll');
+  panel.dataset.scrollKey = 'backups';
 
   if (state.backups.length === 0) {
     const empty = el('div', 'placeholder');
@@ -57,10 +58,14 @@ export function renderBackups(state) {
     tr.append(el('td', 'col-weight', formatBytes(backup.byteCount)));
 
     const actionCell = el('td', 'col-action');
-    const restore = el('button', 'button', 'Revert');
-    restore.dataset.action = 'restore-backup';
+    // While any revert is in flight every Revert waits: a second click would
+    // write the same file again, or race a different backup onto it.
+    const reverting = state.restoringBackupId === backup.id;
+    const restore = el('button', reverting ? 'button busy' : 'button', reverting ? 'Reverting…' : 'Revert');
+    restore.dataset.action = state.restoringBackupId ? 'noop' : 'restore-backup';
     restore.dataset.backupId = backup.id;
     restore.dataset.clientId = backup.clientID;
+    restore.disabled = Boolean(state.restoringBackupId);
     // Reverting is itself backed up first, so this is not a one-way door.
     restore.title = 'Put this version back. The current file is backed up first.';
     actionCell.append(restore);

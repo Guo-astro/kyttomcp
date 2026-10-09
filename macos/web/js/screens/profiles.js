@@ -1,11 +1,12 @@
 // Named MCP stacks. A profile is intent stored by Kytto; applying one still
 // writes through the same per-client toggles as the matrix.
 
-import { el, button, field, input, sheet, formatTokens, clientIcon } from '../dom.js';
+import { el, button, busyButton, field, input, sheet, formatTokens, clientIcon } from '../dom.js';
 import { contextWindow } from '../state.js';
 
 export function renderProfiles(state) {
   const panel = el('div', 'profiles-panel');
+  panel.dataset.scrollKey = 'profiles';
 
   const head = el('header', 'panel-head');
   const copy = el('div');
@@ -265,6 +266,9 @@ export function renderProfileDelete(state) {
   ], [
     button('Cancel', 'close-sheet', { className: 'button subtle' }),
     el('span', 'spacer'),
-    button('Delete', 'confirm-profile-delete', { className: 'button danger', dataset: { profileId: profile.id } }),
+    busyButton(state.sheet.busy, 'Delete', 'Deleting…', 'confirm-profile-delete', {
+      className: 'button danger',
+      dataset: { profileId: profile.id },
+    }),
   ]);
 }

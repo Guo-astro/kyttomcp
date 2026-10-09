@@ -96,6 +96,7 @@ export function render(root) {
   // First run: say what was found before showing anything to act on (§8).
   if (state.settings && !state.settings.hasCompletedOnboarding) {
     root.append(renderOnboarding(state));
+    restoreScroll(scrollBeforeRender, root);
     renderedSheetSubject = nextSheetSubject;
     return;
   }
@@ -127,6 +128,8 @@ export function render(root) {
 
   const content = el('main');
   content.id = 'content';
+  // Scrolls only when the window is too short for everything in it (app.css).
+  content.dataset.scrollKey = 'content';
 
   if (state.update?.status === 'updateAvailable' && !state.updateDismissed) {
     content.append(updateBanner(state.update, state));
@@ -219,19 +222,24 @@ function restoreFocus(snapshot, root) {
   }
 }
 
+// Every scroller that outlives a render carries `data-scroll-key`, and its
+// position is restored by key. Matching by index put the matrix's offset onto
+// the client screen; a scroller missing from the list (a panel, a sheet body)
+// jumped to the top on every unrelated state change, including each
+// `configs.changed` push.
 function scrollSnapshot(root) {
-  return [...root.querySelectorAll('.sidebar, .table-scroll')].map((element, index) => ({
-    index,
-    scrollTop: element.scrollTop,
-    scrollLeft: element.scrollLeft,
-  }));
+  return new Map(
+    [...root.querySelectorAll('[data-scroll-key]')].map((element) => [
+      element.dataset.scrollKey,
+      { scrollTop: element.scrollTop, scrollLeft: element.scrollLeft },
+    ]),
+  );
 }
 
 function restoreScroll(snapshot, root) {
-  const scrollers = [...root.querySelectorAll('.sidebar, .table-scroll')];
-  for (const saved of snapshot) {
-    const element = scrollers[saved.index];
-    if (!element) continue;
+  for (const element of root.querySelectorAll('[data-scroll-key]')) {
+    const saved = snapshot.get(element.dataset.scrollKey);
+    if (!saved) continue;
     element.scrollTop = saved.scrollTop;
     element.scrollLeft = saved.scrollLeft;
   }
@@ -259,6 +267,11 @@ function renderSheet(state) {
     modal.inert = true;
     modal.setAttribute('aria-hidden', 'true');
   }
+
+  // The body keeps its place across re-renders of the same sheet and step; a
+  // different sheet, or the next step of a form, starts at the top.
+  const scrollBody = modal?.querySelector('.sheet-body');
+  if (scrollBody) scrollBody.dataset.scrollKey = `sheet:${sheetIdentity(current)}`;
 
   if (modal && state.sheet && contentChanged) {
     modal.querySelector('.sheet-body')?.classList.add('content-entering');
@@ -479,6 +492,7 @@ function table(state, clients, servers) {
   // itself. As a flex item it would stretch to fill the window and hand the
   // extra height to the rows, which is the opposite of a dense instrument panel.
   const scroller = el('div', 'table-scroll');
+  scroller.dataset.scrollKey = 'matrix';
   const table = el('table', filtering ? 'matrix is-filtering' : 'matrix');
   // A fixed table layout hands the leftover width to the one auto column, and
   // with a long tail of read-only project scopes there is no leftover — the
@@ -776,6 +790,7 @@ function errorState(error) {
 
 function diagnostics(items) {
   const box = el('section', 'diagnostics');
+  box.dataset.scrollKey = 'diagnostics';
   box.append(el('h2', null, `Diagnostics (${items.length})`));
   const list = el('ul');
   for (const item of items) {

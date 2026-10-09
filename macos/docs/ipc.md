@@ -480,6 +480,7 @@ notice visible again.
 ### `library.chooseDirectory` → `{ "path": string | null }`
 
 No payload. Opens the native directory picker. Cancellation returns `path: null`.
+The reply is an absolute path — see [Known deviations](#known-deviations).
 
 ### `library.scan` → `LibraryScanDTO`
 
@@ -489,8 +490,9 @@ No payload. Opens the native directory picker. Cancellation returns `path: null`
 
 Scans only the selected local directory. It recognizes known JSON/JSONC/TOML MCP
 maps and reports likely Node/Python entry points as suggestions. It never runs a
-command, follows symlinked directories or writes a file. Candidate ids are
-opaque and valid only until the next scan.
+command, follows symlinked directories or writes a file. Files larger than 1 MB
+are skipped and counted in `warnings`, and the scan runs off the main thread.
+Candidate ids are opaque and valid only until the next scan.
 
 ```json
 {
@@ -538,6 +540,44 @@ fields, duplicate server names and literal environment objects/values. The
 preview must be conflict-free before `imports.import` writes. Environment keys
 are shown for follow-up setup, but no values are accepted or invented by this
 import.
+
+### `skills.chooseDirectory` → `{ "path": string | null }`
+
+No payload. Opens the native directory picker for a workspace root.
+Cancellation returns `path: null`. Like `library.chooseDirectory`, the reply is
+an absolute path — see [Known deviations](#known-deviations).
+
+### `skills.inventory` → `SkillsInventoryDTO`
+
+```json
+{ "workspacePath": "/Users/you/Projects/app" }
+```
+
+`workspacePath` is optional; `null` or `""` inventories only the global roots
+(`~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills`, `~/.agents/skills`).
+A workspace adds the same four relative to it plus `.github/skills`. A path that
+is not an existing absolute directory fails with `appState`.
+
+Lists the direct child folders of those roots that contain a `SKILL.md`
+(matched case-insensitively), reading at most 128 KB of each and only its
+front-matter `name` and `description`. It never executes or modifies a skill.
+
+```json
+{
+  "entries": [{
+    "id": "opaque", "name": "pdf", "description": "…",
+    "agent": "Claude", "scope": "global" | "workspace",
+    "scopeLabel": "Claude · global", "pathDisplay": "~/.claude/skills/pdf",
+    "metadataStatus": "complete" | "missingName" | "missingDescription"
+      | "missingNameAndDescription" | "unreadable",
+    "isDuplicate": false, "hasConflict": false, "duplicateGroup": "…"
+  }],
+  "warnings": ["Could not read the Codex · global skills directory."],
+  "roots": ["Codex · global", "Claude · global", "…"]
+}
+```
+
+`roots` are display labels, not paths.
 
 ### `settings.get` → `SettingsDTO`
 
@@ -1007,13 +1047,19 @@ third alone; nothing else in the UI changes.
 |---|---|---|
 | `menu.refresh` | `{}` | User picked File → Refresh Configurations (`Cmd+R`) |
 | `menu.find` | `{}` | User picked Edit → Find (`Cmd+F`) |
-| `configs.changed` | `StateDTO` | A watched file changed on disk, whoever changed it |
+| `configs.changed` | `StateDTO` | A watched file changed on disk, or native state changed without a page command (see below) |
 | `settings.changed` | `SettingsDTO` | Native settings were saved |
 | `health.progress` | `{ serverName, index, total }` | `health.checkAll` moved on to the next server |
 | `updates.progress` | `{ phase, completedBytes, totalBytes, fraction, message }` | A verified updater download or install moved to the next phase |
 
-`configs.changed` fires for Kytto's own writes too. Re-reading is cheap and the
-render is idempotent, so the UI settles on the truth rather than trying to work
+`configs.changed` is not a reliable echo of the page's own writes: a write
+re-reads the configs straight away, which can swallow the watcher's report of
+it. That is why every write command replies with fresh state itself. What the
+page did not ask for is pushed instead — a file changed by someone else, a
+toggle, profile or health check run from the menu bar item, a path override or
+custom source changed in Settings, and a re-read each time the window becomes
+key (at most once every two seconds). Re-reading is cheap and the render is
+idempotent, so the page applies every push as the truth rather than working
 out which events were its own.
 
 ## Not implemented
@@ -1028,6 +1074,24 @@ present in the shared `~/.claude.json` document. Those entries are shown as
 read-only workspace clients with deterministic ids and paths; Kytto does not
 crawl repositories, infer precedence outside that document, or write project
 scope from the shared UI.
+
+## Known deviations
+
+**Absolute paths cross for the library and skills pickers, against rule 2.**
+On macOS, `library.chooseDirectory` and `skills.chooseDirectory` reply with the
+chosen directory's absolute path, and the page sends it straight back as
+`library.scan { path }` and `skills.inventory { workspacePath }`. The page does
+not parse it — it only displays and returns it — but it is still a filesystem
+path on the wire, and native re-validates it on every call rather than trusting
+it.
+
+The Windows shell already does what the rule asks: its pickers keep the
+selected root as native state and reply with an opaque session id plus a
+display name (`library-session.…`, `skills-session.…`), which the page passes
+back in the same `path` / `workspacePath` field. Moving macOS onto opaque
+tokens changes the reply shape of both pickers and the web code that reads it,
+so it is left for a change that covers both layers. Until then the page must
+treat these strings as opaque.
 
 ## Gateway mode
 

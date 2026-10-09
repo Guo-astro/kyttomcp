@@ -114,7 +114,10 @@ function summary(tools, chosen) {
   const savedTokens = measured.reduce((total, tool) => total + tool.tokenCount, 0) - keptTokens;
 
   const line = el('div', 'mask-summary');
-  line.append(el('strong', null, `${chosen.size} of ${tools.length} tools`));
+  // Counted against the tools on offer: the saved selection can still name a
+  // tool the server has since dropped, and `chosen.size` read "3 of 2 tools".
+  const keptCount = tools.filter((tool) => chosen.has(tool.name)).length;
+  line.append(el('strong', null, `${keptCount} of ${tools.length} tools`));
   if (measured.length === 0) {
     line.append(el('span', 'muted', 'no measurements yet'));
     return line;

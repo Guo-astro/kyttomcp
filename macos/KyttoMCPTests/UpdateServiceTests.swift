@@ -122,6 +122,46 @@ struct UpdateServiceTests {
         #expect(try String(contentsOf: current.appendingPathComponent("Contents/marker")) == "new")
     }
 
+    @Test("a disk image is attached, copied from and detached before the relaunch")
+    func diskImageIsDetachedBeforeRelaunch() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let current = root.appendingPathComponent("Kytto.app")
+        let source = root.appendingPathComponent("image", isDirectory: true)
+        let image = root.appendingPathComponent("Kytto.dmg")
+        try makeApplication(at: current, version: "1.0.4", marker: "old")
+        try makeApplication(at: source.appendingPathComponent("Kytto.app"), version: "1.0.5", marker: "new")
+        #expect(try hdiutil(["create", "-quiet", "-ov", "-format", "UDZO", "-srcfolder", source.path, image.path]).status == 0)
+
+        var mountedAtRelaunch: Bool?
+        let installer = UpdateInstaller(relaunchHandler: { _ in
+            mountedAtRelaunch = (try? self.hdiutil(["info"]).output.contains(image.path)) ?? true
+            return true
+        })
+        let result = try await installer.install(
+            artifactURL: image,
+            expectedVersion: "1.0.5",
+            destinationAppURL: current
+        )
+
+        #expect(result.relaunched)
+        #expect(mountedAtRelaunch == false)
+        #expect(try String(contentsOf: current.appendingPathComponent("Contents/marker")) == "new")
+    }
+
+    private func hdiutil(_ arguments: [String]) throws -> (status: Int32, output: String) {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/hdiutil")
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
     @Test("a relaunch failure restores the previous application")
     func relaunchFailureRollsBack() async throws {
         let root = try makeTemporaryDirectory()
@@ -205,6 +245,37 @@ struct UpdateServiceTests {
         }
         #expect(service.stagedUpdate == nil)
         #expect(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).isEmpty)
+    }
+
+    @Test("a streamed update is staged whole, with the manifest's checksum")
+    func completedDownloadIsStaged() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Not a multiple of the 64 KB chunk, so the tail flush is exercised.
+        let artifact = Data((0..<(200 * 1024 + 17)).map { UInt8(truncatingIfNeeded: $0) })
+        let hash = SHA256.hash(data: artifact).map { String(format: "%02x", $0) }.joined()
+        UpdateURLProtocol.manifest = manifest(version: "1.0.5", sha256: hash)
+        UpdateURLProtocol.artifact = artifact
+        defer {
+            UpdateURLProtocol.manifest = nil
+            UpdateURLProtocol.artifact = nil
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [UpdateURLProtocol.self]
+        let service = UpdateService(
+            session: URLSession(configuration: configuration),
+            defaults: UserDefaults(suiteName: "KyttoMCP.UpdateTests.\(UUID().uuidString)")!,
+            stagingDirectory: root
+        )
+
+        let stage = try await service.downloadAndStage(currentVersion: "1.0.4")
+        #expect(stage.byteCount == Int64(artifact.count))
+        #expect(stage.sha256 == hash)
+        let staged = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(staged.count == 1)
+        #expect(try staged.first.map { try Data(contentsOf: $0) } == artifact)
     }
 
     private func manifest(

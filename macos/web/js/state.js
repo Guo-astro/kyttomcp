@@ -26,6 +26,9 @@
  *   updateStage: object | null,
  *   updateError: string | null,
  *   provenanceBusyServerID: string | null,
+ *   acknowledgingContract: string | null,
+ *   restoringBackupId: string | null,
+ *   openTools: Set<string>,
  *   panel: null | 'profiles' | 'backups' | 'secrets' | 'library' | 'skills' | 'client',
  *   selectedClient: string | null,
  *   backups: object[],
@@ -64,6 +67,14 @@ const state = {
   updateStage: null,
   updateError: null,
   provenanceBusyServerID: null,
+  // The server whose contract alert is being marked as reviewed.
+  acknowledgingContract: null,
+  // The backup being reverted. Every Revert waits for it: two reverts racing on
+  // one file leave whichever lands last.
+  restoringBackupId: null,
+  // Tool rows expanded in the server detail, keyed `serverId::toolName`, so a
+  // re-render does not fold them shut.
+  openTools: new Set(),
   panel: null,
   // Which client the `client` panel is showing. Held separately from `panel` so
   // moving between two clients is a change of subject rather than of screen.
@@ -283,6 +294,13 @@ export function clientTokenTotal(clientID) {
   return state.servers
     .filter((server) => server.enabledIn[clientID] === 'enabled')
     .reduce((total, server) => total + (server.tokenWeight?.estimate ?? 0), 0);
+}
+
+/** Client ids as the names the user knows them by: "Claude Code, Cursor". */
+export function clientNames(from, clientIDs) {
+  return clientIDs
+    .map((id) => from.clients.find((client) => client.id === id)?.displayName ?? id)
+    .join(', ');
 }
 
 /** Servers this client has a definition for, on or off, in display order. */

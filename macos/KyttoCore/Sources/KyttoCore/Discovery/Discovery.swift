@@ -208,6 +208,15 @@ public struct Discovery: Sendable {
             }
 
             if var existing = merged[key] {
+                // The file is authoritative (§5). A definition this client's
+                // config still holds — put back by hand, or never removed because
+                // the write that parked it failed — outranks Kytto's held copy,
+                // which is stale. Drawing it as off would be a lie about the file,
+                // and the held bytes are not this client's definition any more.
+                if let inFile = existing.definitionsByClient[entry.clientID], !inFile.isBundled,
+                   existing.enabledIn[entry.clientID] != nil {
+                    continue
+                }
                 existing.enabledIn[entry.clientID] = .disabled
                 // A parked definition is still this client's definition — it is
                 // what switching the server back on will put back, byte for byte.
@@ -239,6 +248,7 @@ public struct Discovery: Sendable {
             // Measurements are looked up rather than taken: nothing here spawns
             // anything (§6).
             server.health = metadata[server.id]?.health
+            server.lastPassingTools = metadata[server.id]?.knownTools
             server.tokenWeight = metadata[server.id]?.tokenWeight
             return server
         }

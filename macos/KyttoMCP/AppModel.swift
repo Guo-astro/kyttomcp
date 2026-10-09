@@ -115,7 +115,8 @@ final class AppModel {
         )
         secretsService = SecretsService(
             home: self.home, writer: writer, ledger: ledger,
-            store: KeychainSecretStore(), pathOverrides: settings.clientPathOverrides
+            store: KeychainSecretStore(), parkStore: parkStore,
+            pathOverrides: settings.clientPathOverrides
         )
         gatewayMigration = GatewayMigrationService(
             home: self.home,
@@ -206,7 +207,8 @@ final class AppModel {
         )
         secretsService = SecretsService(
             home: home, writer: writer, ledger: ledger,
-            store: KeychainSecretStore(), pathOverrides: settings.clientPathOverrides
+            store: KeychainSecretStore(), parkStore: parkStore,
+            pathOverrides: settings.clientPathOverrides
         )
         gatewayMigration = GatewayMigrationService(
             home: home,
@@ -224,14 +226,24 @@ final class AppModel {
         }
     }
 
+    /// Clients the menu bar item can toggle in: installed and writable. A
+    /// read-only source (an extension bundle, a custom source, a Claude Code
+    /// project scope) would offer toggles that can only ever fail.
+    var menuBarCandidates: [DiscoveredClient] {
+        current().clients.filter { $0.isInstalled && !$0.isReadOnly }
+    }
+
     /// The client the menu bar item acts on: the user's choice, or the one with
     /// the most servers, which is the right guess until they say otherwise (§7.7).
+    /// A choice that is no longer a candidate — uninstalled, removed, or a
+    /// read-only source saved by an earlier version — falls back to that guess
+    /// rather than leaving the menu with no client at all.
     var menuBarClient: ClientID? {
-        if let chosen = settings.menuBarClient { return chosen }
-        return current().clients
-            .filter { $0.isInstalled && !$0.isReadOnly }
-            .max { $0.serverCount < $1.serverCount }?
-            .id
+        let candidates = menuBarCandidates
+        if let chosen = settings.menuBarClient, candidates.contains(where: { $0.id == chosen }) {
+            return chosen
+        }
+        return candidates.max { $0.serverCount < $1.serverCount }?.id
     }
 
     // MARK: - Reading
@@ -316,12 +328,16 @@ final class AppModel {
         let warnings: [String]
     }
 
-    func libraryScan(path: String) throws -> MCPLibraryScanResult {
+    func libraryScan(path: String) async throws -> MCPLibraryScanResult {
         let url = URL(filePath: path).standardizedFileURL
         guard url.isFileURL, url.path.hasPrefix("/"), isDirectory(url) else {
             throw AppError.invalidLibraryDirectory
         }
-        let result = MCPLibraryScanner(root: url).scan()
+        // Up to 5,000 entries and as many file reads: off the main actor, so the
+        // window keeps drawing while a large directory is walked.
+        let result = await Task.detached(priority: .userInitiated) {
+            MCPLibraryScanner(root: url).scan()
+        }.value
         libraryCandidates = Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.id, $0) })
         return result
     }
@@ -682,6 +698,12 @@ final class AppModel {
             checker.check(server)
         }.value
 
+        // The check can take ten seconds and the window stays usable meanwhile.
+        // A server deleted (or renamed) in that time must not get its metadata
+        // back from a result nobody is waiting for any more.
+        guard current().servers.contains(where: { $0.id == server.id }) else {
+            return outcome.health
+        }
         try metadata.record(health: outcome.health, tokenWeight: outcome.tokenWeight, for: server.id)
         return outcome.health
     }
@@ -1092,6 +1114,8 @@ final class AppModel {
         // The config write has already succeeded. A secondary profile-file
         // problem must not turn that success into a reported failure.
         try? profileStore.replaceServerID(serverID, with: Server.identity(for: result.serverName))
+        // The baseline and any unreviewed Contract Guard alert follow the server.
+        try? metadata.rename(from: serverID, to: Server.identity(for: result.serverName))
         noteRestarts(result)
         reload()
         return result
@@ -1219,14 +1243,21 @@ final class AppModel {
             throw AppError.unknownBackup(backupID)
         }
         try gatewayMigration.validateBackupRestore(backups.contents(of: backup), clientID: clientID)
-        try backups.restore(backup, home: home, pathOverrides: settings.clientPathOverrides)
-        pendingRestarts[clientID, default: 0] += 1
-        let restored = reload()
-        let restoredServerIDs = Set(
-            restored.servers
-                .filter { $0.definitionsByClient[clientID] != nil }
-                .map(\.id)
+        // What the restored file defines, read from the backup itself and before
+        // the restore — which backs up the current file and may prune this one.
+        // Not from the reloaded model: discovery draws parked copies into it as
+        // that client's definitions, so every parked server would look restored
+        // and lose its only copy.
+        let restoredNames = backups.serverNames(
+            in: backup, home: home, pathOverrides: settings.clientPathOverrides
+        ) ?? []
+        // Checked against what Kytto last read, like any other write (§6.4).
+        try backups.restore(
+            backup, home: home, pathOverrides: settings.clientPathOverrides, ledger: ledger
         )
+        pendingRestarts[clientID, default: 0] += 1
+        reload()
+        let restoredServerIDs = Set(restoredNames.map(Server.identity(for:)))
         var clearedPark = false
         for entry in parkStore.all()
         where entry.clientID == clientID && restoredServerIDs.contains(Server.identity(for: entry.serverName)) {

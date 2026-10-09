@@ -300,7 +300,7 @@ enum CommandRegistry {
         }
 
         router.register("library.scan") { (payload: LibraryScanPayload) -> LibraryScanDTO in
-            LibraryScanDTO(try model.libraryScan(path: payload.path))
+            LibraryScanDTO(try await model.libraryScan(path: payload.path))
         }
 
         router.register("library.preview") { (payload: LibraryImportPayload) -> ImportPreviewDTO in
