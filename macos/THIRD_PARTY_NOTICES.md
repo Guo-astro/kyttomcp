@@ -29,3 +29,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## rugsnare corpus 05 (test fixture)
+
+`KyttoCore/Tests/KyttoCoreTests/Fixtures/rugsnare-corpus-05/` holds the `tools/list`
+responses of two servers from
+[`corpus/05-key-reorder`](https://github.com/Paraphern/rugsnare/tree/main/corpus/05-key-reorder)
+in [Paraphern/rugsnare](https://github.com/Paraphern/rugsnare): the same two tool schemas
+with every object's keys in reverse order. It is the regression fixture for Contract Guard
+reporting a pure re-serialization as a breaking change (issue #12). Copyright 2026 Paraphern,
+Apache License 2.0; the licence text is next to the fixtures. Test-only, not part of the app.
