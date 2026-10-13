@@ -20,7 +20,7 @@ namespace Kytto.App.Ipc;
 /// port is written against, and a command that answers differently here than it
 /// does on macOS is a bug in one of the two.
 /// </remarks>
-internal static class CommandRegistry
+internal static partial class CommandRegistry
 {
     /// <param name="openSettings">
     /// How this shell shows its Settings window. Supplied by the window rather
@@ -565,7 +565,17 @@ internal static class CommandRegistry
             model.RestrictPermissions(clientId);
             return model.Secrets().Select(ToDto).ToArray();
         });
+
+        RegisterRemoteCommands(router, model);
+        RegisterPortableCommands(router, model);
     }
+
+    // Feature command groups live in their own files (CommandRegistry.<Feature>.cs) so
+    // that parallel work on remote sign-in and portable setup does not edit the same lines.
+    // A partial void method with no implementation is simply not called.
+    static partial void RegisterRemoteCommands(CommandRouter router, AppModel model);
+
+    static partial void RegisterPortableCommands(CommandRouter router, AppModel model);
 
     private static SecretRecordDto ToDto(SecretRecord record) => new(
         Id: record.Id,
