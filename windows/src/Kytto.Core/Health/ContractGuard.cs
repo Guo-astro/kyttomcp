@@ -14,11 +14,28 @@ public enum ContractChangeKind
 
 public enum ContractChangeSeverity { Info, Warning, Breaking }
 
+/// <summary>One model-visible field that changed, as bounded excerpts (§7.10).</summary>
+/// <remarks>
+/// These explain a review; they do not certify that a server implements the
+/// safeguards its schema names. <c>null</c> means "absent", which is not the same as
+/// an empty string. Equality is never decided from these texts: they are display
+/// only, and may be truncated.
+/// </remarks>
+public sealed record ContractFieldChange(
+    string Path,
+    string? Before,
+    string? After,
+    string? Explanation = null);
+
+/// <param name="Details">
+/// Optional on purpose: records written before 1.0.8 have none and must keep loading.
+/// </param>
 public sealed record ContractChange(
     ContractChangeKind Kind,
     ContractChangeSeverity Severity,
     string ToolName,
-    string Summary);
+    string Summary,
+    IReadOnlyList<ContractFieldChange>? Details = null);
 
 /// <summary>Compares model-visible MCP behavior between successful checks (§7.10).</summary>
 public static class ContractGuard
@@ -59,7 +76,8 @@ public static class ContractGuard
                     ContractChangeKind.DescriptionChanged,
                     ContractChangeSeverity.Warning,
                     name,
-                    "Model-facing description changed"));
+                    "Model-facing description changed",
+                    ContractFieldDiff.DescriptionDetails(left.Description, right.Description)));
             }
             if (!SameSchema(left.InputSchemaJSON, right.InputSchemaJSON))
             {
@@ -67,7 +85,8 @@ public static class ContractGuard
                     ContractChangeKind.InputSchemaChanged,
                     ContractChangeSeverity.Breaking,
                     name,
-                    "Input schema changed"));
+                    "Input schema changed — review compatibility and safeguards",
+                    ContractFieldDiff.SchemaDetails(left.InputSchemaJSON, right.InputSchemaJSON)));
             }
             if (left.Annotations != right.Annotations)
             {
@@ -75,7 +94,8 @@ public static class ContractGuard
                     ContractChangeKind.AnnotationsChanged,
                     ContractChangeSeverity.Warning,
                     name,
-                    "Safety annotations changed"));
+                    "Safety annotations changed",
+                    ContractFieldDiff.AnnotationDetails(left.Annotations, right.Annotations)));
             }
         }
         return changes;
@@ -93,6 +113,21 @@ public static class ContractGuard
         return result;
     }
 
+    /// <summary>The largest schema text (UTF-8 bytes) that is parsed at all.</summary>
+    /// <remarks>
+    /// Parsing is bounded independently of rendering. A larger contract is still a
+    /// change when its text differs; it is just compared by its raw text and shown as
+    /// an excerpt instead of being walked.
+    /// </remarks>
+    internal const int MaxSchemaBytes = 1_000_000;
+
+    /// <summary>Deepest JSON nesting a schema may have before it is compared as raw text.</summary>
+    /// <remarks>
+    /// The same ceiling a remote response is held to, so any schema Kytto accepted
+    /// from a server can also be compared.
+    /// </remarks>
+    internal const int MaxSchemaNesting = 128;
+
     /// <summary>Whether two input schemas say the same thing.</summary>
     /// <remarks>
     /// The stored text is the raw slice the server sent, so a server that only
@@ -100,8 +135,9 @@ public static class ContractGuard
     /// otherwise read as a breaking change, and false alarms teach people to
     /// acknowledge without reading. Object keys are sorted; array order is kept,
     /// because <c>enum</c>, <c>oneOf</c> or <c>prefixItems</c> can mean something else
-    /// reordered. If either side does not parse, the raw text decides, so a change is
-    /// never hidden by the canonicalization.
+    /// reordered. If either side does not parse — or is too large or too deep to be
+    /// compared within bounds — the raw text decides, so a change is never hidden by
+    /// the canonicalization.
     /// </remarks>
     internal static bool SameSchema(string? left, string? right)
     {
@@ -114,9 +150,10 @@ public static class ContractGuard
 
     private static string? Canonical(string json)
     {
+        if (Encoding.UTF8.GetByteCount(json) > MaxSchemaBytes) return null;
         try
         {
-            using var document = System.Text.Json.JsonDocument.Parse(json);
+            using var document = ContractFieldDiff.Parse(json);
             var output = new MemoryStream();
             using (var writer = new Utf8JsonWriter(output))
             {
@@ -124,8 +161,11 @@ public static class ContractGuard
             }
             return Encoding.UTF8.GetString(output.ToArray());
         }
-        catch (JsonException)
+        catch (Exception error) when (
+            error is JsonException or InvalidOperationException or ArgumentException)
         {
+            // A lone surrogate escape parses but cannot be decoded; that is a schema
+            // that cannot be compared, not a reason to fail the whole check.
             return null;
         }
     }

@@ -134,11 +134,31 @@ public sealed partial class BpeTokenizer
     /// containing the literal text of one is text a model would be shown, and
     /// counting it as a single control token would understate it.
     /// </remarks>
-    public int CountTokens(string text)
+    public int CountTokens(string text) => Count(text, deadline: null);
+
+    /// <summary>The same measurement under a shared inspection deadline (§7.3).</summary>
+    /// <remarks>
+    /// Remote tool definitions are untrusted input, and a request that finished in
+    /// time does not bound the CPU work of measuring what it returned. The clock is
+    /// read between pieces and between slices, so one hostile description cannot
+    /// hold a check past its own limit. Throws <see cref="TimeoutException"/> rather
+    /// than returning a partial count: a number for half a contract is worse than none.
+    /// </remarks>
+    public int CountTokens(string text, DateTimeOffset deadline) => Count(text, deadline);
+
+    private int Count(string text, DateTimeOffset? deadline)
     {
+        if (deadline is { } start && DateTimeOffset.UtcNow >= start) throw new TimeoutException();
+
         var total = 0;
+        var pieces = 0;
         foreach (var piece in Pieces(text))
         {
+            // Cheap enough to read often, rare enough not to dominate ordinary text.
+            if (deadline is { } limit && (++pieces & 15) == 0 && DateTimeOffset.UtcNow >= limit)
+            {
+                throw new TimeoutException();
+            }
             if (_bySpan.ContainsKey(piece))
             {
                 total += 1;
@@ -154,12 +174,17 @@ public sealed partial class BpeTokenizer
                 total += MergeBoundaries(piece).Count - 1;
                 continue;
             }
-            for (var start = 0; start < piece.Length; start += MaxExactPiece)
+            for (var offset = 0; offset < piece.Length; offset += MaxExactPiece)
             {
-                var slice = piece[start..Math.Min(start + MaxExactPiece, piece.Length)];
+                if (deadline is { } sliceLimit && DateTimeOffset.UtcNow >= sliceLimit)
+                {
+                    throw new TimeoutException();
+                }
+                var slice = piece[offset..Math.Min(offset + MaxExactPiece, piece.Length)];
                 total += _bySpan.ContainsKey(slice) ? 1 : MergeBoundaries(slice).Count - 1;
             }
         }
+        if (deadline is { } end && DateTimeOffset.UtcNow >= end) throw new TimeoutException();
         return total;
     }
 
