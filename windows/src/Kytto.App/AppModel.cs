@@ -31,7 +31,7 @@ namespace Kytto.App;
 /// what is configured (§5), so the way to learn what changed is to read them
 /// again. Nothing here writes on launch (§6.6).
 /// </remarks>
-internal sealed class AppModel : IDisposable
+internal sealed partial class AppModel : IDisposable
 {
     private readonly KyttoPaths _paths;
     private readonly string _home;
