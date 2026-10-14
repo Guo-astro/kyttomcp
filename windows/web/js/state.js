@@ -23,6 +23,11 @@
  *   contractAlerts: object[],
  *   drift: object[],
  *   filter: string,
+ *   scopeFilter: string,
+ *   sourceFilter: 'all' | 'config' | 'plugin' | 'custom',
+ *   density: 'comfortable' | 'compact',
+ *   selectedServerId: string | null,
+ *   openTools: Set<string>,
  *   busyCells: Set<string>,
  *   notice: {
  *     kind: 'info' | 'warning' | 'error',
@@ -67,6 +72,22 @@ const state = {
   drift: [],
   activity: null,
   filter: '',
+  // Matrix with detail (§7.1.1). Three filters compose: the text above, a scope
+  // ('all' | 'global' | a read-only client id naming one workspace/profile/custom
+  // source) and a source type. They narrow rows and columns; they never change
+  // what is on disk.
+  scopeFilter: 'all',
+  sourceFilter: 'all',
+  // 'comfortable' | 'compact'. Per session: it is a reading preference, not a
+  // setting that native has any use for.
+  density: 'comfortable',
+  // The server the persistent inspector shows (§7.1.2). Its own piece of state,
+  // deliberately not a sheet: a refresh keeps it, a removed or filtered-out
+  // subject clears it (see `reconcile` in `setState`).
+  selectedServerId: null,
+  // Tool rows expanded in a server's detail, keyed `serverId::toolName`, so a
+  // re-render does not fold them shut — in the inspector or in the modal.
+  openTools: new Set(),
   // Cells with a write in flight, keyed `serverId::clientId`. A toggle writes to
   // disk, so the cell must not accept a second click until the first lands.
   busyCells: new Set(),
@@ -147,6 +168,7 @@ export function setState(changes) {
   const previousNotice = state.notice;
   const previousRestarts = state.pendingRestarts;
   Object.assign(state, changes);
+  reconcile(changes);
 
   const exits = [];
   if (Object.hasOwn(changes, 'sheet')) {
@@ -194,6 +216,43 @@ export function setState(changes) {
   }
 }
 
+// Filters and the inspector refer to things native owns. When a refresh takes the
+// referent away they fall back to something that exists instead of leaving the
+// screen pointing at nothing (§7.1.1, §7.1.2).
+const FILTER_INPUTS = ['clients', 'servers', 'filter', 'scopeFilter', 'sourceFilter', 'settings'];
+
+function reconcile(changes) {
+  if (
+    Object.hasOwn(changes, 'clients') &&
+    !['all', 'global'].includes(state.scopeFilter) &&
+    !state.clients.some((client) => client.id === state.scopeFilter)
+  ) {
+    state.scopeFilter = 'all';
+  }
+
+  // Removed (the server is gone) or hidden (a filter no longer matches it): either
+  // way the inspector must not keep describing a row nobody can see.
+  if (
+    state.selectedServerId &&
+    (Object.hasOwn(changes, 'selectedServerId') || FILTER_INPUTS.some((key) => Object.hasOwn(changes, key))) &&
+    !visibleServers().some((server) => server.id === state.selectedServerId)
+  ) {
+    state.selectedServerId = null;
+  }
+}
+
+/// Records that a tool row was opened or folded. Quiet by design, like the sheet's
+/// scroll offset: the `<details>` element already shows the new state, and
+/// rendering in response to its own toggle event would replace the element being
+/// toggled.
+export function setToolOpen(serverId, toolName, open) {
+  const key = toolKey(serverId, toolName);
+  if (open) state.openTools.add(key);
+  else state.openTools.delete(key);
+}
+
+export const toolKey = (serverId, toolName) => `${serverId}::${toolName}`;
+
 export const cellKey = (serverId, clientId) => `${serverId}::${clientId}`;
 
 export function setCellBusy(serverId, clientId, busy) {
@@ -203,11 +262,76 @@ export function setCellBusy(serverId, clientId, busy) {
   setState({ busyCells: next });
 }
 
-/** Servers matching the current filter, in display order. */
+/**
+ * Where a server came from, as the source filter and the row label need it.
+ * Native sends `source.kind`; a payload from before it existed is read from
+ * `originKind`, so an older fixture or reply still sorts into the right bucket.
+ * @returns {'config' | 'custom' | 'extension' | 'plugin'}
+ */
+export function sourceKind(server) {
+  if (server.source?.kind) return server.source.kind;
+  if (server.originKind === 'plugin') return 'plugin';
+  return server.originKind === 'extension' ? 'extension' : 'config';
+}
+
+/// The source types the filter offers, in the order it offers them. Shared with
+/// the tests so the labels have one home.
+export const SOURCE_FILTERS = [
+  { id: 'all', label: 'All source types' },
+  { id: 'config', label: 'Configurations' },
+  { id: 'plugin', label: 'Plugins & extensions' },
+  { id: 'custom', label: 'Custom & workspace sources' },
+];
+
+/// Clients (columns) that hold a definition of this server, switched on or off.
+const holdersOf = (server, clients) =>
+  clients.filter((client) => (server.enabledIn[client.id] ?? 'absent') !== 'absent');
+
+/**
+ * Kytto never edits this server: native says so, or every file that holds it is a
+ * read-only source. The second half matters on Windows, where a project scope is
+ * read-only by construction and its servers arrive with an ordinary `config`
+ * source — the row still has to say "read-only".
+ */
+export function serverIsReadOnly(server) {
+  if (server.source?.readOnly === true) return true;
+  const holders = holdersOf(server, state.clients);
+  return holders.length > 0 && holders.every((client) => client.isReadOnly);
+}
+
+/**
+ * Servers matching scope, source type and text, in display order (§7.1.1).
+ *
+ * Scope narrows by columns first — `matrixClients()` already knows which files
+ * the chosen scope covers, global context included — and a server is in scope
+ * when any of those columns holds it. Source type then asks what kind of thing
+ * the server is; the text filter is applied last so it only ever searches what
+ * the other two left.
+ */
 export function visibleServers() {
+  const clients = matrixClients();
+  const scoped = state.servers.filter((server) => {
+    const holders = holdersOf(server, clients);
+    if (state.scopeFilter !== 'all' && holders.length === 0) return false;
+
+    const kind = sourceKind(server);
+    if (state.sourceFilter === 'plugin' && !['plugin', 'extension'].includes(kind)) return false;
+    if (state.sourceFilter === 'config') {
+      if (server.isBundled || kind === 'custom') return false;
+      // Held only by read-only workspace or custom files: not a configuration
+      // Kytto manages, whatever label native gave the first copy it found.
+      if (holders.length > 0 && holders.every((client) => client.isReadOnly)) return false;
+    }
+    if (state.sourceFilter === 'custom' && !holders.some((client) => client.isReadOnly)) return false;
+
+    // Folding the read-only sources away also folds away rows that exist only
+    // because of them; an empty row of switches is not a server you can act on.
+    if (state.settings?.showsCustomSources === false && state.scopeFilter === 'all' && holders.length === 0) return false;
+    return true;
+  });
   const needle = state.filter.trim().toLowerCase();
-  if (!needle) return state.servers;
-  return state.servers.filter(
+  if (!needle) return scoped;
+  return scoped.filter(
     (server) =>
       server.name.toLowerCase().includes(needle) ||
       server.commandSummary.toLowerCase().includes(needle) ||
@@ -231,11 +355,53 @@ export function matchingTools(server) {
     .filter((name) => name.toLowerCase().includes(needle));
 }
 
-/** Built-ins keep stable columns; explicitly folded read-only sources do not draw. */
+/**
+ * The columns for the current scope (§7.1.1).
+ *
+ * Built-ins keep stable columns; explicitly folded read-only sources do not draw —
+ * except when the scope names one of them, because choosing a workspace is the
+ * stronger statement than folding the sidebar.
+ *
+ * A workspace shows its own source plus the writable client that owns it, which
+ * is the "applicable global and inherited context": the project's file is only
+ * half of what that client reads. Native supplies the owner through the shared
+ * icon identity — nothing here parses a path or guesses a client from a name.
+ */
 export function matrixClients() {
+  const scope = state.clients.find((client) => client.id === state.scopeFilter);
+  if (scope) {
+    return state.clients.filter(
+      (client) =>
+        client.id === scope.id || (!client.isReadOnly && client.iconAsset === scope.iconAsset),
+    );
+  }
+  if (state.scopeFilter === 'global') {
+    return state.clients.filter(
+      (client) =>
+        (client.configurationScope ?? 'global') === 'global' &&
+        (state.settings?.showsCustomSources !== false || !client.isReadOnly),
+    );
+  }
   return state.settings?.showsCustomSources === false
     ? state.clients.filter((client) => !client.isReadOnly)
     : state.clients;
+}
+
+/// What the Scope filter offers: everything, the global configurations, then one
+/// entry per read-only source or non-global scope native reported.
+const SCOPE_KIND = { workspace: 'Workspace', profile: 'Profile' };
+
+export function scopeOptions(from = state) {
+  return [
+    { id: 'all', label: 'All sources' },
+    { id: 'global', label: 'Global configurations' },
+    ...from.clients
+      .filter((client) => client.isReadOnly || (client.configurationScope ?? 'global') !== 'global')
+      .map((client) => ({
+        id: client.id,
+        label: `${SCOPE_KIND[client.configurationScope] ?? 'Custom'} · ${client.displayName}`,
+      })),
+  ];
 }
 
 /** Clients native has declared safe write destinations. */

@@ -253,6 +253,35 @@ them. `disabled` means configured and switched off — Claude Code's deny list, 
 an extension with `isEnabled: false`. `absent` means not configured in that
 client at all.
 
+#### What the matrix does with these fields (§7.1.1, §7.1.2)
+
+Scope, source type, density and the inspector's selection are **page state**:
+they add no command and put nothing on the wire. The page filters the lists it
+already has. It relies on three facts, each stated here as an intent native has to
+keep true:
+
+- **Which files a scope covers.** A read-only client with a
+  `configurationScope` of `workspace` or `profile` (a Claude Code project, an
+  attached file) is chosen by its `id`. The writable client that owns it — the
+  context it inherits — is the writable client with the **same `iconAsset`**. A
+  project scope therefore has to report its owner's `iconAsset`; a custom source
+  with no owner reports `client-custom`, which no writable client shares, and
+  shows only itself.
+- **What kind of server a row is.** `source.kind` is `config`, `custom`,
+  `extension` or `plugin`. A payload without `source` is read from `originKind`.
+  A server is also treated as read-only when every client that holds it is
+  `isReadOnly`, whatever its `source.readOnly` says, because that is what Kytto
+  can and cannot do to it.
+- **What a plugin can do.** A server with `originKind: "plugin"` (or
+  `source.kind: "plugin"`, or `isBundled` with `source.readOnly`) gets disabled
+  switches in every client column. A Claude Desktop extension does not: it keeps
+  its switch in the client that owns it.
+
+"Check visible" sends one `health.check` per server id the filters leave, one
+after another; "Check all servers" in MCP Doctor is `health.checkAll`. The
+sidebar's *MCP Library* and *Skills* entries are gated on the `library` and
+`skills` capabilities and open the same sheets the toolbar buttons used to.
+
 ### `diagnostics.list` → `DiagnosticDTO[]`
 
 No payload. Problems found while reading, e.g. a config that would not parse.

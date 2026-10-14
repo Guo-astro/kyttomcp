@@ -337,6 +337,86 @@ absent entry restores the exact backup or uses safe remove-from-client when the
 write created a new file. The restart banner remains a non-overlay flex row and
 must never cover the matrix scroller, including at short window heights.
 
+#### 7.1.1 Scope, source and density
+
+Three controls sit between the heading and the matrix, and they compose with the
+text filter (name, command, and the tool names of a checked server):
+
+- **Scope** — *All sources*, *Global configurations*, or one workspace, profile
+  or custom source by name. There is no project crawler: the choices are exactly
+  the read-only scopes discovery already reports (Claude Code's existing
+  `projects` map, files attached in Settings).
+- **Source** — *All source types*, *Configurations*, *Plugins & extensions*,
+  *Custom & workspace sources*.
+- **Rows** — *Comfortable* or *Compact* (§10.1).
+
+Scope decides the columns first, and a server is in scope when any of them holds
+it. An explicit workspace shows its own file **and the writable client that owns
+it**, because the project's file is only half of what that client reads: the rest
+is the applicable global context, and a server inherited from it is a row here
+too. A custom source with no owning client shows only itself. Choosing a
+workspace is a stronger statement than folding "Custom sources" away in the
+sidebar, so a folded source still shows when it is the chosen scope; folding with
+*All sources* selected drops the rows that exist only because of those sources.
+
+Source type asks what a row is. *Configurations* are definitions Kytto manages;
+*Plugins & extensions* are installed software; *Custom & workspace sources* are
+rows held by at least one read-only file in scope. A server held **only** by
+read-only files is never called a configuration, whatever label its first copy
+carried. These filters narrow what is drawn and never what is written.
+
+When a refresh stops reporting the chosen scope, the scope returns to *All
+sources*; when a filter hides the server the inspector is showing, the selection
+is cleared (§7.1.2).
+
+Every row says, in words, how its last check went and where it came from —
+*Check passed · Configuration*, *Sign-in required*, *Read-only · Plugin · Demo
+tools 2.0* — so neither is carried by a dot or a colour alone. **Check visible**
+runs the health checks of the rows the filters leave, one after another, through
+the same `health.check` a single *Check now* uses; the list is fixed when the run
+starts. *MCP Doctor → Check all servers* stays the all-servers run.
+
+The sidebar groups its destinations — *Overview* (Matrix, MCP Doctor, Activity),
+*Manage* (Profiles, Secrets, Backups), *Discover* (MCP Library, Skills) — and
+lists *Clients & sources*: the built-in clients, with read-only workspaces nested
+under the client that owns them and a padlock on every read-only entry, then the
+foldable *Custom sources · read-only*. On Windows MCP Library and Skills remain
+sheets over the matrix rather than panels; they are actions, never "selected".
+
+#### 7.1.2 Matrix with detail
+
+The matrix is a card beside a persistent **inspector** (310–360 px, a 14 px gap).
+`selectedServerId` is its own piece of state, not a sheet:
+
+- a row click on the matrix selects the server; nothing modal opens. On the client
+  screen, which has no inspector, the same click opens the detail sheet;
+- **Expand** opens the full §7.5 sheet over the matrix; **Close** ends the
+  selection;
+- a refresh keeps the selection, the focus and every scroll position — the
+  inspector's body is keyed by server, so scrolling one server's tools does not
+  leave the next half-way down;
+- a server that disappears, or that the filters now hide, clears the selection
+  rather than leaving the inspector describing a row nobody can see.
+
+The sheet and the inspector are the same renderer (`serverDetailParts`); a section
+added to one is in the other, and the disclosure state of a tool row is shared
+between them. Focus is restored within the half of the page it left, because the
+two surfaces draw the same controls and the one behind an open sheet is inert.
+
+Below 1100 px the inspector moves under the matrix (at most 420 px tall, its body
+scrolling). In both layouts nothing widens the page: the matrix scrolls itself in
+both directions with its server column pinned, the inspector scrolls its own
+body, and what a config file or a server wrote — a name, a path, a schema —
+wraps or is ellipsised inside its column. The workspace takes the height the
+banners and bars leave, never less than its heading, filters and a few rows; a
+window shorter than that scrolls the content pane instead of painting over the
+bars below it.
+
+An installed **plugin** is read-only everywhere: its switches are disabled in
+every client column with a reason, its row and inspector say *Read-only · Plugin*
+with its registered version, and it offers no edit, delete or copy. A Claude
+Desktop extension keeps its switch in the client that owns it (§4).
+
 ### 7.2 Add server
 
 Two paths:
@@ -667,6 +747,39 @@ This is an instrument panel, not a consumer app. Reference: Proxyman, TablePlus.
 - Color only where it carries meaning: green running, red failed, gray unchecked, amber consuming context. Nowhere else.
 
 A developer wants maximum state on one screen and wants to read it in two seconds.
+
+### 10.1 Controls, density and motion
+
+**Filters are native selects with our own closed appearance.** The `<select>`
+stays — its menu, keyboard handling and typeahead are the platform's, and the page
+reacts to the committed `change`, never to keys inside the menu. Only the closed
+control is drawn: `appearance: none` (and `-webkit-appearance: none`), 36 px high,
+an 11 px radius, a leading SVG icon, a single subtle chevron on the right, padding
+`0 34px 0 35px`, a soft surface gradient and shadow, a 2 px accent focus ring, and
+an accent border and tint while the filter is narrowing something. Both SVGs are
+decoration — `aria-hidden` and `pointer-events: none`, so the whole control is the
+select — and the label wraps the select so the two are associated. No custom
+combobox, no UI dependency.
+
+**Density.** *Comfortable* rows are three lines (name, verdict and source,
+command) at 68 px; *Compact* rows are 52 px and drop the command line but keep the
+name, the verdict and the source, which are what a row is for. A failed check, a
+wait for sign-in and the tool names that matched the filter still replace the
+command, because there they are the reason. Density is per session.
+
+**Never colour alone.** Status is a dot *and* words. A selected row is a tint, a
+bar and an underline, and `aria-pressed` for assistive technology. Read-only is a
+padlock and the word. An active filter is an accent and a value that says what it
+is. Colour keeps the meaning §10 gives it and is never the only carrier.
+
+**Motion confirms; it does not decorate.** Two tokens — fast 110 ms, medium
+200 ms — cover transitions. The inspector arrives in 180 ms, rows entering the
+visible set in 180 ms, a cell that landed on disk in 150 ms, panels and sheets in
+200 ms with a few pixels of travel and no overshoot. Typing in a filter animates
+only the rows that appear. `prefers-reduced-motion: reduce` collapses every
+animation and transition to a single frame, and the screen then says the same
+thing immediately; WebView2 reports Windows' *Show animations* setting through
+that media query, so the page needs no platform branch (§3.2).
 
 ---
 

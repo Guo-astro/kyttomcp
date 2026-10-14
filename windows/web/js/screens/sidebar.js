@@ -21,6 +21,23 @@ const PANELS = [
   { id: 'backups', label: 'Backups', paths: GLYPH.backups },
 ];
 
+/// Three groups instead of one flat list (§7.1.1). Every id here is a place you
+/// stand in — the Discover tools are not, see `DISCOVER` below.
+const PANEL_GROUPS = [
+  { label: 'Overview', ids: [null, 'doctor', 'activity'] },
+  { label: 'Manage', ids: ['profiles', 'secrets', 'backups'] },
+];
+
+/// MCP Library and Skills are windows over the matrix on Windows rather than
+/// panels, as they have always been: they open a sheet and give the focus back to
+/// the item that asked. So they live in the sidebar — under Discover, where the
+/// macOS build also puts them — but they are actions, never "selected", and each
+/// still appears only when native reports the capability.
+const DISCOVER = [
+  { capability: 'library', action: 'open-library', label: 'MCP Library', paths: GLYPH.library },
+  { capability: 'skills', action: 'open-skills', label: 'Skills', paths: GLYPH.skills },
+];
+
 /// A client that is installed and configured says how many servers it holds.
 /// The other three states are more useful as words than as a zero.
 const CLIENT_NOTE = {
@@ -36,31 +53,47 @@ export function renderSidebar(state, selectionChanged = false) {
   sidebar.setAttribute('aria-label', 'Sections');
 
   sidebar.append(brand());
-  sidebar.append(el('div', 'side-heading', 'Workspace'));
-  for (const panel of PANELS) {
-    sidebar.append(panelItem(state, panel, selectionChanged));
+  for (const group of PANEL_GROUPS) {
+    sidebar.append(el('div', 'side-heading', group.label));
+    for (const panel of PANELS.filter((entry) => group.ids.includes(entry.id))) {
+      sidebar.append(panelItem(state, panel, selectionChanged));
+    }
+  }
+
+  const discover = DISCOVER.filter((entry) => hasCapability(state, entry.capability));
+  if (discover.length > 0) {
+    sidebar.append(el('div', 'side-heading', 'Discover'));
+    for (const entry of discover) sidebar.append(discoverItem(entry));
   }
 
   const builtInClients = state.clients.filter((client) => !client.isReadOnly);
   const customSources = state.clients.filter((client) => client.isReadOnly);
-  if (builtInClients.length > 0) {
-    sidebar.append(
-      el(
-        'div',
-        'side-heading',
-        builtInClients.length === 5 ? '5 built-in clients' : `${builtInClients.length} built-in clients`,
-      ),
-    );
+  if (state.clients.length > 0) {
+    sidebar.append(el('div', 'side-heading', 'Clients & sources'));
+    const shown = state.settings?.showsCustomSources !== false;
+    // A read-only source that shares its icon identity with a built-in client is
+    // that client's workspace (a Claude Code project scope, say), so it nests
+    // under it; native decides the identity, the page never parses a path.
+    const nested = new Set();
     for (const client of builtInClients) {
       sidebar.append(clientItem(state, client, selectionChanged));
+      const children = customSources.filter((source) => source.iconAsset === client.iconAsset);
+      for (const child of children) nested.add(child.id);
+      if (!shown) continue;
+      for (const child of children) {
+        const item = clientItem(state, child, selectionChanged);
+        item.classList.add('side-child');
+        sidebar.append(item);
+      }
     }
-  }
-  if (customSources.length > 0) {
-    const shown = state.settings?.showsCustomSources !== false;
-    sidebar.append(customHeading(customSources.length, shown));
-    if (shown) {
-      for (const client of customSources) {
-        sidebar.append(clientItem(state, client, selectionChanged));
+    // Everything else — explicitly attached files with no owning client — keeps
+    // the disclosure that folds them away, as before.
+    if (customSources.length > 0) {
+      sidebar.append(customHeading(customSources.length, shown));
+      if (shown) {
+        for (const client of customSources.filter((source) => !nested.has(source.id))) {
+          sidebar.append(clientItem(state, client, selectionChanged));
+        }
       }
     }
   }
@@ -112,6 +145,21 @@ export function sidebarResizeHandle() {
   handle.tabIndex = 0;
   handle.dataset.action = 'resize-sidebar';
   return handle;
+}
+
+const hasCapability = (state, capability) =>
+  (state.app?.capabilities ?? []).includes(capability);
+
+/// A tool that opens a sheet. Reachable by keyboard like every other row, and
+/// never `aria-current`: the rail marks where you are, and these are not places.
+function discoverItem({ action, label, paths }) {
+  const item = el('button', 'side-item side-discover');
+  item.type = 'button';
+  item.dataset.action = action;
+  item.setAttribute('aria-haspopup', 'dialog');
+  item.append(glyph(paths));
+  item.append(el('span', 'side-label', label));
+  return item;
 }
 
 function customHeading(count, shown) {
@@ -208,6 +256,13 @@ function clientItem(state, client, selectionChanged) {
 
   item.append(clientIcon(client));
   item.append(el('span', 'side-label', client.shortName ?? client.displayName));
+  if (client.isReadOnly) {
+    // The state is words for assistive technology and a padlock for everyone
+    // else: read-only is a fact about the row, not a colour.
+    const lock = glyph(['M5 7V5a3 3 0 0 1 6 0v2', 'M3.5 7h9v7h-9z']);
+    lock.classList.add('source-lock');
+    item.append(lock, el('span', 'visually-hidden', 'Read-only'));
+  }
   item.append(el('span', 'side-count', client.serverCount > 0 ? String(client.serverCount) : '—'));
   return item;
 }

@@ -136,6 +136,10 @@ export const GLYPH = {
   warning: ['M8 2.6 15 14H1z', 'M8 6.4v3.2', 'M8 11.9v.2'],
   refresh: ['M13.5 8a5.5 5.5 0 1 1-1.7-3.9', 'M13.5 2.5v3h-3'],
   activity: ['M2 8h2.2l1.3-3.3L8 11.5l1.8-5 1.1 1.5H14'],
+  // A sheet of paper with lines of text, and a five-pointed star: the sidebar's
+  // Discover tools and the Source filter's leading icon.
+  library: ['M3.5 2.5h9v11h-9z', 'M6 5.5h4', 'M6 8h4', 'M6 10.5h2.5'],
+  skills: ['M8 2.2l1.75 3.6 3.9.5-2.85 2.7.75 3.9L8 10.9l-3.55 2 .75-3.9L2.35 6.3l3.9-.5z'],
   disclosure: ['M3.5 5.5 8 10l4.5-4.5'],
   // A gear reads as settings at 16px only if the teeth stay countable, so it is
   // a hub with six spokes rather than a toothed outline that turns to mush.

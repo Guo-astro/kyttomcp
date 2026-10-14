@@ -12,6 +12,8 @@ import {
   needsMatrixWriteConfirmation,
   matrixUndoPlan,
   clientNames,
+  visibleServers,
+  setToolOpen,
 } from './state.js';
 import { render as renderMatrix } from './screens/matrix.js';
 import { diagnosticReport } from './screens/serverDetail.js';
@@ -104,7 +106,12 @@ function focusSnapshot() {
 function restoreFocus(snapshot) {
   if (!snapshot?.dataset.action) return false;
   const entries = Object.entries(snapshot.dataset);
-  const candidate = [...root.querySelectorAll('[data-action]')].find(
+  // The inspector and the detail sheet render the same controls for one server
+  // (§7.1.2), so a bare `[data-action]` search can land on the inert copy behind
+  // an open sheet. Search the half of the page the focus came from.
+  const scope =
+    (snapshot.insideSheet ? root.querySelector('.sheet') : root.querySelector('#body')) ?? root;
+  const candidate = [...scope.querySelectorAll('[data-action]')].find(
     (node) =>
       node.tagName === snapshot.tagName &&
       (snapshot.text === null || node.textContent === snapshot.text) &&
@@ -1287,6 +1294,51 @@ async function checkAll() {
   }
 }
 
+/// "Check visible" (§7.1.1): the servers the filters leave, one after another,
+/// each through the same `health.check` a single "Check now" uses. The list is
+/// taken once, up front — a refresh or a keystroke in the filter while it runs
+/// must not change which servers this run promised to check — and the batch
+/// stops looking at anything that is not on it.
+async function checkVisible() {
+  if (getState().healthProgress || getState().checking.size > 0) return;
+  const servers = visibleServers().map((server) => ({ id: server.id, name: server.name }));
+  if (servers.length === 0) return;
+
+  const alertsBefore = contractAlertKeys();
+  const failed = [];
+  const waiting = [];
+  setState({ healthProgress: { serverName: '', index: 0, total: servers.length }, notice: null });
+  try {
+    for (const [index, server] of servers.entries()) {
+      setState({ healthProgress: { serverName: server.name, index: index + 1, total: servers.length } });
+      setChecking(server.id, true);
+      try {
+        const result = await invoke('health.check', { serverID: server.id });
+        applyState(result.state);
+        if (result.health.status === 'failed') failed.push(server.name);
+        if (result.health.status === 'needsAuthorization') waiting.push(server.name);
+      } finally {
+        setChecking(server.id, false);
+      }
+    }
+    const messages = [`Checked ${servers.length} visible server${servers.length === 1 ? '' : 's'}.`];
+    if (failed.length > 0) messages.push(`${failed.length} failed; open their details for the reason.`);
+    if (waiting.length > 0) messages.push(`${waiting.length} require sign-in.`);
+    const contract = contractNotice(newContractAlerts(alertsBefore));
+    if (contract) messages.push(contract.message);
+    const notice = {
+      kind: failed.length > 0 || waiting.length > 0 || contract ? 'warning' : 'info',
+      message: messages.join(' '),
+    };
+    setState({ notice });
+    await refreshAfterMutation(['Profiles'], notice);
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ healthProgress: null });
+  }
+}
+
 const firstLine = (text) => String(text).split('\n')[0];
 
 async function restoreBackup(backupId, clientId) {
@@ -1576,15 +1628,22 @@ root.addEventListener('click', async (event) => {
       break;
     }
 
+    // On the matrix a row selects: the inspector beside it shows the server and
+    // nothing modal opens (§7.1.2). Anywhere without an inspector — the client
+    // screen — the same click still opens the detail sheet it always did.
     case 'open-server':
-      setState({
-        sheet: {
-          kind: 'detail',
-          serverId: target.dataset.serverId,
-          scrollTop: 0,
-          openTools: [],
-        },
-      });
+      if (state.panel === null) setState({ selectedServerId: target.dataset.serverId });
+      else setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId, scrollTop: 0 } });
+      break;
+    // "Expand" in the inspector: the existing full detail, over the matrix.
+    case 'open-server-modal':
+      setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId, scrollTop: 0 } });
+      break;
+    case 'close-inspector':
+      setState({ selectedServerId: null });
+      break;
+    case 'reset-matrix-filters':
+      setState({ filter: '', scopeFilter: 'all', sourceFilter: 'all' });
       break;
     case 'close-sheet':
       // Only the backdrop itself closes; clicks inside the panel bubble up here
@@ -1604,6 +1663,9 @@ root.addEventListener('click', async (event) => {
       break;
     case 'check-all':
       await checkAll();
+      break;
+    case 'check-visible':
+      await checkVisible();
       break;
     case 'copy-diagnostic': {
       const server = state.servers.find((entry) => entry.id === target.dataset.serverId);
@@ -1802,7 +1864,15 @@ root.addEventListener('input', (event) => {
 
 root.addEventListener('change', (event) => {
   const sheet = getState().sheet;
-  if (event.target.dataset.action === 'draft-target') {
+  // The matrix filters are `<select>`s: the page reacts to the committed value,
+  // after the native menu has closed, never to keystrokes inside it (§10.1).
+  if (event.target.dataset.action === 'scope-filter') {
+    setState({ scopeFilter: event.target.value });
+  } else if (event.target.dataset.action === 'source-filter') {
+    setState({ sourceFilter: event.target.value });
+  } else if (event.target.dataset.action === 'row-density') {
+    setState({ density: event.target.value === 'compact' ? 'compact' : 'comfortable' });
+  } else if (event.target.dataset.action === 'draft-target') {
     const clientId = event.target.dataset.clientId;
     const targets = event.target.checked
       ? [...sheet.targets, clientId]
@@ -1846,14 +1916,11 @@ root.addEventListener('scroll', (event) => {
 }, true);
 
 root.addEventListener('toggle', (event) => {
-  const sheet = getState().sheet;
-  const toolName = event.target.dataset?.toolName;
-  if (sheet?.kind !== 'detail' || !toolName) return;
-
-  const openTools = new Set(sheet.openTools ?? []);
-  if (event.target.open) openTools.add(toolName);
-  else openTools.delete(toolName);
-  sheet.openTools = [...openTools];
+  const { toolName, serverId } = event.target.dataset ?? {};
+  if (!toolName || !serverId) return;
+  // Keyed by server and tool, in state: the inspector and the detail sheet draw
+  // the same rows, and either one folding a tool folds it in both.
+  setToolOpen(serverId, toolName, event.target.open);
 }, true);
 
 document.addEventListener('keydown', (event) => {

@@ -172,6 +172,14 @@ const server = (name, overrides = {}) => ({
   health: null,
   tokenWeight: null,
   ...overrides,
+  // What native reports for provenance. Spelled like the wire: `kind` is one of
+  // config | custom | extension | plugin (§7.1.1).
+  source: overrides.source ?? {
+    kind: overrides.originKind === 'configFile' ? 'config' : 'extension',
+    displayName: overrides.originKind === 'configFile' ? 'Configuration' : 'Claude Desktop extension',
+    version: null,
+    readOnly: false,
+  },
 });
 
 const passingHealth = (toolCount, tools = []) => ({
@@ -580,6 +588,60 @@ const world = {
   ],
 };
 
+// The new source forms (§7.1.1), added after the world so the older rows above
+// stay exactly as the other tests expect them. Fixture-only: the harness never
+// launches these commands, and a plugin row is read-only exactly as it is natively.
+world.servers.push(
+  // Claude Code plugin: registered and enabled by the client, so Kytto can read
+  // it and can never switch it. The version comes from the registration.
+  server('plugin:demo-tools:inspector', {
+    command: '${CLAUDE_PLUGIN_ROOT}/bin/inspector',
+    commandSummary: '${CLAUDE_PLUGIN_ROOT}/bin/inspector',
+    originKind: 'plugin',
+    isBundled: true,
+    source: { kind: 'plugin', displayName: 'Demo tools', version: '2.0', readOnly: true },
+    enabledIn: { claudeCode: 'enabled' },
+  }),
+  // A Codex plugin with a deliberately long name and version, for the wrapping
+  // and ellipsis rules rather than for the data.
+  server('plugin:acme-observability-suite:long-running-trace-exporter', {
+    command: 'node',
+    args: ['${CODEX_PLUGIN_ROOT}/dist/exporter.js'],
+    commandSummary: 'node ${CODEX_PLUGIN_ROOT}/dist/exporter.js',
+    originKind: 'plugin',
+    isBundled: true,
+    source: { kind: 'plugin', displayName: 'Acme observability suite for very large monorepos', version: '2026.10.0-rc.3', readOnly: true },
+    enabledIn: { codex: 'enabled' },
+  }),
+  // A server that lives only in one Claude Code project: a workspace source,
+  // read-only, and not part of any global configuration.
+  server('project-api', {
+    command: 'node',
+    args: ['server.js'],
+    commandSummary: 'node server.js',
+    originKind: 'configFile',
+    isBundled: false,
+    source: { kind: 'custom', displayName: 'Claude Code project', version: null, readOnly: true },
+    enabledIn: { [CLAUDE_PROJECTS[0].id]: 'enabled' },
+  }),
+);
+// The first project also inherits a global server, which is what an explicit
+// workspace scope shows beside its own source (§7.1.1).
+world.servers.find((entry) => entry.id === 'github').enabledIn[CLAUDE_PROJECTS[0].id] = 'enabled';
+// The sidebar and the client screen read the project's count from CLIENTS, which
+// copied the project objects when it was built.
+CLIENTS.find((client) => client.id === CLAUDE_PROJECTS[0].id).serverCount = 3;
+
+/// Native refuses to write an installed plugin, however the request arrives.
+const refusePlugin = (target) => {
+  if (target?.originKind === 'plugin') {
+    throw Object.assign(
+      new Error(`“${target.name}” belongs to a registered plugin. Manage it in the client that installed it.`),
+      { code: 'readOnlyServer' },
+    );
+  }
+};
+
 /// Mirrors what a real write does: marks the client as needing a restart and
 /// leaves a backup behind.
 const recordWrite = (clientID) => {
@@ -958,7 +1020,9 @@ const HANDLERS = {
   'app.info': () => ({
     version: '1.0',
     build: '1',
-    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'skills', 'provenance'],
+    // `library` and `agent-import` are what native reports too; the sidebar's
+    // Discover group and the toolbar's Import agent button are gated on them.
+    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'skills', 'provenance', 'library', 'agent-import'],
     platformDisplayName: 'fixtures',
     // Deliberately neither "Keychain" nor "Credential Manager": the harness is
     // not pretending to be either platform, and a screen that reads correctly
@@ -1439,6 +1503,7 @@ const HANDLERS = {
   'servers.update': ({ serverID, draft }) => {
     const target = world.servers.find((entry) => entry.id === serverID);
     if (!target) throw Object.assign(new Error('No such server'), { code: 'unknownServer' });
+    refusePlugin(target);
     validateDraft(draft);
 
     const changed = Object.entries(target.enabledIn)
@@ -1462,6 +1527,7 @@ const HANDLERS = {
   'servers.delete': ({ serverID }) => {
     const target = world.servers.find((entry) => entry.id === serverID);
     if (!target) throw Object.assign(new Error('No such server'), { code: 'unknownServer' });
+    refusePlugin(target);
     const changed = Object.entries(target.enabledIn)
       .filter(([, value]) => value !== 'absent')
       .map(([id]) => id);
@@ -1476,6 +1542,7 @@ const HANDLERS = {
   'servers.removeFromClient': ({ serverID, clientID }) => {
     const target = world.servers.find((entry) => entry.id === serverID);
     if (!target) throw Object.assign(new Error('No such server'), { code: 'unknownServer' });
+    refusePlugin(target);
     if ((target.enabledIn[clientID] ?? 'absent') === 'absent') {
       throw Object.assign(new Error(`“${target.name}” is not in that client.`), { code: 'notFound' });
     }
@@ -1493,6 +1560,7 @@ const HANDLERS = {
   'servers.setEnabled': ({ serverID, clientID, enabled }) => {
     const target = world.servers.find((entry) => entry.id === serverID);
     if (!target) throw Object.assign(new Error('No such server'), { code: 'unknownServer' });
+    refusePlugin(target);
 
     const wasAbsent = target.enabledIn[clientID] === 'absent';
     const wasParked = !enabled && PARKING_CLIENTS.has(clientID);

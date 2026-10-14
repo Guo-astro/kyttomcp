@@ -164,7 +164,7 @@ Synthetic mouse clicks do not reach the WebView2 renderer — moves arrive and
 nothing. Drive the UI from the shell instead (Debug builds only):
 
 ```powershell
-$env:KYTTO_PROBE = '[data-action="check-all"]'   # CSS selectors to click, `;` between
+$env:KYTTO_PROBE = '[data-action="check-visible"]'   # CSS selectors to click, `;` between
 Start-Process src/Kytto.App/bin/Debug/net10.0-windows/Kytto.exe
 ```
 

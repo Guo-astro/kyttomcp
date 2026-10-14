@@ -182,7 +182,9 @@ img {
 /* Navigation swaps the content tree wholesale. Give the new subject one quiet
    arrival rather than replaying motion on every data refresh inside it. */
 .panel-entering {
-  animation: panel-in-forward 320ms var(--ease-out) both;
+  /* One medium step, a few pixels of travel and no overshoot: arriving is
+     confirmed, never performed (§10.1). */
+  animation: panel-in-forward var(--medium) var(--ease-out) both;
   will-change: transform;
 }
 
@@ -192,10 +194,7 @@ img {
 
 @keyframes panel-in-forward {
   from {
-    transform: translateX(18px);
-  }
-  68% {
-    transform: translateX(-2px);
+    transform: translateX(4px);
   }
   to {
     transform: translateX(0);
@@ -204,10 +203,7 @@ img {
 
 @keyframes panel-in-back {
   from {
-    transform: translateX(-18px);
-  }
-  68% {
-    transform: translateX(2px);
+    transform: translateX(-4px);
   }
   to {
     transform: translateX(0);
@@ -952,20 +948,11 @@ img {
   vertical-align: middle;
 }
 
-/* Only rows that entered the set move. Filtering the existing set gets a short
-   collective settle instead of replaying a stagger down the entire matrix. */
+/* Only rows entering the visible set move; retained rows stay still. Typing in a
+   filter used to settle the whole table on every keystroke, which read as
+   flicker rather than as an answer — now only what actually appears animates. */
 .matrix tbody tr.row-entering {
-  animation: row-in 260ms var(--ease-out) backwards;
-}
-
-.matrix.is-filtering {
-  animation: filter-settle 170ms var(--ease-out);
-}
-
-@keyframes filter-settle {
-  from {
-    opacity: 0.55;
-  }
+  animation: row-in 180ms var(--ease-out) backwards;
 }
 
 /* The starting frame is dim rather than invisible, everywhere content is
@@ -1653,13 +1640,13 @@ th.col-client.idle .app-icon {
 /* The click landed and the file on disk now says something different. The mark
    is rebuilt rather than transitioned, so the confirmation is a keyframe. */
 .cell-mark.flipped {
-  animation: mark-flip 320ms var(--ease-out);
+  animation: mark-flip 150ms var(--ease-out);
 }
 
 /* Turning one on draws its mark rather than fading it: the stroke arriving is
    the write finishing. */
 .cell-mark.enabled.flipped .cell-check {
-  animation: check-draw 260ms var(--ease-out) 70ms both;
+  animation: check-draw 150ms var(--ease-out) both;
 }
 
 @keyframes mark-flip {
@@ -1901,7 +1888,7 @@ th.col-client.idle .app-icon {
 }
 
 .sheet-backdrop.is-entering .sheet {
-  animation: sheet-in 280ms var(--ease-out);
+  animation: sheet-in var(--medium) var(--ease-out);
 }
 
 .sheet-backdrop.is-leaving {
@@ -3635,6 +3622,573 @@ body[data-stubbed='true'] .statusbar::after {
   .catalog-entry:hover,
   .cell-toggle:active:not(:disabled) .cell-mark {
     transform: none;
+  }
+}
+
+/* Matrix with detail (§7.1.1, §7.1.2, §10.1) ------------------------------- */
+
+/* Scope, source and density filters, the matrix and a persistent inspector.
+   Rules for one feature live in this block so it merges and reads as a unit. */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.matrix-workspace {
+  /* Takes what the banners and bars leave and never less than the heading, the
+     filters and a matrix with a few rows (≈ 95 + 70 + 250 + 16). A zero basis
+     rather than the content's: a long table or a long inspector must not decide
+     how tall the page is. A window too short for the minimum scrolls `#content`,
+     the last-resort scroll it already has, instead of painting over the bars
+     below. */
+  flex: 1 1 0;
+  min-height: 440px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Three lines per row now — name, verdict and source, command — where the
+     matrix carried two. `.density-compact` takes it back to two. */
+  --row-height: 68px;
+}
+
+.matrix-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 20px 18px 12px;
+}
+
+.eyebrow {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.matrix-heading h1 {
+  margin: 3px 0 2px;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.matrix-heading p {
+  margin: 0;
+  font-size: 11px;
+}
+
+/* Filters ------------------------------------------------------------------ */
+
+.matrix-filters {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+
+.matrix-filter {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.matrix-filter-label {
+  padding-inline-start: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.matrix-filter:first-child {
+  flex: 1 1 220px;
+  max-width: 430px;
+}
+
+.matrix-filter:nth-child(2) {
+  flex: 1 1 210px;
+  max-width: 320px;
+}
+
+.matrix-filter:nth-child(3) {
+  flex: 0 1 158px;
+  min-width: 128px;
+}
+
+.filter-control {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+/* A real <select>, so the native menu, the keyboard and typeahead are the
+   platform's own. Only the closed control is drawn: `appearance: none` drops the
+   system bevel and double arrow that would otherwise ignore the rest of this rule,
+   and the one chevron below stands in for it. */
+.scope-select {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  border: 1px solid var(--control-edge);
+  border-radius: 11px;
+  /* Room for the leading icon on the left and the chevron on the right, so the
+     text sits in the middle of what is left. */
+  padding: 0 34px 0 35px;
+  /* The colour as well as the gradient: the native menu paints its own list from
+     the background colour, and a gradient alone leaves it transparent. */
+  background-color: var(--bg-elevated);
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--bg-elevated) 96%, var(--text) 4%),
+    var(--bg-elevated)
+  );
+  box-shadow:
+    inset 0 1px 0 light-dark(rgb(255 255 255 / 85%), rgb(255 255 255 / 4%)),
+    0 1px 2px light-dark(rgb(0 0 0 / 4%), rgb(0 0 0 / 14%));
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition:
+    border-color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease),
+    background-color var(--fast) var(--ease);
+}
+
+.scope-select option {
+  background-color: var(--bg-elevated);
+  color: var(--text);
+}
+
+.scope-select:hover {
+  border-color: var(--hairline-strong);
+  box-shadow:
+    inset 0 1px 0 var(--hairline),
+    0 2px 5px light-dark(rgb(0 0 0 / 6%), rgb(0 0 0 / 20%));
+}
+
+.scope-select:focus-visible {
+  outline: 2px solid AccentColor;
+  outline-offset: 2px;
+}
+
+/* The icon and the chevron are decoration: they never take the pointer, so the
+   whole control is the select under them. */
+.filter-control > .glyph {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.filter-control > .filter-icon {
+  left: 12px;
+}
+
+.filter-control > .filter-chevron {
+  right: 11px;
+  width: 12px;
+  height: 12px;
+}
+
+/* A filter that is narrowing something takes the accent, so a scope left on is
+   visible from across the room — and the value says it in words as well. */
+.matrix-filter.is-active .scope-select {
+  border-color: color-mix(in srgb, AccentColor 40%, var(--control-edge));
+  background-color: color-mix(in srgb, AccentColor 5%, var(--bg-elevated));
+}
+
+.matrix-filter.is-active .filter-icon {
+  color: AccentColor;
+}
+
+.filter-control:focus-within > .glyph {
+  color: AccentColor;
+}
+
+.matrix-filters > .button {
+  min-height: 36px;
+}
+
+/* Matrix and inspector ---------------------------------------------------- */
+
+.matrix-split {
+  flex: 1 1 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
+  /* One row that may be as short as the box it is given. Without the 0 minimum
+     the inspector's whole content sets the row's height — a long tool list made
+     the page, not the inspector, scroll. */
+  grid-template-rows: minmax(0, 1fr);
+  gap: 14px;
+  min-height: 250px;
+  margin: 0 14px 16px;
+}
+
+.matrix-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The matrix is a card like the inspector beside it. It scrolls itself — both
+   ways — so a wide table never widens the page (§7.1.2). */
+.matrix-list .table-scroll {
+  margin: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+
+/* Both bars at once leave a corner, which defaults to white — a hole in a dark
+   card. */
+.matrix-list .table-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.matrix-list .placeholder {
+  flex: 1 1 auto;
+}
+
+.server-inspector {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+
+.inspector-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.inspector-header > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.inspector-header h2 {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.inspector-header .button {
+  min-height: 26px;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.inspector-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* The first section needs no gap above it, and the narrow column cannot afford
+   the sheet's margins between the rest. */
+.inspector-body .detail-section {
+  margin-top: 18px;
+}
+
+.inspector-body .detail-section h3 {
+  font-size: 10px;
+}
+
+.inspector-body .definitions {
+  grid-template-columns: 84px minmax(0, 1fr);
+}
+
+/* A paragraph, a path, a schema: anything a config file or a server wrote wraps
+   inside the column instead of widening it. */
+.inspector-body :is(code, pre, dd, li, p) {
+  overflow-wrap: anywhere;
+}
+
+.inspector-body pre {
+  white-space: pre-wrap;
+}
+
+.inspector-body .section-heading {
+  flex-wrap: wrap;
+}
+
+.inspector-body .contract-values {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.inspector-body .inspector-tool summary {
+  flex-wrap: wrap;
+}
+
+.inspector-body .inspector-tool-name {
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+.inspector-body .inspector-tool-description {
+  flex: 1 1 100%;
+  order: 3;
+}
+
+/* The client list is a table in the sheet. Here it is a stack of small cards:
+   name and state on one line, the path and the actions under them. */
+.inspector-body .clients-table tr {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.inspector-body .clients-table td {
+  display: block;
+  width: auto;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  white-space: normal;
+}
+
+.inspector-body .clients-table td:nth-child(3),
+.inspector-body .clients-table .client-action {
+  grid-column: 1 / -1;
+}
+
+.inspector-body .clients-table .client-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  text-align: left;
+}
+
+.inspector-body .clients-table .client-state {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.inspector-body .env-table {
+  table-layout: fixed;
+}
+
+.inspector-footer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--hairline);
+  background: var(--bg-raised);
+}
+
+.inspector-empty {
+  margin: auto;
+  max-width: 330px;
+  padding: 32px 24px;
+}
+
+.inspector-empty h2 {
+  margin: 6px 0;
+  font-size: 17px;
+}
+
+.inspector-empty p {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Arrives when the subject changes, not when it refreshes (`changed()` decides). */
+.inspector-entering {
+  animation: inspector-in 180ms var(--ease-out);
+}
+
+@keyframes inspector-in {
+  from {
+    opacity: 0.65;
+    transform: translateX(4px);
+  }
+}
+
+/* Rows --------------------------------------------------------------------- */
+
+/* Selected is a tint, a bar and an underline — three cues, none of them only
+   colour — and `aria-pressed` on the opener says it to assistive technology. */
+.matrix tbody tr.selected-server > td {
+  background-color: color-mix(in srgb, AccentColor 7%, var(--bg-elevated));
+}
+
+.matrix tbody tr.selected-server .col-server {
+  box-shadow: inset 3px 0 AccentColor;
+}
+
+.matrix tbody tr.selected-server .server-name {
+  text-decoration: underline;
+  text-decoration-color: AccentColor;
+  text-underline-offset: 2px;
+}
+
+/* The verdict in words, and where the row came from. Wrapping rather than
+   truncating the pair keeps a long plugin name from pushing the verdict away. */
+.server-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px 8px;
+  min-width: 0;
+  margin: 3px 0 0 15px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.server-source-label {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-health-label {
+  white-space: nowrap;
+}
+
+.server-health-label.ok {
+  color: var(--ok);
+}
+
+.server-health-label.fail {
+  color: var(--fail);
+}
+
+.server-health-label.auth {
+  color: var(--auth);
+}
+
+.server-health-label.checking {
+  color: var(--warn);
+}
+
+/* Compact keeps the name, the verdict and the source — the three things a row is
+   for — and drops the command line that explained the first. A failed check still
+   says why: that line is the reason, not decoration. */
+.density-compact {
+  --row-height: 52px;
+}
+
+.density-compact .server-meta {
+  margin-top: 1px;
+}
+
+.density-compact .server-command:not(.failure):not(.authwait):not(.matched-tools) {
+  display: none;
+}
+
+/* Sidebar ----------------------------------------------------------------- */
+
+.side-child {
+  padding-left: 26px;
+  font-size: 11px;
+}
+
+.side-child .app-icon {
+  width: 15px;
+  height: 15px;
+  opacity: 0.7;
+}
+
+.side-item .source-lock {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  color: var(--text-faint);
+}
+
+/* Long notices carry long paths; they wrap rather than widen the page. */
+#content .notice-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Below this the inspector no longer fits beside a useful matrix, so it moves
+   under it. The matrix keeps its own scroll; nothing widens the page. */
+@media (max-width: 1100px) {
+  /* Matrix, then inspector: taller than most windows, so it is the page that
+     scrolls and not the diagnostics bar that gets painted over. */
+  .matrix-workspace {
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+
+  .matrix-split {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .matrix-list {
+    /* Four or five rows on an ordinary window, never fewer than two and a half. */
+    flex: 1 0 clamp(230px, 38vh, 420px);
+  }
+
+  .server-inspector {
+    flex: 0 0 auto;
+    max-height: 420px;
+  }
+
+  .server-inspector:has(.inspector-empty) {
+    min-height: 145px;
+  }
+
+  .inspector-body {
+    max-height: 320px;
+  }
+
+  .inspector-empty {
+    max-width: none;
+    margin: 0;
+    padding: 20px;
+  }
+
+  .matrix-heading {
+    padding-top: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inspector-entering {
+    animation: none;
   }
 }
 

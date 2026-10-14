@@ -2,6 +2,7 @@
 // masked, transport, per-client enablement, and the way to edit or delete.
 
 import { el, button, busyButton, sheet, definitionList, formatTokens, clientIcon } from '../dom.js';
+import { serverIsReadOnly, toolKey } from '../state.js';
 
 const CLIENT_STATE_LABEL = {
   enabled: 'Enabled',
@@ -9,8 +10,61 @@ const CLIENT_STATE_LABEL = {
   absent: 'Not configured',
 };
 
+/// The full detail, as the modal sheet (§7.5). The inspector beside the matrix
+/// shows the same parts — see `serverDetailParts` — so the two cannot say
+/// different things about one server (§7.1.2).
 export function renderServerDetail(state) {
-  const server = state.servers.find((entry) => entry.id === state.sheet.serverId);
+  const parts = serverDetailParts(state, state.sheet.serverId);
+  return parts ? sheet(parts.server.name, parts.body, parts.footer) : null;
+}
+
+/// The persistent inspector: the same sections as the sheet in a column beside
+/// the matrix. With no subject it says what to do instead of leaving a hole.
+/// `Expand` is the way to the full sheet; `Close` ends the selection.
+export function renderServerInspector(state, serverId) {
+  const inspector = el('aside', 'server-inspector');
+  inspector.setAttribute('aria-label', 'Server details');
+  const parts = serverId ? serverDetailParts(state, serverId) : null;
+  if (!parts) {
+    const empty = el('div', 'inspector-empty');
+    empty.append(
+      el('span', 'eyebrow', 'Server details'),
+      el('h2', null, 'Select a server'),
+      el('p', 'muted', 'Choose a row to inspect its source, health and tool contract alongside the matrix.'),
+    );
+    inspector.append(empty);
+    return inspector;
+  }
+
+  const header = el('header', 'inspector-header');
+  const identity = el('div');
+  identity.append(el('span', 'eyebrow', 'Server details'), el('h2', null, parts.server.name));
+  header.append(
+    identity,
+    button('Expand', 'open-server-modal', { className: 'button subtle', dataset: { serverId } }),
+    button('Close', 'close-inspector', { className: 'button subtle' }),
+  );
+
+  const body = el('div', 'inspector-body');
+  // Keyed by server: scrolling one server's tools down must not leave the next
+  // one opened half-way, and a refresh of the same server keeps its place.
+  body.dataset.scrollKey = `inspector:${serverId}`;
+  body.append(...parts.body);
+  inspector.append(header, body);
+
+  if (parts.footer?.length) {
+    const footer = el('footer', 'inspector-footer');
+    footer.append(...parts.footer);
+    inspector.append(footer);
+  }
+  return inspector;
+}
+
+/// Everything the modal and the inspector have in common, as plain nodes. Both
+/// callers append them to a container of their own; nothing in here may assume
+/// which one it is in (no `state.sheet`, no ids).
+function serverDetailParts(state, serverId) {
+  const server = state.servers.find((entry) => entry.id === serverId);
   if (!server) return null;
 
   const body = [];
@@ -21,7 +75,8 @@ export function renderServerDetail(state) {
       server.transport === 'stdio'
         ? ['Command', server.commandSummary, 'mono selectable']
         : ['URL', server.url ?? '', 'mono selectable'],
-      ['Source', server.originKind === 'extension' ? 'Claude Desktop extension' : 'Config file'],
+      ['Source', sourceDescription(server)],
+      ...(serverIsReadOnly(server) ? [['Access', 'Read-only — Kytto never changes it']] : []),
     ]),
   );
 
@@ -82,7 +137,9 @@ export function renderServerDetail(state) {
       el(
         'p',
         'muted',
-        'This server came from an installed Claude Desktop extension. Its command is part of the bundle, so it can be switched on and off here but not edited or deleted.',
+        server.source?.readOnly || server.originKind === 'plugin'
+          ? 'This server belongs to a registered plugin. Manage its installation and enablement in the client; Kytto reads its definition without editing it.'
+          : 'This server came from an installed Claude Desktop extension. Its command is part of the bundle, so it can be switched on and off here but not edited or deleted.',
       ),
     );
   }
@@ -113,7 +170,14 @@ export function renderServerDetail(state) {
     ));
   }
 
-  return sheet(server.name, body, footer.length ? footer : null);
+  return { server, body, footer: footer.length ? footer : null };
+}
+
+/// "Demo tools · 2.0", "Claude Desktop extension", "Configuration". Version
+/// only when native has one — a plugin's registered version, never a guess.
+function sourceDescription(server) {
+  const fallback = server.originKind === 'extension' ? 'Claude Desktop extension' : 'Configuration';
+  return [server.source?.displayName ?? fallback, server.source?.version].filter(Boolean).join(' · ');
 }
 
 /// What each client thinks this server is, when they do not agree.
@@ -356,7 +420,8 @@ function healthSection(state, server) {
     for (const tool of tools) {
       const item = el('details', 'inspector-tool');
       item.dataset.toolName = tool.name;
-      item.open = state.sheet.openTools?.includes(tool.name) ?? false;
+      item.dataset.serverId = server.id;
+      item.open = state.openTools?.has(toolKey(server.id, tool.name)) ?? false;
       const summary = el('summary');
       summary.append(el('span', 'mono inspector-tool-name', tool.name));
       for (const annotation of annotationLabels(tool.annotations)) {

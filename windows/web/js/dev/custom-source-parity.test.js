@@ -13,12 +13,16 @@ function cssRule(css, selector) {
   return css.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`))?.[1] ?? '';
 }
 
-test('sidebar separates the five writable clients from read-only custom sources', async () => {
+test('sidebar separates the writable clients from read-only workspace and custom sources', async () => {
   const sidebar = await source('js/screens/sidebar.js');
-  assert.match(sidebar, /5 built-in clients/);
+  // One "Clients & sources" group (§7.1.1) replaced the "5 built-in clients"
+  // heading: workspaces nest under the client that owns them, and everything
+  // else keeps the read-only disclosure.
+  assert.match(sidebar, /Clients & sources/);
   assert.match(sidebar, /Custom sources · read-only/);
   assert.match(sidebar, /state\.clients\.filter\(\(client\) => !client\.isReadOnly\)/);
   assert.match(sidebar, /state\.clients\.filter\(\(client\) => client\.isReadOnly\)/);
+  assert.match(sidebar, /source\.iconAsset === client\.iconAsset/);
 });
 
 test('normal and fallback client icons occupy 22px while the detail hero stays large', async () => {
