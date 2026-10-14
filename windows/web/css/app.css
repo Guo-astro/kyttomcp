@@ -3643,11 +3643,14 @@ body[data-stubbed='true'] .statusbar::after {
 }
 
 .matrix-workspace {
-  /* No explicit min-height: the content-based minimum (heading, filters, and a
-     matrix with a few rows) is what stops the banners and bars from squeezing it
-     into the diagnostics below. A window too short for that scrolls `#content`,
-     which is the last-resort scroll it already has. */
-  flex: 1 1 auto;
+  /* Takes what the banners and bars leave and never less than the heading, the
+     filters and a matrix with a few rows (≈ 95 + 70 + 250 + 16). A zero basis
+     rather than the content's: a long table or a long inspector must not decide
+     how tall the page is. A window too short for the minimum scrolls `#content`,
+     the last-resort scroll it already has, instead of painting over the bars
+     below. */
+  flex: 1 1 0;
+  min-height: 440px;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -3831,9 +3834,13 @@ body[data-stubbed='true'] .statusbar::after {
 /* Matrix and inspector ---------------------------------------------------- */
 
 .matrix-split {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
+  /* One row that may be as short as the box it is given. Without the 0 minimum
+     the inspector's whole content sets the row's height — a long tool list made
+     the page, not the inspector, scroll. */
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   min-height: 250px;
   margin: 0 14px 16px;
@@ -4134,16 +4141,19 @@ body[data-stubbed='true'] .statusbar::after {
      scrolls and not the diagnostics bar that gets painted over. */
   .matrix-workspace {
     flex: 0 0 auto;
+    min-height: 0;
   }
 
   .matrix-split {
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
 
   .matrix-list {
-    flex: 1 0 230px;
+    /* Four or five rows on an ordinary window, never fewer than two and a half. */
+    flex: 1 0 clamp(230px, 38vh, 420px);
   }
 
   .server-inspector {
