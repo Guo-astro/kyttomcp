@@ -23,3 +23,18 @@ and compare their structure/validation rules against the reference; do not compa
 opaque IDs or JSON property presentation order as product semantics.
 
 No external network calls or real user configs/credentials were involved.
+
+## Windows additions
+
+- portable-v1-windows-export.json: this app's export of the same inputs as the
+  macOS generator used (memory stdio with an `npx` package, a working directory and
+  an environment value, plus the remote HTTP server with an Authorization header,
+  the Research profile and vector 2's reviewed tool), with the Windows spelling of
+  the paths. Same structure, requirement kinds and labels, and the same contract
+  digest (`0b5dc197...`) as the macOS file; only the opaque requirement ids differ.
+  `PortableCompatibilityTests` compares a fresh export with it after replacing each
+  id by its position, and checks it against an independent reading of the macOS
+  validator rules. Regenerate with
+  `KYTTO_WRITE_WINDOWS_FIXTURE=<path> dotnet test --filter AWindowsExportOfTheGoldenInputs`.
+- The macOS file is imported on Windows, and the Windows file imported again, by the
+  same tests, always into a temporary profile.
