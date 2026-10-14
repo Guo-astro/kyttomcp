@@ -711,9 +711,11 @@ public class RemoteDoctorTests
         {
             using var server = PythonLoopback.Start(mode);
             var watch = Stopwatch.StartNew();
-            var listing = await new McpHttpClient().ListToolsAsync(server.Url, timeout: TimeSpan.FromSeconds(2));
+            // The open stream outlives the fixture's own 10 s hold, so a client that
+            // waited for EOF could not pass inside 6 s however slow the machine is.
+            var listing = await new McpHttpClient().ListToolsAsync(server.Url, timeout: TimeSpan.FromSeconds(8));
             Assert.Equal(["fixture_read"], listing.Tools.Select(tool => tool.Name));
-            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2.5), $"{mode}: {watch.Elapsed}");
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(6), $"{mode}: {watch.Elapsed}");
         }
     }
 

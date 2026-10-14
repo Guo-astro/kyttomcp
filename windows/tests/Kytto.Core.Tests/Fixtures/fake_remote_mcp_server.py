@@ -74,7 +74,9 @@ class Handler(BaseHTTPRequestHandler):
             # Intentionally leave SSE open after a complete matching answer.
             self.wfile.write(b": heartbeat\n\ndata: " + message + b"\n\n")
             self.wfile.flush()
-            time.sleep(3)
+            # Long enough that a client which waited for the end of the stream could
+            # not finish inside the test's budget, even on a loaded machine.
+            time.sleep(10)
         else:
             self.reply(200, message)
 
