@@ -212,6 +212,17 @@ distinguishing leaf (for example `…\shop`), and `displayName` is
 `Claude Code · …\shop`. They are never accepted as mutation targets and are
 never used as write paths.
 
+A project that only a Claude Code plugin registration names (project or local
+scope in `installed_plugins.json`) is the same kind of workspace client, and a
+project the shared config and a registration both name — however each spells its
+path (`c:/Users/you/app` and `C:\Users\you\app\` are one project) — is one client
+with the id its shared-config spelling gave it. A workspace client exists only
+when it has at least one server: configured there, or a plugin in effect there. A
+user-scope plugin is in effect in every such workspace unless that project's own
+settings switch it off, so its `enabledIn` is `enabled` for `claudeCode` and for
+each workspace client that did not switch it off. No client or server field says
+which of those two things made a workspace appear; `source` on the server does.
+
 `orphanedConfig` means a config exists but the client does not — a leftover
 `~/.cursor` after an uninstall. Shown rather than hidden.
 
@@ -232,8 +243,9 @@ No payload. Servers merged across clients: one entry per normalized name.
 | `commandSummary` | Single line for the matrix subtitle |
 | `env` | `[{ key, hasValue }]` — **never a value** |
 | `enabledIn` | Built-in or custom client id → `enabled` \| `disabled` \| `absent`; custom entries use presence semantics for display only |
-| `originKind` | `configFile` \| `extension` |
-| `isBundled` | Extensions ship their own command and are not editable |
+| `originKind` | `configFile` \| `extension` \| `plugin` |
+| `isBundled` | Extensions and plugins ship their own command and are not editable. A plugin is also not toggleable and not copyable; an extension is still switched by its owning client — see `source.readOnly` |
+| `source` | `{ kind, displayName, version, readOnly }`, for display: `kind` is `config` \| `custom` \| `extension` \| `plugin`; `displayName` is `Configuration`, `Custom source`, `Claude Desktop extension` or the plugin's own name; `version` is the plugin's version or null; `readOnly` is true for a plugin and for a custom source or workspace, false for configuration and extensions. No path, substitution, working directory or launch variable is part of it |
 | `hasRelativePath` | The command or an argument is resolved against a working directory, so copying this definition into another client may write cleanly and still not start. The fact only — no path crosses |
 | `tokenWeight` | `{ estimate, method, isMeasured, measuredAt, percentOfContext, referenceContextWindow }`, or null before a health check |
 | `provenance` | `{ sourceKind, packageName, sourceURL, installedVersion, latestVersion, latestCheckedAt, confidence, maintenanceState }`, or null |
@@ -241,6 +253,20 @@ No payload. Servers merged across clients: one entry per normalized name.
 `provenance` is inferred from the existing definition without contacting a
 registry. `latestVersion` and `latestCheckedAt` are filled only by the explicit
 `provenance.checkLatest` command; environment values never cross this boundary.
+
+A plugin's server is named by its client: `plugin:<plugin name>:<server>` for
+Claude Code, the server's own key for Codex. `command`, `args` and `env` are what
+the plugin wrote, placeholders such as `${CLAUDE_PLUGIN_ROOT}` unexpanded.
+Expanding them, the plugin's working directory and the client-provided launch
+variables are native launch context (`docs/design.md`, registered plugins) and
+are not on the wire. A mutation command naming a plugin's copy —
+`servers.setEnabled`, `servers.update`, `servers.delete`,
+`servers.removeFromClient`, `servers.unify` and the `doctor.applyFix` argument
+pin — is refused by the native side with an error naming the installed plugin;
+the UI disables those controls from `source.readOnly`, but the refusal does not
+depend on it. Toggling a name that is a plugin's in one client
+and an ordinary entry in another is refused only for the client whose copy is the
+plugin's.
 
 `isMeasured` is what decides whether the UI writes "~" in front of a token
 figure. It is true when a real vocabulary produced the number and false when the
@@ -453,7 +479,8 @@ Errors worth handling by code:
 |---|---|
 | `changed on disk` | Someone else edited the file. Nothing was written. Refresh, then retry. |
 | `cannot be copied` | A Claude Desktop extension is an installed bundle, not a portable definition. |
-| `installed plugin` | A Codex plugin provides this server. Its definition is in a cache the client rewrites, so there is nothing here to toggle. |
+| `installed plugin` | A Claude Code or Codex plugin provides this server. Its definition is in a cache the client rewrites, so there is nothing here to toggle — turn the plugin off in the client that installed it. |
+| `install the plugin there` | The same server asked for in a client that did not install the plugin (the message also says `installed plugin`; test for this one first). Plugins are never copied across clients. |
 
 ### `servers.unifyPreview` → `UnifyPreviewDTO`
 
@@ -783,6 +810,18 @@ meanwhile is returned but not recorded, and a check that started before the one
 already stored does not replace it.
 
 Only ever on request (§6). Nothing is checked on launch or in the background.
+
+A server is started in the context its owner established, none of which the
+caller sends or receives: a plugin's own directory as the working directory
+(or the absolute `cwd` an ordinary definition declares), the placeholders
+resolved once in command, arguments and environment, and the client-provided
+path variables such as `CLAUDE_PLUGIN_ROOT`. A relative command is resolved
+against that directory; with none established it is `unsupported`, as before.
+A working directory that does not exist is a `failed` check and the server is
+not started elsewhere. A command through `cmd.exe` (`npx`, any `.cmd` shim) gets
+each argument quoted for it; an argument a batch file cannot receive literally —
+a double quote, a percent sign, a line break — fails the check without starting
+anything, rather than starting it with a different argument.
 
 ```json
 { "status": "passed" | "failed" | "unsupported" | "needsAuthorization",
@@ -1121,7 +1160,16 @@ General project-scoped configs (`.mcp.json`, `.cursor/mcp.json` and similar
 repository-local files) remain out of scope by §4. Claude Code's explicit
 `.claude.json` `projects` map is the v1.0.5 exception: it is surfaced as
 read-only workspace clients because it can be inspected without crawling
-projects or introducing a writable project axis.
+projects or introducing a writable project axis. Project and local plugin
+registrations in `installed_plugins.json` extend the same exception, and no
+other: nothing looks for a project on disk.
+
+Plugin activation Kytto does not infer, because nothing on disk says what the
+client will load: session-only plugins, plugins synced from an account, plugins
+a managed (enterprise) settings file switches on, a Claude Code config directory
+relocated with `CLAUDE_CONFIG_DIR`, and Codex plugins an account manages in a
+cache with no explicit registration in the config. See the registered-plugins
+subsection of `docs/design.md` §4.
 
 ## Gateway mode
 

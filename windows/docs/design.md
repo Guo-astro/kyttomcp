@@ -174,9 +174,10 @@ disabled server keeps its definition and nothing has to be parked.
 
 Two front ends share one config: the ChatGPT app (bundle id `com.openai.codex` —
 the display name is not the identifier) and the `codex` CLI. Like Claude Desktop
-it has a second, read-only source: plugins under `~/.codex/plugins` can bundle
-their own `.mcp.json`. That tree is a cache the client repopulates, so those
-servers are shown and never written.
+it has a second, read-only source: the plugins its own config has registered and
+enabled, whose packages sit in a cache the client repopulates. Those servers are
+shown and never written; which ones count is the *Registered plugins* subsection
+below.
 
 **IMPORTANT:** these paths change between releases. Do not hardcode them inline. Put every path in a single `clients/` registry module with one descriptor per client, so adding or fixing a client is a one-file change. Verify every path against current docs before writing code — training data on this is unreliable.
 
@@ -212,6 +213,104 @@ The native model owns this safety boundary. Custom ids cannot resolve through
 toggle, authoring, profile application, delete, backup/write, secret rotation or
 Gateway mutation services even if a caller bypasses the web UI. Detaching a
 source removes only Kytto's settings entry; the selected file stays untouched.
+
+### Registered plugins
+
+Claude Code and Codex plugins can declare MCP servers. Kytto shows the ones the
+client has itself **registered and switched on**, read-only, with the plugin's name
+and version as their source. It never decides that a plugin is active from the
+fact that a directory exists: a plugin cache is full of old versions, uninstalled
+leftovers and test fixtures, and an earlier build that walked it for `.mcp.json`
+files reported all of them as live servers.
+
+**Claude Code.** `~/.claude/plugins/installed_plugins.json` (format version 2) lists
+each installation with a scope — `user`, `project` or `local` — and its install
+directory. `enabledPlugins` in `~/.claude/settings.json`, then the project's
+`.claude/settings.json`, then `.claude/settings.local.json` says whether it is on;
+a later file that mentions a plugin overrides an earlier one, and an unmentioned
+plugin stays on unless its manifest says `defaultEnabled: false`. The most specific
+installation wins; two at the same scope are ambiguous and the plugin is skipped
+with a diagnostic, because nothing on disk proves which copy the client loads. A
+user-scope plugin belongs to the global Claude Code scope and is also in effect in
+every project scope, where that project's settings may switch it off; a project- or
+local-scope registration belongs only to its project. Project paths are explicit
+registrations — the shared `.claude.json` or a plugin registration names them, and
+the disk is never searched for more. One project spelled two ways (`c:/work/app`,
+`C:\work\app\`) is one scope, compared case-insensitively and with either
+separator; its id is still the one its first spelling in the shared config derives.
+A workspace scope exists only if something is configured or enabled in it.
+
+**Codex.** `[plugins."name@marketplace"]` with `enabled = true` in the same
+`config.toml` as `[mcp_servers]`, and a package under
+`~/.codex/plugins/cache/<marketplace>/<name>/<version>`. The registered version is
+used when the table names one that is cached; otherwise the single cached version
+is; several with nothing to choose between them is a diagnostic and no servers. A
+plugin registered twice in one config is uncertain and skipped. A plugin id is
+never allowed to escape the cache (`..`, separators, device names).
+
+**What is read.** Only what the package declares: its root `.mcp.json` and the MCP
+components its manifest (`.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`)
+names — a `./relative.json` path, an inline map, or a list of either, merged in
+order with a later definition replacing an earlier one of the same name. A
+declared path must resolve inside the installation as a plain file under 2 MB with
+no `..`, drive or stream syntax, reserved device name or reparse point (junction or
+symlink) anywhere on the way down; one that does not is reported and skipped. The
+installation directory itself must not be a junction. Nested fixtures, other
+versions and undeclared files are never opened. Claude Code names these servers
+`plugin:<plugin>:<server>`; Codex uses the server's own key. When a plugin and an
+ordinary config entry in the same client share a name, the config entry is kept
+and a diagnostic says so.
+
+**Launch context is native.** A plugin's command is full of `${CLAUDE_PLUGIN_ROOT}`,
+`${CLAUDE_PLUGIN_DATA}`, `${CLAUDE_PROJECT_DIR}` or `${CODEX_PLUGIN_ROOT}`, and
+relies on running in the plugin's directory. Discovery attaches that context to the
+server — placeholders, launch variables, working directory — and none of it is on
+the wire. Placeholders are expanded **once**, over the original text, when a server
+is run: a value that came out of a placeholder is a path, never another template,
+and an unknown `${…}` is left as written. A relative `cwd` (default `.`) is
+resolved only against the plugin root and must stay inside it without crossing a
+junction; an absolute drive-letter or UNC `cwd` is the plugin's own choice and is
+kept; anything else — an unresolved placeholder, a rooted-but-driveless `\work`, a
+drive-relative `C:work` — skips that server with a diagnostic, because resolving it
+against Kytto's own drive would be a guess. The data directory is named, never
+created. Nothing is spawned to discover any of this: a plugin's server runs only on
+an explicit health check, in that directory, with that environment.
+
+**Windows launch.** The context rides on the existing `ManagedProcess` resolution
+(PATH + PATHEXT, `.cmd` through `cmd /d /c`) rather than replacing it. A command
+written as a path without an extension (`${CLAUDE_PLUGIN_ROOT}/bin/tool`) is
+resolved through PATHEXT like a bare command is, and a relative one resolves against
+the established directory. A batch file receives one raw command line,
+`cmd /d /s /c ""shim.cmd" arg …"`, so cmd strips only the outer quotes and a shim
+under `C:\Program Files\nodejs` keeps working when an argument needs quotes; each
+argument is quoted when it holds a space or a cmd metacharacter, which is literal
+inside quotes. A double quote, a percent sign or a line break cannot be made literal
+for every batch file, so an argument containing one fails the check without
+starting the server instead of starting it with a different one.
+
+**Read-only, natively.** A plugin's server is not editable, deletable, unifiable,
+copyable into another client or toggleable, and the services refuse it themselves
+(`ToggleService`, `ServerAuthoring`) rather than leaving it to a disabled button.
+The refusal is per client, not per row: a name that is a plugin's in Codex and an
+ordinary entry in Cursor stays controllable in Cursor, and an edit or delete there
+never writes a definition into Codex that would shadow the plugin. A Claude
+Desktop extension is a different thing — still installed software that is not
+copied, but still switched by its own client through its own flag — and is not
+caught by the plugin rule.
+
+**What Kytto does not infer** (each of these would be a guess about what the client
+will load; they are documented limits, not bugs to patch around):
+
+- plugins enabled for one session only, synced from an account, or switched on by a
+  managed (enterprise) settings file;
+- a Claude Code configuration directory relocated with `CLAUDE_CONFIG_DIR`;
+- Codex plugins in an account-managed cache with no explicit `[plugins."…"]`
+  registration, and registrations spelled as dotted keys or inline tables rather
+  than as a table of their own;
+- plugin components other than MCP servers (skills, agents, hooks, commands), and
+  MCP components declared as anything but a contained `.json` file or an inline map;
+- a project registered with a path that is not a plain drive-letter or UNC path
+  (`/work/app`, `C:work`, `\\?\…`).
 
 ### Scope decision (v1)
 

@@ -314,17 +314,34 @@ internal static class PluginInstallations
 
             // A cache is not an installation registry. Only a version the registration
             // names, or the one version there is, establishes which package is active
-            // without asking the client to execute anything.
-            var chosen = versions.Count == 1
-                ? versions[0]
-                : ChooseRegisteredVersion(table.Value("version")?.StringValue, versions, text);
-            if (chosen is null)
+            // without asking the client to execute anything. A registration that names
+            // a version the cache does not hold is not answered with whichever one is
+            // there: that would show a package the client is not running.
+            var registeredVersion = table.Value("version")?.StringValue;
+            string? chosen;
+            if (!string.IsNullOrWhiteSpace(registeredVersion))
             {
-                result.Warnings.Add(
-                    $"Enabled Codex plugin \"{Display(id) ?? "?"}\" has several cached versions " +
-                    "or an unreadable manifest. Kytto skipped it because the active version " +
-                    "is uncertain.");
-                continue;
+                chosen = ChooseRegisteredVersion(registeredVersion, versions, text);
+                if (chosen is null)
+                {
+                    result.Warnings.Add(
+                        $"Enabled Codex plugin \"{Display(id) ?? "?"}\" registers version " +
+                        $"\"{Display(registeredVersion, 40) ?? "?"}\", which is not uniquely in " +
+                        "the cache. Kytto skipped it because the active version is uncertain.");
+                    continue;
+                }
+            }
+            else
+            {
+                chosen = versions.Count == 1 ? versions[0] : null;
+                if (chosen is null)
+                {
+                    result.Warnings.Add(
+                        $"Enabled Codex plugin \"{Display(id) ?? "?"}\" has several cached versions " +
+                        "or an unreadable manifest. Kytto skipped it because the active version " +
+                        "is uncertain.");
+                    continue;
+                }
             }
 
             JsonDocument? manifest = null;

@@ -396,6 +396,29 @@ public class PluginDiscoveryTests
     }
 
     [Fact]
+    public void ACodexRegistrationThatNamesAVersionIsNotAnsweredWithAnotherOne()
+    {
+        using var harness = new ToggleHarness();
+        // The cache directory is a content hash, as Codex names them; the version is
+        // what the manifest says.
+        const string Base = @".codex\plugins\cache\example\demo";
+        harness.Write("""{"name":"demo","version":"2.0"}""", $@"{Base}\abc123\.codex-plugin\plugin.json");
+        harness.Write("""{"mcpServers":{"tool":{"command":"node"}}}""", $@"{Base}\abc123\.mcp.json");
+
+        harness.EnableCodexPlugin("demo@example", true, "version = \"2.0\"\n");
+        Assert.Equal(["tool"], harness.Discover().Servers.Select(server => server.Name));
+
+        harness.EnableCodexPlugin("demo@example", true, "version = \"abc123\"\n");
+        Assert.Equal(["tool"], harness.Discover().Servers.Select(server => server.Name));
+
+        // The only cached version is not the registered one, so it is not the active one.
+        harness.EnableCodexPlugin("demo@example", true, "version = \"3.0\"\n");
+        var result = harness.Discover();
+        Assert.Empty(result.Servers);
+        Assert.Contains(result.Diagnostics, d => d.Message.Contains("not uniquely in the cache", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ACodexPluginIdThatCouldEscapeTheCacheIsNeverFollowed()
     {
         using var harness = new ToggleHarness();
