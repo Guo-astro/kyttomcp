@@ -4399,3 +4399,73 @@ body[data-stubbed='true'] .statusbar::after {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Remote Doctor: contract field details and the remote sign-in (§7.3, §7.10) ------
+   Added with js/screens/contractDetails.js and js/screens/remoteAuth.js. Nothing here
+   carries meaning in colour alone: the words "Before", "After", "Not present" and
+   "Sign-in required" are in the markup. ------------------------------------------- */
+
+.contract-fields {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  color: var(--text);
+}
+
+.contract-field { min-width: 0; }
+
+.contract-path {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.contract-values {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.contract-before,
+.contract-after {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+}
+
+.contract-value-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Wrapped, never scrolled sideways: a long key or value stays inside its box. */
+.contract-value {
+  margin: 5px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.contract-explanation { margin: 6px 0 0; }
+
+@media (max-width: 600px) {
+  .contract-values { grid-template-columns: minmax(0, 1fr); }
+}
+
+.remote-auth { margin: 10px 0; }
+
+.remote-auth-state { margin: 0 0 8px; }
+
+.remote-auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

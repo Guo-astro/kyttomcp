@@ -615,6 +615,8 @@ internal static partial class CommandRegistry
                 "profiles", "inspector", "clipboard", "gateway.stdio", "gateway.masking",
                 "doctor", "activity", "contract-guard", "context-optimizer", "drift",
                 "updates", "provenance", "agent-import", "library", "skills",
+                // Only what the shell can actually do: see CommandRegistry.Remote.cs.
+                .. RemoteCapabilities,
             ],
             // For display only — branching on it is a §3.2 violation.
             PlatformDisplayName: "Windows",

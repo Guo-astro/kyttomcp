@@ -532,6 +532,48 @@ annotations, then capture errors. When advertised, inspect the first page of
 `prompts/list` and `resources/list` without making an optional-list failure
 invalidate a successful tools handshake. Store the result with timestamp.
 
+#### Remote servers: Streamable HTTP and Kytto's own sign-in
+
+A server that is reached over Streamable HTTP is checked the same way over POSTs
+(`initialize`, `notifications/initialized`, paginated `tools/list`) and **never**
+with `tools/call`. Legacy SSE is not inspected and says so. Remote servers are
+untrusted input, so the check is bounded rather than trusted:
+
+- **Where it may go.** HTTPS, or HTTP to the loopback interface for a server the user
+  runs. No credentials or fragment in the URL; no redirect is followed, no cookie is
+  kept, no Windows credential is sent on its own, and TLS validation is the
+  platform's, never loosened. The definition's own headers are kept; environment and
+  bearer forms are resolved natively and placeholders expanded once (a secret that
+  contains `${…}` stays literal); CR/LF and transport headers are refused; Kytto's
+  own OAuth token replaces `Authorization` and nothing else.
+- **How much.** 4 MiB per response, 8 MiB in all, 50 pages, 10,000 tools, JSON nested
+  at most 128 deep with no duplicate keys, and one deadline (10 seconds) over the
+  network, the parsing and the token counting — a hostile description cannot outlast
+  it. A repeated cursor, an unmatched JSON-RPC id or an oversized body fails the check
+  instead of reporting a partial list. An event-stream answer ends the wait at the
+  matching response, not at EOF; a bounded best-effort `DELETE` (0.3 s, inside the
+  remaining deadline) ends the session.
+- **What is kept.** A `401`, or a `403` with an authentication challenge, is
+  `needsAuthorization`; a plain `403` is a failure. No body, challenge, JSON-RPC
+  error text or URL query is stored or shown: they can echo a credential.
+- **Staleness.** A result is recorded only if the server's definition (not just its
+  name) and its authorization generation are what they were when the check started.
+
+**Sign-in is explicit and native.** `health.signInRemote` validates the resource's
+OAuth metadata (same-origin hint, exact resource, first advertised issuer, `S256`
+PKCE), shows the provider and scopes for confirmation, registers a public client or
+asks for a public client ID, opens the system browser and receives the callback on a
+listener bound to `127.0.0.1` for the length of one sign-in — no installer, no
+protocol registration, no URL reservation. The callback is accepted once, for the
+exact route, host and `state`, and the transaction is spent before the token request.
+The result lives in the credential store under its own prefix, one record per
+canonical resource (a SHA-256 names it), split into small checksummed pieces so
+Credential Manager's item limit never truncates it; there is no plaintext fallback.
+Refresh happens only when a check is asked for, rotation is kept, and Forget raises
+the authorization generation *before* it deletes, so an in-flight refresh cannot put
+tokens back and an older refresh cannot undo a newer sign-in. Kytto's sign-in never
+changes a client configuration and never authenticates any other client.
+
 ### 7.4 Token weight
 
 Serialize the tool definitions returned by `tools/list` and count the tokens.
@@ -655,6 +697,18 @@ in a canonical form (object keys sorted, insignificant whitespace dropped, array
 order kept), so a server that only re-serializes a schema is not reported. The
 compared contract is model-facing behavior and contains no tool-call arguments or
 results.
+
+A change also carries optional field-level `details` — path, before, after,
+explanation — so a review can read *what* changed. Paths are escaped JSON Pointers;
+annotations are reported hint by hint and said to be hints, not enforcement; a
+`dry_run`, `dryrun`, `confirm` or `approval` field, or a confirmation entry in
+`required`, is explained as a possible change to a safeguard whose actual enforcement
+the reader has to verify. Everything is bounded because a server wrote it: 40 fields
+plus an omission notice, 500 differing nodes, depth 12, excerpts of 800 Unicode
+scalars, and no parse of a schema over 1,000,000 UTF-8 bytes (it is compared as raw
+text and shown as one excerpt). Whether a contract changed is decided on the full
+values and never on a truncated excerpt. Records written before details existed still
+load, with none.
 
 The scanner and tool-name collisions read the tools from the last passing check,
 not the last check: a failed check lists none, and failing must not be a way to

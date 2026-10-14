@@ -560,6 +560,99 @@ public class WireFormatTests
         Assert.Null(draft.Env[0].Value);
     }
 
+    /// <summary>
+    /// Field-level before/after (§7.10). The web reads <c>details[].path</c>,
+    /// <c>before</c>, <c>after</c> and <c>explanation</c> straight off the wire; a key
+    /// that moves renders a blank block rather than failing.
+    /// </summary>
+    [Fact]
+    public void ContractChangesCarryOptionalFieldDetailsUnderTheSharedKeys()
+    {
+        var changes = ContractGuard.Changes(
+            [new ToolSummary("write", "before", """{"properties":{"dry_run":{"default":true}}}"""),
+             new ToolSummary("gone", null)],
+            [new ToolSummary("write", "after", """{"properties":{"dry_run":{"default":false}}}"""),
+             new ToolSummary("new", null)]);
+        var alert = new ContractAlert("write", "write", DateTimeOffset.UnixEpoch, changes);
+
+        var encoded = Encode(alert.ToDto());
+        var wire = encoded.GetProperty("changes");
+        Assert.Equal(["kind", "severity", "toolName", "summary", "details"], KeysOf(wire[0]));
+
+        // A removed or added tool has no field details, written as null and not omitted.
+        var removed = wire.EnumerateArray().First(change => change.GetProperty("kind").GetString() == "toolRemoved");
+        Assert.Equal(JsonValueKind.Null, removed.GetProperty("details").ValueKind);
+
+        var description = wire.EnumerateArray().First(change => change.GetProperty("kind").GetString() == "descriptionChanged");
+        var field = description.GetProperty("details")[0];
+        Assert.Equal(["path", "before", "after", "explanation"], KeysOf(field));
+        Assert.Equal("description", field.GetProperty("path").GetString());
+        Assert.Equal("before", field.GetProperty("before").GetString());
+        Assert.Equal("after", field.GetProperty("after").GetString());
+        Assert.Equal(JsonValueKind.Null, field.GetProperty("explanation").ValueKind);
+
+        var schema = wire.EnumerateArray().First(change => change.GetProperty("kind").GetString() == "inputSchemaChanged");
+        var guard = schema.GetProperty("details")[0];
+        Assert.Equal("inputSchema/properties/dry_run/default", guard.GetProperty("path").GetString());
+        Assert.Equal("true", guard.GetProperty("before").GetString());
+        Assert.Contains("actual enforcement", guard.GetProperty("explanation").GetString(), StringComparison.Ordinal);
+
+        // A change recorded before 1.0.8 has no details; it still encodes, as null.
+        var legacy = Encode(new ContractChangeDto("inputSchemaChanged", "breaking", "write", "Input schema changed"));
+        Assert.Equal(JsonValueKind.Null, legacy.GetProperty("details").ValueKind);
+    }
+
+    /// <summary>
+    /// Remote sign-in sends only an opaque server id, and nothing but state comes
+    /// back: no URL, code, token or client ID has a field to travel in.
+    /// </summary>
+    [Fact]
+    public void RemoteSignInCommandsTakeOnlyAServerIdAndHealthCarriesNoCredentialFields()
+    {
+        var payload = JsonSerializer.Deserialize<HealthCheckPayload>("""{ "serverID": "remote" }""", Envelope.Json);
+        Assert.Equal("remote", payload!.ServerID);
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<HealthCheckPayload>("{}", Envelope.Json));
+
+        var health = new HealthResult(
+            HealthStatus.NeedsAuthorization, DateTimeOffset.UnixEpoch, null, [], null, null, 0, null, null)
+        {
+            Failure = HealthFailureReason.RemoteHttp(RemoteHttpFailure.AuthorizationRequired),
+            EnvironmentSource = "Streamable HTTP",
+        };
+        var encoded = Encode(health.ToDto());
+
+        Assert.Equal("needsAuthorization", encoded.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, encoded.GetProperty("authorizationURL").ValueKind);
+        Assert.Equal("Streamable HTTP", encoded.GetProperty("environmentSource").GetString());
+        Assert.Contains("requires authorization", encoded.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            KeysOf(encoded),
+            key => key.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+                   key.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+                   key.Contains("client", StringComparison.OrdinalIgnoreCase) ||
+                   key.Contains("code", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// A stored health result renders its wording when it is sent, so a remote failure
+    /// recorded by an earlier run still reads in the current words (§7.3).
+    /// </summary>
+    [Fact]
+    public void ARemoteFailureRendersFromItsStructuredReasonAndKeepsNothingTheServerSaid()
+    {
+        var health = new HealthResult(
+            HealthStatus.Failed, DateTimeOffset.UnixEpoch, null, [], "stale words", null, 0, null, null)
+        {
+            Failure = HealthFailureReason.RemoteHttp(RemoteHttpFailure.HttpStatus, 403),
+        };
+
+        Assert.Equal(
+            "The remote server returned HTTP 403.",
+            Encode(health.ToDto()).GetProperty("message").GetString());
+
+        Assert.DoesNotContain("stale words", health.CurrentMessage, StringComparison.Ordinal);
+    }
+
     private static StateDto EmptyState => new(
         [], [], [], new Dictionary<string, int>(), [], [], [], []);
 

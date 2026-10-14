@@ -3,6 +3,9 @@
 
 import { el, button, busyButton, sheet, definitionList, formatTokens, clientIcon } from '../dom.js';
 import { serverIsReadOnly, toolKey } from '../state.js';
+// Remote Doctor (§7.3, §7.10): field-level contract changes and the remote sign-in.
+import { contractFieldDetails } from './contractDetails.js';
+import { remoteAuthControls, remoteNotCheckedText } from './remoteAuth.js';
 
 const CLIENT_STATE_LABEL = {
   enabled: 'Enabled',
@@ -297,6 +300,9 @@ function contractSection(state, server) {
     const item = el('li', `contract-change ${change.severity}`);
     item.append(el('strong', 'mono', change.toolName));
     item.append(el('span', null, change.summary));
+    // Before/after of each changed field; null for an added or removed tool.
+    const details = contractFieldDetails(change);
+    if (details) item.append(details);
     list.append(item);
   }
   section.append(list);
@@ -338,6 +344,10 @@ function healthSection(state, server) {
   );
   section.append(heading);
 
+  // Sign in / Forget for a Streamable HTTP server, when native reports `health.oauth`.
+  const remoteAuth = remoteAuthControls(state, server);
+  if (remoteAuth) section.append(remoteAuth);
+
   const health = server.health;
   if (!health) {
     section.append(
@@ -346,7 +356,7 @@ function healthSection(state, server) {
         'muted',
         server.transport === 'stdio'
           ? 'Not checked yet. Checking runs the command below, so Kytto only does it when you ask.'
-          : 'Kytto cannot check remote servers yet.',
+          : remoteNotCheckedText(server),
       ),
     );
     return section;

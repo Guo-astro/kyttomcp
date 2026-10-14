@@ -4,6 +4,7 @@
 
 import { el, button, sheet } from '../dom.js';
 import { clientNames } from '../state.js';
+import { doctorAuthAction } from './remoteAuth.js';
 
 export function renderDoctor(state) {
   const panel = el('div', 'doctor-panel');
@@ -42,6 +43,8 @@ export function renderDoctor(state) {
       item.append(el('strong', null, finding.title));
       item.append(el('p', null, finding.detail));
       item.append(el('p', 'muted', finding.remediation));
+      const signIn = doctorAuthAction(state, report.serverID, finding);
+      if (signIn) item.append(signIn);
       if (finding.action === 'runHealthCheck') {
         const checking = state.checking.has(report.serverID) || checkingAll;
         item.append(button(checking ? 'Checking…' : 'Run health check', checking ? 'noop' : 'check-server', {

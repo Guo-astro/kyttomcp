@@ -353,13 +353,13 @@ public class HealthCheckerTests
     }
 
     [Fact]
-    public void ARemoteServerIsUnsupportedRatherThanFailed()
+    public void LegacySseIsUnsupportedWithoutAnyRequestRatherThanFailed()
     {
         var server = new Server
         {
             Id = "docs",
             Name = "docs",
-            Transport = Transport.Http,
+            Transport = Transport.Sse,
             Command = null,
             Args = [],
             Env = [],
@@ -374,7 +374,7 @@ public class HealthCheckerTests
         var (health, weight) = Checker().Check(server);
         Assert.Equal(HealthStatus.Unsupported, health.Status);
         Assert.Null(weight);
-        Assert.Contains("remote", health.Message!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("legacy", health.Message!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
