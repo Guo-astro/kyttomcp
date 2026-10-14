@@ -51,6 +51,7 @@ import { renderSidebar, sidebarResizeHandle } from './sidebar.js';
 import { renderDoctor, renderDoctorFix } from './doctor.js';
 import { renderActivity } from './activity.js';
 import { renderAgentImport, renderLibrary, renderSkills } from './tools.js';
+import { noticeReportLink, startupFailureView } from '../support.js';
 let renderedPanelIdentity = null;
 
 const PANEL_ORDER = new Map([
@@ -674,6 +675,10 @@ function notice(current, leaving = false) {
       }),
     );
   }
+  // An error is the one notice worth reporting; the private form is offered here
+  // and never carries the message (§7.14).
+  const report = noticeReportLink(current);
+  if (report) bar.append(report);
   const dismiss = el('button', 'button subtle', 'Dismiss');
   dismiss.dataset.action = 'dismiss-notice';
   bar.append(dismiss);
@@ -795,14 +800,9 @@ function loadingState() {
   return box;
 }
 
+// Retry and both report links live in support.js (§7.14).
 function errorState(error) {
-  const box = el('div', 'placeholder error');
-  box.append(el('p', null, 'Could not read your configurations.'));
-  box.append(el('p', 'muted', error?.message ?? 'Unknown error.'));
-  const retry = el('button', 'button', 'Try again');
-  retry.dataset.action = 'refresh';
-  box.append(retry);
-  return box;
+  return startupFailureView(error);
 }
 
 function diagnostics(items) {

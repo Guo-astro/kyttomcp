@@ -37,8 +37,15 @@
                         UseAeroCaptionButtons="True" />
   </shell:WindowChrome.WindowChrome>
 
-  <Grid>
+  <Grid x:Name="Layout">
     <wv2:WebView2 x:Name="Web" DefaultBackgroundColor="Transparent" />
+
+    <!--
+      The recovery panel (§7.14): native, independent of the page and of IPC. The
+      web view is an HwndHost, so it cannot be covered — showing this hides it, and
+      it is collapsed again once the interface has loaded.
+    -->
+    <local:InterfaceRecoveryPanel x:Name="Recovery" Visibility="Collapsed" />
 
     <!--
       In a Popup because the web view is a child window and paints over anything

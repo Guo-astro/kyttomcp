@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -6,6 +7,7 @@ using System.Windows.Media;
 using Kytto.App.Ipc;
 using Kytto.App.Web;
 using Kytto.Core.Settings;
+using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
 
 namespace Kytto.App;
@@ -31,6 +33,17 @@ public partial class MainWindow : Window
     private bool _systemEventsSubscribed;
     private AppModel? _model;
     private TrayController? _tray;
+    private WebHost? _host;
+    private InterfaceRecovery? _recovery;
+
+    /// <summary>
+    /// Opens the two fixed report links (§7.14). Settable so a test never starts a
+    /// browser; production always uses the system browser.
+    /// </summary>
+    internal ISupportLinkLauncher SupportLinkLauncher { get; set; } = SystemBrowserSupportLauncher.Shared;
+
+    /// <summary>The interface-recovery state machine (§7.14), for tests.</summary>
+    internal InterfaceRecovery? RecoveryState => _recovery;
 
     /// <summary>
     /// The shortcuts §3 asks for, translated to the keys Windows users press.
@@ -42,11 +55,11 @@ public partial class MainWindow : Window
     /// </remarks>
     private void InstallShortcuts()
     {
-        Add(Key.R, ModifierKeys.Control, () => _ = _router.EmitAsync("menu.refresh", new { }));
+        Add(Key.R, ModifierKeys.Control, RefreshOrReload);
         Add(Key.F, ModifierKeys.Control, () => _ = _router.EmitAsync("menu.find", new { }));
         // F5 as well, because on Windows that is what "reload this" means to most
         // people and the cost of accepting both is one line.
-        Add(Key.F5, ModifierKeys.None, () => _ = _router.EmitAsync("menu.refresh", new { }));
+        Add(Key.F5, ModifierKeys.None, RefreshOrReload);
         Add(Key.W, ModifierKeys.Control, Close);
         Add(Key.OemComma, ModifierKeys.Control, OpenSettings);
 
@@ -98,10 +111,15 @@ public partial class MainWindow : Window
         // open.
         CommandRegistry.RegisterAll(_router, _model, () => Dispatcher.InvokeAsync(OpenSettings));
 
-        var host = new WebHost(_router);
+        // Before the page exists, so the very first load can already fail into the
+        // native panel (§7.14) rather than into a blank window.
+        _recovery = new InterfaceRecovery(new RecoveryHost(this));
+        Recovery.ReloadRequested += StartRecovery;
+        Recovery.ReportRequested += OpenSupportLink;
+
         try
         {
-            await host.InitializeAsync(Web);
+            await StartInterfaceAsync();
         }
         catch (Exception error)
         {
@@ -125,7 +143,7 @@ public partial class MainWindow : Window
             await _router.EmitAsync("configs.changed", _model.ToStateDto());
         });
 
-        _tray = new TrayController(_model, this, RequestQuit);
+        _tray = new TrayController(_model, this, RequestQuit, SupportLinkLauncher);
         _tray.Apply(_model.Settings);
         _model.SettingsChanged += settings =>
         {
@@ -143,9 +161,6 @@ public partial class MainWindow : Window
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         _systemEventsSubscribed = true;
 
-        // A load replaces `documentElement`, and with it the custom properties the
-        // window measured into it. They go back on as soon as there is a document.
-        Web.CoreWebView2.DOMContentLoaded += (_, _) => PublishWindowMetrics(force: true);
         SizeChanged += (_, _) => { PublishWindowMetrics(); PlaceCaptionButtons(); };
         LocationChanged += (_, _) => PlaceCaptionButtons();
         StateChanged += (_, _) =>
@@ -164,6 +179,163 @@ public partial class MainWindow : Window
         PlaceCaptionButtons();
 
         await RunProbeAsync();
+    }
+
+    // MARK: - The web interface and its recovery (§7.14)
+
+    /// <summary>
+    /// Brings up the web interface in the current <c>Web</c> control: the
+    /// environment, the navigation policy and bridge, the router, and the callbacks
+    /// recovery listens to. Everything that has to be redone when the control is
+    /// rebuilt lives here, and only here.
+    /// </summary>
+    private async Task StartInterfaceAsync()
+    {
+        var host = new WebHost(_router, SupportLinkLauncher);
+        host.ProcessFailed += kind => _recovery?.ReportProcessFailure(kind);
+        host.NavigationFinished += outcome => _recovery?.ReportNavigation(outcome);
+        _host = host;
+
+        await host.InitializeAsync(Web);
+
+        // A load replaces `documentElement`, and with it the custom properties the
+        // window measured into it. They go back on as soon as there is a document.
+        Web.CoreWebView2.DOMContentLoaded += (_, _) => PublishWindowMetrics(force: true);
+    }
+
+    /// <summary>
+    /// Throws the web control away and builds a new one (§7.14). For when the
+    /// browser process is gone, which takes every object tied to it with it.
+    /// </summary>
+    /// <remarks>
+    /// Navigates to the bundled app origin and nothing else. No command is re-sent:
+    /// whatever the old page had in flight finishes natively, and its reply is
+    /// dropped by the bridge because it carries another page's tag.
+    /// </remarks>
+    private async Task RecreateInterfaceAsync()
+    {
+        try
+        {
+            _host?.Retire();
+            _router.Detach();
+
+            var stale = Web;
+            var index = Layout.Children.IndexOf(stale);
+            Layout.Children.Remove(stale);
+            try
+            {
+                stale.Dispose();
+            }
+            catch (Exception error)
+            {
+                // The point of replacing it is that it may already be unusable.
+                Log.Failure("web view dispose", error);
+            }
+
+            // Hidden, not collapsed: still part of the layout, and the panel stays
+            // up until the page it loads has finished.
+            Web = new WebView2
+            {
+                DefaultBackgroundColor = System.Drawing.Color.Transparent,
+                Visibility = Visibility.Hidden,
+            };
+            Layout.Children.Insert(Math.Max(0, index), Web);
+
+            await StartInterfaceAsync();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            Log.Failure("interface rebuild", error);
+            throw;
+        }
+    }
+
+    /// <summary>Navigates the existing control to the bundled origin — only there.</summary>
+    private void ReloadInterface()
+    {
+        try
+        {
+            if (Web.CoreWebView2 is not { } core)
+            {
+                throw new InvalidOperationException("The web view is not initialized.");
+            }
+            core.Navigate(WebHost.AppEntryUri.AbsoluteUri);
+        }
+        catch (Exception error) when (
+            error is InvalidOperationException or COMException or ObjectDisposedException)
+        {
+            Log.Failure("interface reload", error);
+            throw;
+        }
+    }
+
+    private void ShowRecoveryPanel(RecoveryPanelState state)
+    {
+        var firstShow = Recovery.Visibility != Visibility.Visible;
+        Recovery.Present(state);
+
+        // The web view is a child window and paints over anything WPF draws, so the
+        // panel only shows once the web view is out of the way.
+        Web.Visibility = Visibility.Hidden;
+        Recovery.Visibility = Visibility.Visible;
+        if (firstShow) Recovery.FocusReload();
+    }
+
+    private void HideRecoveryPanel()
+    {
+        Recovery.Visibility = Visibility.Collapsed;
+        Web.Visibility = Visibility.Visible;
+        PublishWindowMetrics(force: true);
+    }
+
+    private async void StartRecovery()
+    {
+        if (_recovery is null) return;
+        try
+        {
+            await _recovery.RecoverAsync();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // RecoverAsync reports its own failures through the panel; this is the
+            // last guard on an async-void handler.
+            Log.Failure("interface recovery", error);
+        }
+    }
+
+    /// <summary>
+    /// F5 and Ctrl+R: refresh the page's data — or, when the interface is down,
+    /// reload it, which is what pressing them there has to mean.
+    /// </summary>
+    private void RefreshOrReload()
+    {
+        if (_recovery is { PanelVisible: true })
+        {
+            StartRecovery();
+            return;
+        }
+        _ = _router.EmitAsync("menu.refresh", new { });
+    }
+
+    /// <summary>
+    /// Opens one of the two fixed report links in the system browser. Nothing is
+    /// attached to it and nothing is submitted (§7.14).
+    /// </summary>
+    private void OpenSupportLink(SupportLink link)
+    {
+        if (!SupportLinkLauncher.Open(link.Url)) Recovery.ShowNotice(SupportLinks.FallbackMessage(link));
+    }
+
+    /// <summary>What the recovery state machine drives.</summary>
+    private sealed class RecoveryHost(MainWindow window) : IInterfaceRecoveryHost
+    {
+        public void ShowPanel(RecoveryPanelState state) => window.ShowRecoveryPanel(state);
+
+        public void HidePanel() => window.HideRecoveryPanel();
+
+        public void ReloadInterface() => window.ReloadInterface();
+
+        public Task RecreateInterfaceAsync() => window.RecreateInterfaceAsync();
     }
 
     /// <summary>
@@ -257,7 +429,7 @@ public partial class MainWindow : Window
     {
         if (_model is null) return;
 
-        var settings = new SettingsWindow(_model) { Owner = this };
+        var settings = new SettingsWindow(_model, SupportLinkLauncher) { Owner = this };
         if (settings.ShowDialog() != true) return;
 
         // The page renders the theme it is told, so it hears about a change here
@@ -322,8 +494,10 @@ public partial class MainWindow : Window
         _micaApplied = Dwm.SetBackdrop(handle, Dwm.SystemBackdrop.MainWindow);
 
         // The caption buttons are the one piece of chrome the page's theme cannot
-        // reach, because they are the one piece that is WPF rather than HTML.
+        // reach, because they are the one piece that is WPF rather than HTML. The
+        // recovery panel is native for the same reason and follows the same decision.
         Caption.GlyphBrush = dark ? Brushes.White : Brushes.Black;
+        Recovery.ApplyAppearance(dark);
     }
 
     /// <summary>Which of the two appearances the page will resolve to.</summary>

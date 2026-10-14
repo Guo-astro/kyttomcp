@@ -32,13 +32,50 @@ internal sealed class TrayController : IDisposable
     private readonly AppModel _model;
     private readonly Window _window;
     private readonly Action _requestQuit;
+    private readonly ISupportLinkLauncher _supportLinks;
     private bool _disposed;
 
-    internal TrayController(AppModel model, Window window, Action requestQuit)
+    internal TrayController(
+        AppModel model,
+        Window window,
+        Action requestQuit,
+        ISupportLinkLauncher? supportLinks = null)
     {
         _model = model;
         _window = window;
         _requestQuit = requestQuit;
+        _supportLinks = supportLinks ?? SystemBrowserSupportLauncher.Shared;
+    }
+
+    /// <summary>
+    /// The tray's Help submenu (§7.14): the same two fixed report links Settings and
+    /// the error screens offer. Windows has no menu bar, so this is where the macOS
+    /// Help menu's entries live.
+    /// </summary>
+    internal const string HelpMenuTitle = "Help";
+
+    /// <summary>Adds the Help submenu; <paramref name="open"/> runs when a link is chosen.</summary>
+    internal static Forms.ToolStripMenuItem BuildHelpMenu(Action<SupportLink> open)
+    {
+        var help = new Forms.ToolStripMenuItem(HelpMenuTitle);
+        foreach (var link in SupportLinks.All)
+        {
+            var item = new Forms.ToolStripMenuItem(link.Label)
+            {
+                ToolTipText = link.Audience,
+                Tag = link,
+            };
+            var chosen = link;
+            item.Click += (_, _) => open(chosen);
+            help.DropDownItems.Add(item);
+        }
+        return help;
+    }
+
+    private void OpenSupportLink(SupportLink link)
+    {
+        if (_supportLinks.Open(link.Url)) return;
+        _icon?.ShowBalloonTip(5000, "Kytto", SupportLinks.FallbackMessage(link), Forms.ToolTipIcon.Warning);
     }
 
     /// <summary>Idempotently makes the notification area match persisted settings.</summary>
@@ -149,6 +186,7 @@ internal sealed class TrayController : IDisposable
         var open = new Forms.ToolStripMenuItem("Open Kytto");
         open.Click += (_, _) => Show();
         menu.Items.Add(open);
+        menu.Items.Add(BuildHelpMenu(OpenSupportLink));
 
         var quit = new Forms.ToolStripMenuItem("Quit Kytto");
         quit.Click += (_, _) => _requestQuit();
