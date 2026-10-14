@@ -117,6 +117,7 @@ public enum PortableSetupFailure
     LocalContractNotChecked,
     StoreUnreadable,
     NoDestination,
+    ProtectedLocation,
 }
 
 /// <summary>
@@ -150,6 +151,10 @@ public sealed class PortableSetupException(
             PortableSetupFailure.RollbackFailed,
             $"The import failed and could not completely restore its previous files: {detail}",
             cause);
+
+    /// <summary>An export would land on a live config or on one of Kytto's own stores.</summary>
+    public static PortableSetupException ProtectedLocation(string why) =>
+        new(PortableSetupFailure.ProtectedLocation, $"Choose another export file: {why}.");
 
     /// <summary>The setup has servers and there is no client to put them in.</summary>
     public static PortableSetupException NoDestination() =>

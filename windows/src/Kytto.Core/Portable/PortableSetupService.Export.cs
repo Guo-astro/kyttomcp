@@ -379,7 +379,7 @@ public sealed partial class PortableSetupService
         var name = Path.GetFileName(file);
         if (name.Contains(':') || file.AsSpan(Math.Min(2, file.Length)).Contains(':'))
         {
-            throw PortableSetupException.Invalid("choose a plain file name for the export");
+            throw PortableSetupException.ProtectedLocation("a file name with a colon addresses a stream of some other file");
         }
 
         var guarded = new List<string> { _paths.Root };
@@ -399,8 +399,8 @@ public sealed partial class PortableSetupService
 
         if (guarded.Any(path => FinalPath.IsSameOrUnder(file, path)))
         {
-            throw PortableSetupException.Invalid(
-                "choose an export file outside client configuration and Kytto's data folders");
+            throw PortableSetupException.ProtectedLocation(
+                "it must be outside client configuration and Kytto's own data folders, however it is spelled");
         }
     }
 }

@@ -192,7 +192,7 @@ public sealed class PortableSetupSafetyTests
         var servers = source.Discover().Servers;
         var service = source.Portable();
 
-        Assert.Throws<PortableSetupException>(() => service.Export(config, servers));
+        Assert.Equal(PortableSetupFailure.ProtectedLocation, FailureOf(() => service.Export(config, servers)));
         Assert.Throws<PortableSetupException>(() => service.Export(source.Paths.ProfilesFile, servers));
         Assert.Throws<PortableSetupException>(() =>
             service.Export(Path.Combine(source.Paths.Backups, "cursor", "anything.json"), servers));
@@ -562,6 +562,61 @@ public sealed class PortableSetupSafetyTests
         Assert.Equal(profilesBefore, File.ReadAllBytes(destination.Paths.ProfilesFile));
         Assert.False(File.Exists(Path.Combine(destination.Paths.Root, "pending-contract-imports.json")));
         Assert.Null(destination.ParkStore.Parked(ClientId.Cursor, "new"));
+    }
+
+    [Fact]
+    public void AFailureWhileSavingProfilesPutsTheParkStoreBackAndWritesNoConfig()
+    {
+        using var source = new ToggleHarness();
+        using var destination = new ToggleHarness();
+        source.Write("""{"mcpServers":{"new":{"command":"npx"}}}""", ".cursor/mcp.json");
+        new ProfileStore(source.Paths).Create("Imported", ["new"]);
+        source.ExportTo();
+
+        destination.ParkStore.Park(ClientId.Cursor, "old", """{"command":"old"}""");
+        new ProfileStore(destination.Paths).Create("Existing", []);
+        var parkedBefore = File.ReadAllBytes(destination.Paths.ParkFile);
+        var profilesBefore = File.ReadAllBytes(destination.Paths.ProfilesFile);
+        var service = destination.Portable();
+        // Cursor parks the new server (the park store changes first), Codex writes a config.
+        var preview = service.Preview(source.PortableFile(), [ClientId.Cursor, ClientId.Codex]);
+
+        // Something holds the profile store open, so replacing it fails — after the
+        // park store has already been written and before any config is touched.
+        using (new FileStream(destination.Paths.ProfilesFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Assert.Throws<IOException>(() => service.Apply(preview.Id));
+        }
+
+        Assert.Equal(parkedBefore, File.ReadAllBytes(destination.Paths.ParkFile));
+        Assert.Equal(profilesBefore, File.ReadAllBytes(destination.Paths.ProfilesFile));
+        Assert.False(destination.Exists(".codex/config.toml"));
+        Assert.False(File.Exists(Path.Combine(destination.Paths.Root, "pending-contract-imports.json")));
+        Assert.Null(destination.ParkStore.Parked(ClientId.Cursor, "new"));
+        Assert.Single(new ProfileStore(destination.Paths).All());
+    }
+
+    [Fact]
+    public void ADisabledServerKytoIsHoldingExportsAsDisabledAndIsStillNotEnabledByAnImport()
+    {
+        using var source = new ToggleHarness();
+        using var destination = new ToggleHarness();
+        source.Write("""{"mcpServers":{"held":{"command":"npx","env":{"KEY":"secret-value"}}}}""", ".cursor/mcp.json");
+        source.Toggles.SetEnabled(false, source.Server("held"), ClientId.Cursor);
+        Assert.NotNull(source.ParkStore.Parked(ClientId.Cursor, "held"));
+
+        var summary = source.ExportTo();
+        var setup = PortableSetupSerializer.Read(File.ReadAllBytes(source.PortableFile()));
+        Assert.Equal(["held"], summary.ServerNames);
+        Assert.False(Assert.Single(setup.Servers).WasEnabled);
+        Assert.DoesNotContain("secret-value", File.ReadAllText(source.PortableFile()), StringComparison.Ordinal);
+
+        var service = destination.Portable();
+        var preview = service.Preview(source.PortableFile(), [ClientId.Cursor], PortableTestSupport.Inputs(summary));
+        service.Apply(preview.Id);
+        Assert.Equal(
+            Kytto.Core.Model.Enablement.Disabled,
+            destination.Discover().Servers.First(server => server.Name == "held").EnabledIn[ClientId.Cursor]);
     }
 
     [Fact]

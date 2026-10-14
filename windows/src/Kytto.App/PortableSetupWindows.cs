@@ -28,7 +28,8 @@ internal sealed class WpfPortableSetupPrompts : IPortableSetupPrompts
     public bool? ConfirmExport()
     {
         var window = new PortableExportWindow(Owner);
-        return window.ShowDialog() == true ? window.IncludeReviewedContracts : null;
+        window.ShowDialog();
+        return window.Accepted ? window.IncludeReviewedContracts : null;
     }
 
     public string? ChooseExportFile()
@@ -62,8 +63,12 @@ internal sealed class WpfPortableSetupPrompts : IPortableSetupPrompts
     public bool CollectInputs(
         PortableSetupSummary summary,
         IReadOnlyList<(ClientId Id, string DisplayName)> targets,
-        Func<PortableImportSelection, string?> submit) =>
-        new PortableImportWindow(Owner, summary, targets, submit).ShowDialog() == true;
+        Func<PortableImportSelection, string?> submit)
+    {
+        var window = new PortableImportWindow(Owner, summary, targets, submit);
+        window.ShowDialog();
+        return window.Accepted;
+    }
 }
 
 /// <summary>Says what an export contains and leaves out, and asks about fingerprints.</summary>
@@ -93,7 +98,11 @@ internal sealed class PortableExportWindow : Window
             Margin = new Thickness(0, 18, 0, 0),
         };
         var choose = new Button { Content = "Choose file…", IsDefault = true, MinWidth = 96, Margin = new Thickness(0, 0, 8, 0) };
-        choose.Click += (_, _) => DialogResult = true;
+        choose.Click += (_, _) =>
+        {
+            Accepted = true;
+            Close();
+        };
         buttons.Children.Add(choose);
         buttons.Children.Add(new Button { Content = "Cancel", IsCancel = true, MinWidth = 76 });
 
@@ -120,6 +129,12 @@ internal sealed class PortableExportWindow : Window
     }
 
     internal bool IncludeReviewedContracts => _contracts.IsChecked == true;
+
+    /// <summary>
+    /// Whether "Choose file…" was pressed. Not <c>DialogResult</c>: that exists only
+    /// while a window is shown modally, and the answer should not depend on it.
+    /// </summary>
+    internal bool Accepted { get; private set; }
 }
 
 /// <summary>
@@ -238,6 +253,9 @@ internal sealed class PortableImportWindow : Window
         Content = layout;
     }
 
+    /// <summary>Whether Preview produced a plan; false when the window was cancelled.</summary>
+    internal bool Accepted { get; private set; }
+
     private static TextBlock Heading(string text) => new()
     {
         Text = text,
@@ -295,7 +313,8 @@ internal sealed class PortableImportWindow : Window
         var error = _submit(selection);
         if (error is null)
         {
-            DialogResult = true;
+            Accepted = true;
+            Close();
             return;
         }
         _error.Text = error;
