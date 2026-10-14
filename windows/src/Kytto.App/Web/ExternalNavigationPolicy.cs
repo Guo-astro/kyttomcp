@@ -3,7 +3,8 @@ using Kytto.App.Ipc;
 namespace Kytto.App.Web;
 
 /// <summary>What the shell does with an address the page asked to navigate to.</summary>
-internal enum NavigationDecision
+/// <remarks>Public only so a theory can take it as a parameter.</remarks>
+public enum NavigationDecision
 {
     /// <summary>It is the bundled app's own origin; the page may go there.</summary>
     Allow,

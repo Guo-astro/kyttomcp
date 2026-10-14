@@ -2,8 +2,11 @@ using Microsoft.Web.WebView2.Core;
 
 namespace Kytto.App.Web;
 
+// The four enums are public only so a theory can take them as parameters; nothing
+// else in the shell is public API.
+
 /// <summary>Why the interface cannot be trusted to be working.</summary>
-internal enum InterfaceFailureKind
+public enum InterfaceFailureKind
 {
     /// <summary>The bundled page did not load: a navigation error, or an HTTP error status.</summary>
     NavigationFailed,
@@ -32,7 +35,7 @@ internal enum InterfaceFailureKind
 }
 
 /// <summary>What "Reload interface" has to do for the failure at hand.</summary>
-internal enum RecoveryAction
+public enum RecoveryAction
 {
     /// <summary>Navigate the existing control to the bundled origin again.</summary>
     ReloadPage,
@@ -42,7 +45,7 @@ internal enum RecoveryAction
 }
 
 /// <summary>How a main-frame navigation ended, as far as recovery cares.</summary>
-internal enum NavigationOutcome
+public enum NavigationOutcome
 {
     Succeeded,
 
