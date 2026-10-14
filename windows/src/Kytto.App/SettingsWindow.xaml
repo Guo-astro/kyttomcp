@@ -67,6 +67,47 @@
       <CheckBox x:Name="LoginBox" Content="Start Kytto when I sign in" />
     </StackPanel>
 
+    <!--
+      Support (§7.14), with the other everyday settings rather than below the long
+      path lists. Both links open in the system browser; nothing is attached or
+      submitted by Kytto, and the addresses carry no data.
+    -->
+    <StackPanel Style="{StaticResource Row}" x:Name="SupportSection">
+      <TextBlock Style="{StaticResource Label}" Text="Support" />
+      <Grid Margin="0,2,0,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <Button x:Name="BugReportButton" Grid.Row="0" Grid.Column="0" Margin="0,0,0,6"
+                Padding="12,4" HorizontalContentAlignment="Left"
+                Content="Report a bug…"
+                ToolTip="Open the private bug report form in your browser"
+                AutomationProperties.AutomationId="SettingsReportBug"
+                Click="OnReportBug" />
+        <TextBlock x:Name="BugReportAudience" Grid.Row="0" Grid.Column="1" Margin="12,0,0,6"
+                   VerticalAlignment="Center" FontSize="11" Opacity="0.65"
+                   Text="Private · No account" />
+        <Button x:Name="GitHubReportButton" Grid.Row="1" Grid.Column="0"
+                Padding="12,4" HorizontalContentAlignment="Left"
+                Content="Report on GitHub…"
+                ToolTip="Open a public GitHub issue in your browser"
+                AutomationProperties.AutomationId="SettingsReportGitHub"
+                Click="OnReportGitHub" />
+        <TextBlock x:Name="GitHubReportAudience" Grid.Row="1" Grid.Column="1" Margin="12,0,0,0"
+                   VerticalAlignment="Center" FontSize="11" Opacity="0.65"
+                   Text="Public · GitHub account" />
+      </Grid>
+      <TextBlock x:Name="SupportNote" Style="{StaticResource Hint}"
+                 Text="Opens in your browser. No logs or configuration are attached automatically." />
+      <TextBlock x:Name="SupportError" Margin="0,6,0,0"
+                 Foreground="#C42B1C" TextWrapping="Wrap" Visibility="Collapsed" />
+    </StackPanel>
+
     <StackPanel Style="{StaticResource Row}">
       <TextBlock Style="{StaticResource Label}" Text="Where clients keep their configuration" />
       <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,8"
@@ -152,6 +193,11 @@
               Click="OnAddCustomSource" />
       <TextBlock x:Name="CustomSourceError" Margin="0,6,0,0"
                  Foreground="#C42B1C" TextWrapping="Wrap" Visibility="Collapsed" />
+      <!-- Only for a failure of the save itself (§7.14), never for input that was merely invalid. -->
+      <Button x:Name="SaveFailureReportButton" Content="Report a bug…" HorizontalAlignment="Left"
+              Margin="0,6,0,0" Padding="12,4" Visibility="Collapsed"
+              ToolTip="Open the private bug report form in your browser"
+              Click="OnReportBug" />
     </StackPanel>
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0">

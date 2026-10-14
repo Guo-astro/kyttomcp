@@ -18,6 +18,14 @@
   const pending = new Map();
   let nextID = 0;
 
+  // Request ids restart at 1 in every document, so a reply that crosses a reload
+  // or a rebuilt web view (§7.14) could be mistaken for the answer to one of the
+  // new page's own requests. Every request carries this document's random tag and
+  // only a reply that echoes it is accepted; one for a page that is gone is dropped.
+  const session = typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
   // The page's own failures, forwarded to the shell's log. A command that throws
   // becomes a failure envelope the UI can render; a handler that throws before it
   // reaches `invoke` produces nothing at all, and silence is the one outcome
@@ -33,7 +41,7 @@
     const data = event.data;
     // The event channel (`__kytto.emit`) arrives by script evaluation, the same
     // way it does on macOS, so anything without a request id is not ours.
-    if (!data || typeof data.id !== 'number') return;
+    if (!data || typeof data.id !== 'number' || data.session !== session) return;
 
     const resolve = pending.get(data.id);
     if (!resolve) return;
@@ -54,6 +62,7 @@
             pending.set(id, resolve);
             window.chrome.webview.postMessage({
               id,
+              session,
               command: message.command,
               payload: message.payload ?? null,
             });

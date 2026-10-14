@@ -1,7 +1,8 @@
 # Windows release
 
-The current source release is **1.0.7.1**. Its user-facing notes are in
-[`releases/1.0.7.1.md`](releases/1.0.7.1.md); earlier notes sit beside it.
+The current source release is **1.0.8**, prepared but not yet built, signed or
+published; the latest published build is 1.0.7.1. Its notes are in
+[`releases/1.0.8.md`](releases/1.0.8.md); earlier notes sit beside it.
 
 Before creating an artifact, the exact release sources must pass:
 

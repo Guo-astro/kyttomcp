@@ -15,6 +15,7 @@ namespace Kytto.App;
 public partial class SettingsWindow : Window
 {
     private readonly AppModel _model;
+    private readonly ISupportLinkLauncher _supportLinks;
     private readonly List<OverrideRow> _overrides = [];
     private readonly List<CustomSourceRow> _customSources = [];
 
@@ -37,9 +38,10 @@ public partial class SettingsWindow : Window
             Enum.GetValues<ConfigurationScope>();
     }
 
-    internal SettingsWindow(AppModel model)
+    internal SettingsWindow(AppModel model, ISupportLinkLauncher? supportLinks = null)
     {
         _model = model;
+        _supportLinks = supportLinks ?? SystemBrowserSupportLauncher.Shared;
         InitializeComponent();
 
         var settings = model.Settings;
@@ -98,6 +100,24 @@ public partial class SettingsWindow : Window
 
     internal static string? ValidTrayClient(string? raw) =>
         ClientIds.FromRaw(raw)?.Raw();
+
+    /// <summary>
+    /// Opens one of the two fixed report links in the system browser (§7.14). The
+    /// window is not closed and nothing is saved: reading the support section never
+    /// changes a setting.
+    /// </summary>
+    private void OpenSupportLink(SupportLink link)
+    {
+        SupportError.Visibility = Visibility.Collapsed;
+        if (_supportLinks.Open(link.Url)) return;
+
+        SupportError.Text = SupportLinks.FallbackMessage(link);
+        SupportError.Visibility = Visibility.Visible;
+    }
+
+    private void OnReportBug(object sender, RoutedEventArgs args) => OpenSupportLink(SupportLinks.BugReport);
+
+    private void OnReportGitHub(object sender, RoutedEventArgs args) => OpenSupportLink(SupportLinks.GitHubIssue);
 
     private void OnBrowse(object sender, RoutedEventArgs args)
     {
@@ -158,6 +178,7 @@ public partial class SettingsWindow : Window
     {
         PathError.Visibility = Visibility.Collapsed;
         CustomSourceError.Visibility = Visibility.Collapsed;
+        SaveFailureReportButton.Visibility = Visibility.Collapsed;
         var theme = ((ThemeBox.SelectedItem as ComboBoxItem)?.Tag as string) switch
         {
             "light" => Theme.Light,
@@ -220,6 +241,9 @@ public partial class SettingsWindow : Window
         {
             CustomSourceError.Text = error.Message;
             CustomSourceError.Visibility = Visibility.Visible;
+            // The save itself failed, which is not something the user got wrong, so
+            // the private report is offered right beside it (§7.14).
+            SaveFailureReportButton.Visibility = Visibility.Visible;
             CustomSourceError.BringIntoView();
             return;
         }

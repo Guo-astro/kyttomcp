@@ -35,6 +35,16 @@ internal sealed class CommandRouter
         webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
     }
 
+    /// <summary>
+    /// Lets go of a web view that is about to be thrown away (§7.14), so nothing
+    /// native is pushed at it and a replacement can be attached.
+    /// </summary>
+    internal void Detach()
+    {
+        _webView = null;
+        _trustedOrigin = null;
+    }
+
     // MARK: - Registration
 
     /// <summary>Registers a command that takes a payload.</summary>
@@ -109,7 +119,7 @@ internal sealed class CommandRouter
     /// </remarks>
     internal async Task EmitAsync<T>(string eventName, T payload)
     {
-        if (_webView?.CoreWebView2 is not { } core) return;
+        if (LiveCore() is not { } core) return;
 
         var json = JsonSerializer.Serialize(payload, Envelope.Json);
         var script = $"window.__kytto && window.__kytto.emit({JsStringLiteral(eventName)}, {json});";
@@ -149,7 +159,7 @@ internal sealed class CommandRouter
             ? await handler(incoming.Payload).ConfigureAwait(true)
             : Envelope.Failure(IpcException.UnknownCommand(incoming.Command));
 
-        Reply(incoming.Id, reply);
+        Reply(incoming.Id, reply, incoming.Session);
     }
 
     /// <summary>Decodes an untrusted web message without letting its shape throw.</summary>
@@ -192,7 +202,7 @@ internal sealed class CommandRouter
 
             // Cloned because the document is disposed before the handler runs.
             var payload = root.TryGetProperty("payload", out var value) ? value.Clone() : default;
-            return new IncomingMessage(id, command, payload);
+            return new IncomingMessage(id, command, payload, Session(root));
         }
         catch (JsonException)
         {
@@ -206,11 +216,49 @@ internal sealed class CommandRouter
         string.Equals(parsed.IdnHost, trustedOrigin.IdnHost, StringComparison.OrdinalIgnoreCase) &&
         parsed.Port == trustedOrigin.Port;
 
-    private void Reply(int id, string envelope)
-    {
-        if (_webView?.CoreWebView2 is not { } core) return;
+    /// <summary>
+    /// The page's own random tag, which it puts on every request and expects back.
+    /// </summary>
+    /// <remarks>
+    /// Request ids start at 1 in every document. A reply that crosses a reload or a
+    /// rebuilt web view — a slow command finishing after the interface was
+    /// recovered (§7.14) — would otherwise land on the new page and be taken for
+    /// the answer to whichever of its own requests holds the same number. Echoing
+    /// the tag lets the bridge drop a reply that belongs to a page that is gone.
+    /// Nothing here ever re-sends a command: the old handler simply finishes.
+    /// </remarks>
+    private static string? Session(JsonElement root) =>
+        root.TryGetProperty("session", out var session) &&
+        session.ValueKind == JsonValueKind.String &&
+        session.GetString() is { Length: > 0 and <= 64 } tag
+            ? tag
+            : null;
 
-        var message = JsonSerializer.Serialize(new ReplyMessage(id, envelope), Envelope.Json);
+    /// <summary>The attached page's <c>CoreWebView2</c>, or null when there is nothing to talk to.</summary>
+    /// <remarks>
+    /// After the browser process dies the WPF control's <c>CoreWebView2</c> getter
+    /// itself throws ("no longer valid because the browser process crashed"). A
+    /// watcher event or a late reply arriving then must find a closed door, not an
+    /// exception on the dispatcher (§7.14).
+    /// </remarks>
+    private Microsoft.Web.WebView2.Core.CoreWebView2? LiveCore()
+    {
+        try
+        {
+            return _webView?.CoreWebView2;
+        }
+        catch (Exception error) when (
+            error is InvalidOperationException or ObjectDisposedException or COMException)
+        {
+            return null;
+        }
+    }
+
+    private void Reply(int id, string envelope, string? session)
+    {
+        if (LiveCore() is not { } core) return;
+
+        var message = ReplyJson(id, envelope, session);
         try
         {
             core.PostWebMessageAsJson(message);
@@ -221,7 +269,10 @@ internal sealed class CommandRouter
         }
     }
 
-    private sealed record ReplyMessage(int Id, string Reply);
+    internal static string ReplyJson(int id, string envelope, string? session) =>
+        JsonSerializer.Serialize(new ReplyMessage(id, envelope, session), Envelope.Json);
 
-    internal sealed record IncomingMessage(int Id, string Command, JsonElement Payload);
+    private sealed record ReplyMessage(int Id, string Reply, string? Session);
+
+    internal sealed record IncomingMessage(int Id, string Command, JsonElement Payload, string? Session = null);
 }

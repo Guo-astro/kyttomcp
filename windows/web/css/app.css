@@ -1697,6 +1697,44 @@ th.col-client.idle .app-icon {
   -webkit-user-select: text;
 }
 
+/* Bug reporting (§7.14) ---------------------------------------------------- */
+
+/* An error notice now carries a message, a report link and Dismiss (and Undo),
+   which has to wrap in a narrow window rather than push a button off the edge. */
+.notice {
+  flex-wrap: wrap;
+}
+
+.notice-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The report links are anchors wearing the button look, so they need the layout
+   a <button> gets for free and none of an anchor's underline. */
+.support-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+/* Retry and both report links on the startup failure screen: one row when it
+   fits, centred rows when it does not. */
+.support-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.support-note {
+  max-width: 460px;
+  font-size: 12px;
+}
+
 /* A banner appearing under the toolbar moves the matrix down; sliding in from
    behind the toolbar makes that a movement rather than a jump. */
 .notice.is-entering,

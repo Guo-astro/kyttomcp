@@ -29,17 +29,38 @@ namespace Kytto.App.Web;
 /// menu, swipe navigation, pinch zoom, the status bar popup.
 /// </para>
 /// </remarks>
-internal sealed class WebHost(CommandRouter router)
+internal sealed class WebHost(CommandRouter router, ISupportLinkLauncher? supportLinks = null)
 {
     /// <summary>The origin the page is served on. Not a real host; nothing resolves it.</summary>
     private const string VirtualHost = "app";
 
     internal static readonly Uri TrustedOrigin = new($"https://{VirtualHost}/");
 
+    /// <summary>
+    /// The one address the interface is ever loaded from — at startup, and again by
+    /// recovery (§7.14), which therefore can never navigate anywhere else.
+    /// </summary>
+    internal static Uri AppEntryUri { get; } = new(TrustedOrigin, "index.html");
+
     private const string IconPrefix = "/icon/";
 
     private CoreWebView2Environment? _environment;
     private readonly string _root = WebRoot();
+    private readonly ISupportLinkLauncher _supportLinks = supportLinks ?? SystemBrowserSupportLauncher.Shared;
+    private bool _retired;
+
+    /// <summary>A <c>ProcessFailed</c> callback, already classified (§7.14).</summary>
+    internal event Action<InterfaceFailureKind>? ProcessFailed;
+
+    /// <summary>A main-frame navigation finished, successfully or not.</summary>
+    internal event Action<NavigationOutcome>? NavigationFinished;
+
+    /// <summary>
+    /// Stops this host reporting to the window. Called when its control is replaced,
+    /// so a late callback from a web view that is being thrown away cannot cover the
+    /// working one that took its place.
+    /// </summary>
+    internal void Retire() => _retired = true;
 
     internal async Task InitializeAsync(WebView2 webView)
     {
@@ -59,18 +80,60 @@ internal sealed class WebHost(CommandRouter router)
         var core = webView.CoreWebView2;
         core.AddWebResourceRequestedFilter($"https://{VirtualHost}/*", CoreWebView2WebResourceContext.All);
         core.WebResourceRequested += OnWebResourceRequested;
+        // Where the page may go is one decision (ExternalNavigationPolicy): the
+        // bundled origin, plus exactly the two fixed bug-report links, which the
+        // system browser opens and this web view never shows (§7.14).
         core.NavigationStarting += (_, args) =>
         {
-            if (!CommandRouter.IsSameOrigin(args.Uri, TrustedOrigin)) args.Cancel = true;
+            switch (ExternalNavigationPolicy.Decide(args.Uri, TrustedOrigin, args.IsUserInitiated))
+            {
+                case NavigationDecision.Allow:
+                    return;
+                case NavigationDecision.OpenInBrowser:
+                    OpenSupportLink(args.Uri);
+                    break;
+            }
+            args.Cancel = true;
         };
         core.FrameNavigationStarting += (_, args) =>
         {
-            if (!CommandRouter.IsSameOrigin(args.Uri, TrustedOrigin)) args.Cancel = true;
+            if (ExternalNavigationPolicy.DecideFrame(args.Uri, TrustedOrigin) != NavigationDecision.Allow)
+            {
+                args.Cancel = true;
+            }
         };
         // The app has no browser surface. A page that asks for a popup or a camera,
         // location or notification permission is either compromised or broken, and
-        // neither case should silently widen this native shell.
-        core.NewWindowRequested += (_, args) => args.Handled = true;
+        // neither case should silently widen this native shell. The one thing a
+        // new-window request can do is open a fixed support link in the browser:
+        // that is what `target="_blank"` on those links asks for.
+        core.NewWindowRequested += (_, args) =>
+        {
+            args.Handled = true;
+            if (ExternalNavigationPolicy.DecideNewWindow(args.Uri, TrustedOrigin, args.IsUserInitiated)
+                == NavigationDecision.OpenInBrowser)
+            {
+                OpenSupportLink(args.Uri);
+            }
+        };
+
+        // What recovery listens to (§7.14). Both are reported to whoever subscribed;
+        // this class neither decides nor shows anything itself.
+        core.ProcessFailed += (_, args) =>
+        {
+            Log.Write($"[webview] process failed: {args.ProcessFailedKind} ({args.Reason}, exit code {args.ExitCode})");
+            if (!_retired) ProcessFailed?.Invoke(InterfaceRecovery.Classify(args.ProcessFailedKind));
+        };
+        core.NavigationCompleted += (_, args) =>
+        {
+            var outcome = InterfaceRecovery.Outcome(
+                args.IsSuccess,
+                args.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled,
+                args.HttpStatusCode);
+            Log.Write($"[webview] navigation {outcome}: success={args.IsSuccess}, error={args.WebErrorStatus}, http={args.HttpStatusCode}");
+            if (!_retired) NavigationFinished?.Invoke(outcome);
+        };
+        Log.Write($"[webview] browser process {core.BrowserProcessId}");
         core.PermissionRequested += (_, args) =>
         {
             args.State = CoreWebView2PermissionState.Deny;
@@ -98,7 +161,16 @@ internal sealed class WebHost(CommandRouter router)
 
         router.Attach(webView, TrustedOrigin);
 
-        core.Navigate(new Uri(TrustedOrigin, "index.html").AbsoluteUri);
+        core.Navigate(AppEntryUri.AbsoluteUri);
+    }
+
+    private void OpenSupportLink(string address)
+    {
+        // Only ever a fixed address, re-checked by the launcher itself.
+        if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) || !_supportLinks.Open(uri))
+        {
+            Log.Write("[webview] a support link could not be opened in the browser");
+        }
     }
 
     private void OnWebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs args)

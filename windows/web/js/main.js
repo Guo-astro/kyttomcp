@@ -19,6 +19,7 @@ import { render as renderMatrix } from './screens/matrix.js';
 import { diagnosticReport } from './screens/serverDetail.js';
 import { activityReport } from './screens/activity.js';
 import { settlePostMutationRefresh } from './postMutation.js';
+import { createInterfaceFailureGuard, loadFailureError } from './support.js';
 
 const root = document.getElementById('app');
 const SIDEBAR_DEFAULT = 196;
@@ -83,6 +84,13 @@ setRenderer(() => {
   renderedSheetSubject = subject;
 });
 
+// An unhandled script error or promise rejection shows the same recovery screen
+// as a failed first load, with generic text only: the exception itself is never
+// rendered, stored or sent (§7.14, support.js).
+const interfaceGuard = createInterfaceFailureGuard((changes) => setState(changes));
+window.addEventListener('error', (event) => interfaceGuard.error(event));
+window.addEventListener('unhandledrejection', () => interfaceGuard.rejection());
+
 function focusSubject(current) {
   if (!current) return null;
   return [current.kind, current.serverId, current.clientId, current.routeId, current.secretId, current.profileId, current.mode]
@@ -140,6 +148,7 @@ function focusSheet(preferField = false) {
 }
 
 async function load() {
+  interfaceGuard.reset();
   setState({ phase: 'loading', error: null });
   try {
     const [app, settings, state, backups, catalog, profiles] = await Promise.all([
@@ -157,10 +166,7 @@ async function load() {
     // a network failure is intentionally silent in the web layer.
     void checkForUpdates(false);
   } catch (error) {
-    setState({
-      phase: 'error',
-      error: { code: error.code ?? 'unknown', message: error.message },
-    });
+    setState({ phase: 'error', error: loadFailureError(error) });
   }
 }
 

@@ -614,7 +614,7 @@ and raw stderr from the copied text because both may contain credentials.
 
 ### 7.6 Settings
 
-Client paths (with override), backup retention, token warning threshold, theme, launch at login and menu bar item on/off. Kytto sends no telemetry.
+Client paths (with override), backup retention, token warning threshold, theme, launch at login and menu bar item on/off. Kytto sends no telemetry. A **Support** section holds the two report links (§7.14).
 
 Under Clients, Settings also explains the five built-in writable clients and
 manages read-only custom sources. A native picker accepts `.json`, `.jsonc` and
@@ -861,6 +861,70 @@ compared. Acknowledging a Contract Guard alert reads both stores and requires th
 fresh check *before* either is written; an unreadable pending store is kept as it is,
 blocks the review, and never leaves a local alert half acknowledged. Imported hashes
 are never copied into trust.
+
+### 7.14 Bug reporting and interface recovery
+
+(Numbered to match the macOS plan's §7.14; §7.13 is the portable setup.)
+
+**Two fixed links.** *Report a bug…* opens the private form at
+`https://kytto.jakubhecht.sk/#report-bug` — no account — and *Report on GitHub…*
+opens `https://github.com/heyitsjakub/KyttoMCP/issues/new/choose`, which is
+public and needs a GitHub account. Both open the **system browser**, never the
+app's own web view with its privileged bridge, and the app attaches and submits
+nothing: no error text, path, log, config, version or machine detail goes into
+either address, and the reporter writes the report themselves. The UI says which
+link is private and which is public, and that nothing is attached automatically.
+They live in `SupportLinks.cs` and `web/js/support.js`, and a test pins that the
+two spell the same addresses.
+
+**Where they appear.** Settings → **Support**; the tray's **Help** submenu
+(Windows has no menu bar, so this is where the macOS Help menu's entries go); the
+private link on every error notice; the startup failure screen, beside *Try
+again*; and next to a settings save that failed (never next to input the user
+merely got wrong). An unhandled script error or promise rejection shows the same
+screen with a generic message — the exception is never rendered or sent.
+
+**One navigation policy.** `ExternalNavigationPolicy` is the single decision about
+where the web view may go: the bundled origin, and exactly those two addresses.
+It is a literal allow-list, not "any http(s) URL" — the same host with a query or
+another fragment is refused — and a browser is only started for a user's click,
+never for a script's `window.open`. Everything else is cancelled. No IPC command
+is involved; the web layer only renders ordinary links.
+
+**Native recovery, independent of the page.** If the bundled page fails to load
+(a navigation error or an HTTP error status) or WebView2 reports a failed
+process, the window hides the web view — an `HwndHost` paints over anything WPF
+draws — and shows a native panel with *Reload interface*, *Report a bug…* and
+*Report on GitHub…*. It needs neither the page nor IPC. `InterfaceRecovery` is the
+state machine behind it, with the window as a testable seam:
+
+- **One panel.** Repeated callbacks refresh the one panel and never add another.
+  A worse failure escalates the action instead.
+- **No false alarms.** A cancelled navigation — the shell refusing an external
+  link, a reload replacing a pending load — never covers a working app, nor does
+  a helper process (GPU, utility, sandbox helper, plug-in, a frame's renderer)
+  that WebView2 restarts by itself.
+- **By kind.** A lost renderer, or one that stopped responding, is recovered by
+  navigating the existing control to the bundled app origin. A lost browser
+  process — after which the control's own `CoreWebView2` throws — means a new
+  control, with its message handlers, navigation policy, bridge script and
+  router subscription rebuilt. A reload that does not bring the page back
+  escalates to a rebuild.
+- **No replay.** Recovery only ever navigates to the bundled origin and holds no
+  way to send a command. Every request carries its document's random tag and the
+  bridge drops a reply that echoes another one, so a slow command finishing after
+  a reload cannot answer the new page's request with the same number.
+
+The caption buttons, the page-declared drag region, the tray, DPI and theme keep
+working while the panel shows; the panel carries its own drag strip and follows
+the window's light/dark decision. The window renders its own WPF content in
+software: on the machine this was checked on, hardware-accelerated WPF painted
+nothing in a window with extended glass and a system backdrop (nothing in that
+window had ever been WPF-drawn before — the page covers it and the caption
+buttons are a Popup), while the same tree in software showed at once. The page
+is a separate composition and is unaffected. There is no telemetry SDK, no automatic crash
+report and no detection of a previous crash of the whole app: when the process
+dies the operating system handles it.
 
 ---
 
