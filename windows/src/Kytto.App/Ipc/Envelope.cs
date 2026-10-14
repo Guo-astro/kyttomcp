@@ -6,6 +6,7 @@ using Kytto.Core;
 using Kytto.Core.Gateway;
 using Kytto.Core.Imports;
 using Kytto.Core.Model;
+using Kytto.Core.Portable;
 using Kytto.Core.Profiles;
 using Kytto.Core.Secrets;
 using Kytto.Core.Updates;
@@ -104,6 +105,7 @@ internal static class Envelope
         UpdatePackageException => "updatePackage",
         ProvenanceCheckException => "provenanceCheck",
         AgentImportException => "agentImport",
+        PortableSetupException => "portableSetup",
         _ => "internal",
     };
 

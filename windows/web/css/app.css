@@ -4469,3 +4469,46 @@ body[data-stubbed='true'] .statusbar::after {
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* Portable setup and the Profiles header (§7.13) ---------------------------- */
+
+/* One header, one gutter. The copy and the group of actions are the header's own
+   children, and Export setup, Import setup and New profile are that one group — the
+   group is never a row of its own under the header, which is what left the buttons
+   against the panel's left edge. All three share a height and a centre line, and the
+   group wraps as one, so a narrow window moves it below the text inside the same
+   gutter instead of cutting a button off. The empty-state text below uses the same
+   gutter, so the two edges agree whether or not the capability is present. */
+.profiles-heading {
+  flex-wrap: wrap;
+  row-gap: 12px;
+}
+
+.profiles-heading-copy {
+  flex: 1 1 340px;
+  min-width: 0;
+}
+
+.profiles-heading-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin-inline-start: auto;
+}
+
+.profiles-heading-actions .button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  min-height: 32px;
+  padding-block: 0;
+  white-space: nowrap;
+}
+
+.field-hint.warning {
+  color: var(--warn);
+}

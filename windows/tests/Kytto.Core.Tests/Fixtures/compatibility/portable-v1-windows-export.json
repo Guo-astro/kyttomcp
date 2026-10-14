@@ -1,0 +1,104 @@
+{
+  "format": "kytto-portable-setup",
+  "profiles": [
+    {
+      "name": "Research",
+      "serverIDs": [
+        "memory",
+        "remote"
+      ],
+      "tokenBudget": 12000
+    }
+  ],
+  "requirements": [
+    {
+      "id": "f77f10df-9852-4aa4-8158-979f3bb4f7bd",
+      "kind": "value",
+      "label": "memory (cursor): argument 3"
+    },
+    {
+      "id": "3f079aaf-0831-4d53-bd25-c06dc0e7b370",
+      "kind": "path",
+      "label": "memory (cursor): argument 4"
+    },
+    {
+      "id": "f8ae5d1c-989a-4594-85e5-f03c4794490d",
+      "kind": "secret",
+      "label": "memory (cursor): environment FIXTURE_TOKEN"
+    },
+    {
+      "id": "d1826bab-fa4c-417b-8550-f9f8e305835f",
+      "kind": "path",
+      "label": "memory (cursor): working directory"
+    },
+    {
+      "id": "4c7ac309-b096-4d82-9941-646ed5127081",
+      "kind": "secret",
+      "label": "remote (cursor): header Authorization"
+    },
+    {
+      "id": "a2c711b8-ca2f-4d04-ae8e-888047f32623",
+      "kind": "secret",
+      "label": "remote (cursor): remote URL"
+    }
+  ],
+  "reviewedContracts": [
+    {
+      "serverID": "memory",
+      "toolDigests": {
+        "search": "0b5dc197c72a84fe06e0ded91d25246100918997f0e6dbf5ccf0744389c5450d"
+      }
+    }
+  ],
+  "servers": [
+    {
+      "args": [
+        {
+          "literal": "-y"
+        },
+        {
+          "literal": "@modelcontextprotocol/server-memory"
+        },
+        {
+          "requirementID": "f77f10df-9852-4aa4-8158-979f3bb4f7bd"
+        },
+        {
+          "requirementID": "3f079aaf-0831-4d53-bd25-c06dc0e7b370"
+        }
+      ],
+      "command": {
+        "literal": "npx"
+      },
+      "environment": {
+        "FIXTURE_TOKEN": {
+          "requirementID": "f8ae5d1c-989a-4594-85e5-f03c4794490d"
+        }
+      },
+      "headers": {},
+      "name": "memory",
+      "sourceClient": "cursor",
+      "transport": "stdio",
+      "wasEnabled": true,
+      "workingDirectory": {
+        "requirementID": "d1826bab-fa4c-417b-8550-f9f8e305835f"
+      }
+    },
+    {
+      "args": [],
+      "environment": {},
+      "headers": {
+        "Authorization": {
+          "requirementID": "4c7ac309-b096-4d82-9941-646ed5127081"
+        }
+      },
+      "name": "remote",
+      "sourceClient": "cursor",
+      "transport": "http",
+      "url": {
+        "requirementID": "a2c711b8-ca2f-4d04-ae8e-888047f32623"
+      },
+      "wasEnabled": true
+    }
+  ],
+  "version": 1
+}

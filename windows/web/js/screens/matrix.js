@@ -54,6 +54,7 @@ import { renderSidebar, sidebarResizeHandle } from './sidebar.js';
 import { renderDoctor, renderDoctorFix } from './doctor.js';
 import { renderActivity } from './activity.js';
 import { renderAgentImport, renderLibrary, renderSkills } from './tools.js';
+import { renderPortableImport } from './portableSetup.js';
 let renderedPanelIdentity = null;
 
 const PANEL_ORDER = new Map([
@@ -304,6 +305,8 @@ function sheetBody(state) {
       return renderLibrary(state);
     case 'skills':
       return renderSkills(state);
+    case 'portableImport':
+      return renderPortableImport(state);
     default:
       return null;
   }

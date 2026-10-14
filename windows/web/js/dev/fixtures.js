@@ -322,6 +322,10 @@ const world = {
       ],
     },
   ],
+  // Imported contract fingerprints: evidence awaiting a check made here (§7.13).
+  // Nothing is pending until the harness's setup import is applied.
+  pendingContractImports: { entries: [], error: null },
+  setupPreviews: new Map(),
   // A server whose clients disagree — the state the matrix used to merge away.
   // Two clients on one spelling, a third pinned to an old version with its own
   // token, and Claude Desktop holding an extension that shares the name and can
@@ -798,6 +802,10 @@ const recheck = (target) => {
     });
   }
   target.health = passingHealth(target.health?.toolCount ?? 7, tools);
+  // A passing check made after the import is what lets a pending reference be
+  // compared — and compared is not the same as trusted.
+  const pending = world.pendingContractImports.entries.find((entry) => entry.serverID === target.id);
+  if (pending) pending.matching = true;
 };
 
 /// A Streamable HTTP check: it passes once Kytto holds a sign-in for the server,
@@ -999,6 +1007,7 @@ const snapshot = () => ({
     },
   ],
   contractAlerts: structuredClone(world.contractAlerts),
+  pendingContractImports: structuredClone(world.pendingContractImports),
   drift: structuredClone(world.drift),
 });
 
@@ -1091,7 +1100,7 @@ const HANDLERS = {
     build: '1',
     // `library` and `agent-import` are what native reports too; the sidebar's
     // Discover group and the toolbar's Import agent button are gated on them.
-    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'skills', 'provenance', 'library', 'agent-import', 'health.http', 'health.oauth'],
+    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'skills', 'provenance', 'library', 'agent-import', 'health.http', 'health.oauth', 'portable-setup'],
     platformDisplayName: 'fixtures',
     // Deliberately neither "Keychain" nor "Credential Manager": the harness is
     // not pretending to be either platform, and a screen that reads correctly
@@ -1165,6 +1174,63 @@ const HANDLERS = {
   'discovery.refresh': snapshot,
 
   'profiles.list': profileSnapshot,
+
+  // Portable setup (§7.13). The native side opens the file choosers and the secure
+  // inputs; the harness has no dialogs, so it answers as if they had been accepted.
+  // Nothing here reads a file, and nothing it returns carries a value or a path.
+  'setup.export': () => ({
+    cancelled: false,
+    serverCount: world.servers.filter((entry) => !entry.isBundled).length,
+    profileCount: world.profiles.length,
+    warnings: ['Installed extensions and plugins were omitted from this fixture export.'],
+  }),
+  'setup.previewImport': () => {
+    const preview = {
+      id: `setup-${Date.now()}`,
+      serverNames: ['portable-example'],
+      profileNames: ['Imported research'],
+      targetClients: ['codex'],
+      pathDisplays: ['~/.codex/config.toml'],
+      pendingContractCount: 1,
+      warnings: ['Any required secrets and path mappings were collected by the native prompt.'],
+      enabled: false,
+    };
+    world.setupPreviews.set(preview.id, preview);
+    return structuredClone(preview);
+  },
+  'setup.discardImport': ({ previewID }) => {
+    world.setupPreviews.delete(previewID);
+    return {};
+  },
+  'setup.applyImport': ({ previewID }) => {
+    // Single use, like the native plan: a second apply of one id is stale.
+    if (!world.setupPreviews.has(previewID)) {
+      throw fixtureError('The setup or destination changed after the preview. Preview the import again.', 'portableSetup');
+    }
+    if (world.servers.some((entry) => entry.id === 'portable-example')) {
+      throw fixtureError('portable-example already exists. The import left it untouched.', 'portableSetup');
+    }
+    world.setupPreviews.delete(previewID);
+    // Always disabled: nothing a page sends can say otherwise.
+    world.servers.push(server('portable-example', {
+      command: 'node',
+      args: ['example.js'],
+      commandSummary: 'node example.js',
+      originKind: 'configFile',
+      isBundled: false,
+      enabledIn: { codex: 'disabled' },
+    }));
+    world.profiles.push({
+      id: `imported-${Date.now()}`,
+      name: 'Imported research',
+      serverIDs: ['portable-example'],
+      tokenBudget: null,
+    });
+    world.pendingContractImports.entries.push({ serverID: 'portable-example', toolCount: 2, matching: null });
+    recordWrite('codex');
+    return snapshot();
+  },
+
   'profiles.create': ({ name, serverIDs, tokenBudget }) => {
     world.profiles.push({
       id: `fixture-${Date.now()}`,
@@ -1281,7 +1347,15 @@ const HANDLERS = {
   },
 
   'contract.acknowledge': ({ serverID }) => {
+    // The native gate: an imported reference is reviewed only after a check made
+    // here has run, so a review before that changes nothing.
+    const pending = world.pendingContractImports.entries.find((entry) => entry.serverID === serverID);
+    if (pending && pending.matching == null) {
+      throw fixtureError('Run a successful local check before reviewing this imported contract reference.', 'portableSetup');
+    }
     world.contractAlerts = world.contractAlerts.filter((entry) => entry.serverID !== serverID);
+    world.pendingContractImports.entries = world.pendingContractImports.entries
+      .filter((entry) => entry.serverID !== serverID);
     return snapshot();
   },
 
