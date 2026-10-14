@@ -2,6 +2,7 @@
 // masked, transport, per-client enablement, and the way to edit or delete.
 
 import { el, button, busyButton, sheet, definitionList, formatTokens, clientIcon } from '../dom.js';
+import { pendingContractEvidence, PENDING_REVIEW_HINT } from './portableSetup.js';
 
 const CLIENT_STATE_LABEL = {
   enabled: 'Enabled',
@@ -224,28 +225,40 @@ function listPhrase(items) {
 
 function contractSection(state, server) {
   const alert = (state.contractAlerts ?? []).find((entry) => entry.serverID === server.id);
-  if (!alert) return null;
+  // Imported fingerprints are evidence waiting for a check made here (§7.13).
+  const imported = pendingContractEvidence(state, server);
+  if (!alert && !imported.entry && !imported.error) return null;
   const section = el('section', 'detail-section contract-alert');
   section.append(el('h3', null, 'Contract Guard'));
-  section.append(el('p', 'muted', `Changed during the health check on ${new Date(alert.changedAt * 1000).toLocaleString()}.`));
-  const list = el('ul', 'contract-change-list');
-  for (const change of alert.changes) {
-    const item = el('li', `contract-change ${change.severity}`);
-    item.append(el('strong', 'mono', change.toolName));
-    item.append(el('span', null, change.summary));
-    list.append(item);
+  section.append(...imported.notes);
+  if (alert) section.append(el('p', 'muted', `Changed during the health check on ${new Date(alert.changedAt * 1000).toLocaleString()}.`));
+  if (alert) {
+    const list = el('ul', 'contract-change-list');
+    for (const change of alert.changes) {
+      const item = el('li', `contract-change ${change.severity}`);
+      item.append(el('strong', 'mono', change.toolName));
+      item.append(el('span', null, change.summary));
+      list.append(item);
+    }
+    section.append(list);
+    section.append(el('p', 'field-hint', 'Descriptions, schemas and safety annotations are model-facing behavior. Review unexpected changes before relying on this server.'));
   }
-  section.append(list);
-  section.append(el('p', 'field-hint', 'Descriptions, schemas and safety annotations are model-facing behavior. Review unexpected changes before relying on this server.'));
   // Without this the alert has no way to end: it is rewritten only by the next
   // check that finds something *different*, so a change you have read and
   // accepted keeps being reported. Accepting makes this contract the baseline.
-  section.append(
-    busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
+  if (alert || imported.entry) {
+    const review = busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
       className: 'button subtle',
       dataset: { serverId: server.id },
-    }),
-  );
+    });
+    // An imported reference can be reviewed only against a passing check made here,
+    // after it arrived; an unreadable store blocks it outright.
+    if (imported.blocked) {
+      review.disabled = true;
+      review.title = PENDING_REVIEW_HINT;
+    }
+    section.append(review);
+  }
   return section;
 }
 

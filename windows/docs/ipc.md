@@ -81,7 +81,9 @@ surfaces. The reliability additions advertise `doctor`, `activity`,
 `updates`, `provenance`, `agent-import`, `library` and `skills` when those native
 capabilities are available. `updates` is advertised only when the signed update
 pipeline is available; the other flags describe read-only inspection or safe
-authoring surfaces.
+authoring surfaces. `portable-setup` is advertised because the native file choosers
+and masked-input window exist, and enables the Export and Import actions on the
+Profiles screen (§7.13).
 
 `platformDisplayName` is for display only — branching on it is a §3.2 violation.
 
@@ -302,6 +304,14 @@ change summaries. Neither contains environment values or tool-call payloads.
 An authorization wait adds the info finding `needs-authorization` with action
 `runHealthCheck`; it is not classified as a health failure.
 
+`pendingContractImports` is `{ "entries": [{ "serverID", "toolCount", "matching" }],
+"error": null | "…" }` — the contract fingerprints a portable setup brought, which
+are evidence and never a baseline. `matching` is `null` until a check **made on this
+machine, after the import** has passed, and then `true` or `false` for whether it
+agrees with the imported fingerprints; a result cached from before the import never
+counts, and neither does a failed check. `error` is a fixed safe sentence when the
+store cannot be read; the store is not deleted or repaired on the way.
+
 An `unpinned-package` warning — a runner such as `npx`, `uvx` or `pipx run`
 fetching a package with no exact version, however the command is spelled
 (`npx.cmd`, a full path, `cmd /c npx …`) — carries no version. Its action is
@@ -398,6 +408,13 @@ The response is the `servers.unify` shape: `AuthoringResultDTO` plus
 
 Records that a Contract Guard alert has been read, and makes the contract it
 showed the baseline the next change is measured against.
+
+An imported fingerprint for the same server is retired in the same step, and
+only after a check made here after the import has passed. Both stores are read, and
+that requirement is met, before either is written: a pending store that cannot be
+read, or one nothing has been checked against, refuses the acknowledgement with the
+local alert and the baseline exactly as they were (error code `portableSetup`).
+Imported hashes are never copied into the baseline.
 
 This and the first passing check are the only things that move the baseline.
 Every passing check compares against it, so an unreviewed change keeps being
@@ -857,6 +874,73 @@ never supply the URL. If no valid page was captured, the command fails with:
 ```text
 No authorization page is recorded for this server. Check it again to capture one.
 ```
+
+### `setup.export` → `PortableExportDTO`
+
+No payload. Capability `portable-setup`. A native window explains what an export
+holds and offers an unchecked opt-in for reviewed contract fingerprints; a native
+save dialog then chooses the file. The export carries writable, built-in client
+definitions and profiles, with a required input in place of every credential, URL,
+private path and argument Kytto cannot prove public. Installed plugins and
+extension bundles, custom sources and everything else are not copied, and nothing
+is read from the credential store. A destination that is, or aliases, a live client
+configuration or one of Kytto's own stores is refused — a symbolic link, a junction
+or a mount point on the way does not change that.
+
+```json
+{ "cancelled": false, "serverCount": 3, "profileCount": 1, "warnings": [] }
+```
+
+Cancelling either dialog is `{ "cancelled": true, … }` with zero counts, not an
+error. The file is the same format the macOS app writes and reads.
+
+### `setup.previewImport` → `PortableImportPreview | null`
+
+No payload. A native open dialog chooses the file, which is read as untrusted
+input: a size cap, strict JSON, valid UTF-8, no duplicate or unknown keys and every
+value of the declared type. A native window then asks where to import (installed,
+writable, built-in clients only) and for every input the file could not carry —
+masked for secrets, URLs and plain values, with file and folder browsing for paths.
+**None of it crosses this boundary:** not the file's path, not what was typed, not a
+command, argument or URL from the file. A refused input keeps the window open with
+everything as typed; cancelling returns `null`.
+
+```json
+{ "id": "opaque-preview", "serverNames": ["memory"], "profileNames": [],
+  "targetClients": ["cursor"], "pathDisplays": ["%USERPROFILE%\\.cursor\\mcp.json"],
+  "pendingContractCount": 0, "warnings": [], "enabled": false }
+```
+
+The id names a plan Kytto holds natively: the digests of the file, of every config it
+would write or only read, and of Kytto's own stores, plus the typed values. A plan is
+single-use, expires after ten minutes, at most four are retained (a fifth evicts the
+oldest), and changing the client paths or sources invalidates them all. Nothing is
+written. `enabled` is always `false` from the application.
+
+### `setup.applyImport` → `StateDTO`
+
+```json
+{ "previewID": "opaque-preview" }
+```
+
+Commits the plan, once. It checks every digest again and refuses with a message
+rather than merge if anything moved; refuses a name or profile that now exists;
+backs up each existing config; and writes only through the §6 pipeline. Kytto's own
+stores are written first and put back byte for byte if the config transaction
+fails; if anything cannot be put back, the error says which, and is never hidden.
+**Imported servers are always switched off**, in each client's own way — an
+`enabled = false` on a Codex table, a Claude Code deny-list entry, a definition
+Kytto holds for the presence-only clients — and this command has no parameter that
+could say otherwise. Existing parked copies are never replaced. No server is
+launched. Contract fingerprints stay pending (see `pendingContractImports`).
+
+Failures use the code `portableSetup`.
+
+### `setup.discardImport` → `{}`
+
+Same `{ "previewID": … }` payload. Releases the plan and the values it holds when the
+preview is cancelled, including Escape and a click on the backdrop. An id that no
+longer names a plan is not an error.
 
 ### `profiles.list` → `ProfileDTO[]`
 

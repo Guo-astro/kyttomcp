@@ -3,13 +3,17 @@
 
 import { el, button, busyButton, field, input, sheet, formatTokens, clientIcon } from '../dom.js';
 import { contextWindow } from '../state.js';
+import { setupActionButtons } from './portableSetup.js';
 
 export function renderProfiles(state) {
   const panel = el('div', 'profiles-panel');
   panel.dataset.scrollKey = 'profiles';
 
-  const head = el('header', 'panel-head');
-  const copy = el('div');
+  // The header's own children are the copy and ONE group of actions. Export and
+  // Import sit in that group beside New profile — never as a row of their own under
+  // the header, which is what pushed them against the panel's left edge (§7.9).
+  const head = el('header', 'panel-head profiles-heading');
+  const copy = el('div', 'profiles-heading-copy');
   copy.append(el('h2', null, 'Profiles'));
   copy.append(
     el(
@@ -18,7 +22,9 @@ export function renderProfiles(state) {
       'Switch one client to a focused set of MCP servers without editing each configuration by hand.',
     ),
   );
-  head.append(copy, el('span', 'spacer'), button('New profile', 'new-profile', { className: 'button primary' }));
+  const actions = el('div', 'profiles-heading-actions');
+  actions.append(...setupActionButtons(state), button('New profile', 'new-profile', { className: 'button primary' }));
+  head.append(copy, actions);
   panel.append(head);
 
   if (state.profiles.length === 0) {

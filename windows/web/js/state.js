@@ -62,10 +62,14 @@ const state = {
   gatewayRoutes: [],
   doctorReports: [],
   contractAlerts: [],
+  // Imported contract fingerprints awaiting a check made here, and a review (§7.13).
+  pendingContractImports: { entries: [], error: null },
   // Servers whose clients disagree about what they run. One entry per server,
   // and only when there is a disagreement — an empty list is the normal case.
   drift: [],
   activity: null,
+  // Export or import choosing a file in a native dialog; the buttons wait meanwhile.
+  setupBusy: false,
   filter: '',
   // Cells with a write in flight, keyed `serverId::clientId`. A toggle writes to
   // disk, so the cell must not accept a second click until the first lands.

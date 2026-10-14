@@ -523,6 +523,77 @@ async function checkLatestProvenance(serverID) {
   }
 }
 
+// MARK: - Portable setup (§7.13)
+
+// File choosers and every secret, URL and path are native: the page asks for an
+// export or a preview, and learns only counts, names and the opaque id of a plan
+// that native code is holding.
+async function exportSetup() {
+  if (getState().setupBusy) return;
+  setState({ setupBusy: true });
+  try {
+    const result = await invoke('setup.export');
+    if (!result?.cancelled) {
+      const servers = `${result.serverCount} server${result.serverCount === 1 ? '' : 's'}`;
+      const profiles = `${result.profileCount} profile${result.profileCount === 1 ? '' : 's'}`;
+      setState({
+        notice: {
+          kind: result.warnings?.length ? 'warning' : 'info',
+          message: `Exported ${servers} and ${profiles}. ${(result.warnings ?? []).join(' ')}`.trim(),
+        },
+      });
+    }
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ setupBusy: false });
+  }
+}
+
+async function previewSetupImport() {
+  if (getState().setupBusy) return;
+  setState({ setupBusy: true });
+  try {
+    const preview = await invoke('setup.previewImport');
+    // Null is the person cancelling a native dialog, which is not worth a sheet.
+    if (preview?.id) setState({ sheet: { kind: 'portableImport', preview, busy: false, error: null } });
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ setupBusy: false });
+  }
+}
+
+async function applySetupImport() {
+  const current = getState().sheet;
+  if (current?.kind !== 'portableImport' || current.busy) return;
+  const request = beginSheetRequest();
+  try {
+    applyState(await invoke('setup.applyImport', { previewID: current.preview.id }));
+    setState({ sheet: null });
+    await refreshAfterMutation(['Backups', 'Profiles'], {
+      kind: 'info',
+      message: 'Setup imported. New server definitions are disabled; review each server before enabling it.',
+    });
+  } catch (error) {
+    failSheetRequest(request, error);
+  }
+}
+
+/**
+ * Closes the open sheet the way Cancel, Escape and the backdrop all do. An import
+ * preview also releases its native plan — and with it the values typed into the
+ * native dialog — so dismissing it never leaves them waiting to expire.
+ */
+function closeCurrentSheet() {
+  const current = getState().sheet;
+  if (current?.busy) return;
+  setState({ sheet: null });
+  if (current?.kind === 'portableImport') {
+    void invoke('setup.discardImport', { previewID: current.preview.id }).catch(reportFailure);
+  }
+}
+
 // MARK: - Profiles
 
 function openProfileEditor(profile = null) {
@@ -1593,7 +1664,16 @@ root.addEventListener('click', async (event) => {
       // A sheet with a write in flight stays until the reply lands, so its
       // outcome has somewhere to go.
       if (sheet?.busy) break;
-      setState({ sheet: null });
+      closeCurrentSheet();
+      break;
+    case 'export-setup':
+      await exportSetup();
+      break;
+    case 'preview-setup-import':
+      await previewSetupImport();
+      break;
+    case 'apply-setup-import':
+      await applySetupImport();
       break;
 
     case 'check-server':
@@ -1868,7 +1948,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && getState().sheet) {
     event.preventDefault();
     // Same rule as the Close button: not while the sheet is waiting on a write.
-    if (!getState().sheet.busy) setState({ sheet: null });
+    if (!getState().sheet.busy) closeCurrentSheet();
     return;
   }
   if (event.key !== 'Tab' || !getState().sheet) return;
