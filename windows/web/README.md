@@ -35,7 +35,10 @@ npm test
 ```
 
 Runs `js/dev/*.test.js` with Node's built-in test runner; there are no
-dependencies to install.
+dependencies to install. Screens can be rendered under Node against
+`js/dev/fake-dom.js`, a small element tree with no layout — see
+`matrix-detail.test.js`. Layout, appearance and motion are asserted against the
+stylesheet there and looked at in a real browser through `dev.html`.
 
 ## Structure
 
