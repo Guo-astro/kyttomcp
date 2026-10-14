@@ -119,7 +119,7 @@ internal sealed class CommandRouter
     /// </remarks>
     internal async Task EmitAsync<T>(string eventName, T payload)
     {
-        if (_webView?.CoreWebView2 is not { } core) return;
+        if (LiveCore() is not { } core) return;
 
         var json = JsonSerializer.Serialize(payload, Envelope.Json);
         var script = $"window.__kytto && window.__kytto.emit({JsStringLiteral(eventName)}, {json});";
@@ -234,9 +234,29 @@ internal sealed class CommandRouter
             ? tag
             : null;
 
+    /// <summary>The attached page's <c>CoreWebView2</c>, or null when there is nothing to talk to.</summary>
+    /// <remarks>
+    /// After the browser process dies the WPF control's <c>CoreWebView2</c> getter
+    /// itself throws ("no longer valid because the browser process crashed"). A
+    /// watcher event or a late reply arriving then must find a closed door, not an
+    /// exception on the dispatcher (§7.14).
+    /// </remarks>
+    private Microsoft.Web.WebView2.Core.CoreWebView2? LiveCore()
+    {
+        try
+        {
+            return _webView?.CoreWebView2;
+        }
+        catch (Exception error) when (
+            error is InvalidOperationException or ObjectDisposedException or COMException)
+        {
+            return null;
+        }
+    }
+
     private void Reply(int id, string envelope, string? session)
     {
-        if (_webView?.CoreWebView2 is not { } core) return;
+        if (LiveCore() is not { } core) return;
 
         var message = ReplyJson(id, envelope, session);
         try

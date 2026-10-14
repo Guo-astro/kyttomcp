@@ -7,6 +7,7 @@ using System.Windows.Media;
 using Kytto.App.Ipc;
 using Kytto.App.Web;
 using Kytto.Core.Settings;
+using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
 
@@ -35,6 +36,7 @@ public partial class MainWindow : Window
     private TrayController? _tray;
     private WebHost? _host;
     private InterfaceRecovery? _recovery;
+    private bool _webDetached;
 
     /// <summary>
     /// Opens the two fixed report links (§7.14). Settable so a test never starts a
@@ -192,15 +194,45 @@ public partial class MainWindow : Window
     private async Task StartInterfaceAsync()
     {
         var host = new WebHost(_router, SupportLinkLauncher);
-        host.ProcessFailed += kind => _recovery?.ReportProcessFailure(kind);
+        host.ProcessFailed += kind =>
+        {
+            // Once the browser process is gone the control's CoreWebView2 throws on
+            // every access, so nothing native may keep reaching for it: the router
+            // lets go at once, and a rebuild attaches the new control.
+            if (kind is InterfaceFailureKind.BrowserProcessExited or InterfaceFailureKind.OtherFatal)
+            {
+                _router.Detach();
+            }
+            _recovery?.ReportProcessFailure(kind);
+        };
         host.NavigationFinished += outcome => _recovery?.ReportNavigation(outcome);
         _host = host;
+        _webDetached = false;
 
         await host.InitializeAsync(Web);
 
         // A load replaces `documentElement`, and with it the custom properties the
         // window measured into it. They go back on as soon as there is a document.
         Web.CoreWebView2.DOMContentLoaded += (_, _) => PublishWindowMetrics(force: true);
+    }
+
+    /// <summary>
+    /// The page's <c>CoreWebView2</c>, or null when there is none to use — not yet
+    /// created, or no longer valid because its browser process is gone, which the
+    /// control reports by throwing from the getter itself (§7.14).
+    /// </summary>
+    private CoreWebView2? LiveCore()
+    {
+        if (_webDetached) return null;
+        try
+        {
+            return Web.CoreWebView2;
+        }
+        catch (Exception error) when (
+            error is InvalidOperationException or ObjectDisposedException or COMException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -220,6 +252,7 @@ public partial class MainWindow : Window
             _router.Detach();
 
             var stale = Web;
+            // -1 when the stale control already left the layout (see HideWebView).
             var index = Layout.Children.IndexOf(stale);
             Layout.Children.Remove(stale);
             try
@@ -255,9 +288,9 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (Web.CoreWebView2 is not { } core)
+            if (LiveCore() is not { } core)
             {
-                throw new InvalidOperationException("The web view is not initialized.");
+                throw new InvalidOperationException("The web view is not usable.");
             }
             core.Navigate(WebHost.AppEntryUri.AbsoluteUri);
         }
@@ -276,9 +309,27 @@ public partial class MainWindow : Window
 
         // The web view is a child window and paints over anything WPF draws, so the
         // panel only shows once the web view is out of the way.
-        Web.Visibility = Visibility.Hidden;
+        HideWebView();
         Recovery.Visibility = Visibility.Visible;
         if (firstShow) Recovery.FocusReload();
+    }
+
+    private void HideWebView()
+    {
+        try
+        {
+            Web.Visibility = Visibility.Hidden;
+        }
+        catch (Exception error) when (
+            error is InvalidOperationException or ObjectDisposedException or COMException)
+        {
+            // A control whose browser process is gone can refuse even this. It still
+            // must not be left painting over the panel, so it leaves the layout; the
+            // next recovery has to rebuild it, which ReloadInterface insists on.
+            Log.Failure("web view hide", error);
+            Layout.Children.Remove(Web);
+            _webDetached = true;
+        }
     }
 
     private void HideRecoveryPanel()
@@ -539,7 +590,7 @@ public partial class MainWindow : Window
     /// </remarks>
     private void PublishWindowMetrics(bool force = false)
     {
-        if (Web.CoreWebView2 is null) return;
+        if (LiveCore() is not { } core) return;
 
         // Maximised, a Windows window's top edge sits above the work area, so the
         // strip grows by the amount that is off screen or the numbers are clipped.
@@ -553,7 +604,7 @@ public partial class MainWindow : Window
         // is unavailable the chrome stays a flat fill, which is the same thing the
         // browser harness shows.
         var alpha = _micaApplied ? "58%" : "100%";
-        _ = Web.CoreWebView2.ExecuteScriptAsync(
+        _ = core.ExecuteScriptAsync(
             $"""
              document.documentElement.style.setProperty('--titlebar-height', '{metrics.Titlebar}px');
              document.documentElement.style.setProperty('--traffic-light-inset', '{metrics.Buttons}px');
