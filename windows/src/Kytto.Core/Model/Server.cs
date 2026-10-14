@@ -447,26 +447,33 @@ public sealed class Server
     /// looser flags <c>@modelcontextprotocol/server-github</c>, and a warning that
     /// cries wolf on half the matrix is worse than no warning at all.
     /// </para>
+    /// <para>
+    /// Judged on what would run, placeholders resolved: a plugin's
+    /// <c>${CLAUDE_PLUGIN_ROOT}/bin/tool</c> is an absolute path once its root is known,
+    /// and calling it relative because it starts with <c>$</c> would be exactly the
+    /// crying wolf the paragraph above warns about.
+    /// </para>
     /// </remarks>
     public bool HasRelativePath
     {
         get
         {
             if (Transport != Transport.Stdio) return false;
-            if (!string.IsNullOrEmpty(Command) && ContainsSeparator(Command) && !IsAbsolute(Command))
+            var (command, args) = Runnable;
+            if (!string.IsNullOrEmpty(command) && ContainsSeparator(command) && !IsAbsolute(command))
             {
                 return true;
             }
-            return Args.Any(OpensWithRelativePrefix);
+            return args.Any(OpensWithRelativePrefix);
         }
     }
 
     /// <summary>Whether the executable itself, rather than only an argument, is relative.</summary>
     public bool HasRelativeCommand =>
         Transport == Transport.Stdio &&
-        !string.IsNullOrEmpty(Command) &&
-        ContainsSeparator(Command) &&
-        !IsAbsolute(Command);
+        Runnable.Command is { Length: > 0 } command &&
+        ContainsSeparator(command) &&
+        !IsAbsolute(command);
 
     private static bool ContainsSeparator(string text) =>
         text.Contains('/', StringComparison.Ordinal) || text.Contains('\\', StringComparison.Ordinal);

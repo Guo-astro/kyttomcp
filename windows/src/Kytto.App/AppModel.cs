@@ -855,6 +855,7 @@ internal sealed class AppModel : IDisposable
         var source = server.DefinitionsByClient.GetValueOrDefault(sourceClientId)
             ?? throw new InvalidOperationException(
                 $"\"{server.Name}\" is not configured in {sourceClientId.Raw()}.");
+        if (source.IsPlugin) throw AuthoringException.PluginNotEditable(server.Name);
         if (source.IsBundled) throw AuthoringException.NotEditable(server.Name);
         return source;
     }

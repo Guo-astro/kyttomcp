@@ -145,14 +145,29 @@ internal sealed record ServerDto(
     string? Url,
     /// Client id → <c>enabled</c> | <c>disabled</c> | <c>absent</c>.
     IReadOnlyDictionary<string, string> EnabledIn,
+    /// <c>configFile</c> | <c>extension</c> | <c>plugin</c>.
     string OriginKind,
     bool IsBundled,
+    /// Which installation or file produced the definition, for display (§4). No path,
+    /// substitution, working directory or launch variable is part of it.
+    ServerSourceDto Source,
     /// The fact, not the path: the UI needs to know that copying this definition
     /// somewhere else may not start, and does not need to see what it is made of.
     bool HasRelativePath,
     HealthDto? Health,
     TokenWeightDto? TokenWeight,
     ProvenanceDto? Provenance = null);
+
+/// <summary>
+/// <c>kind</c> is <c>config</c> | <c>custom</c> | <c>extension</c> | <c>plugin</c>.
+/// <c>readOnly</c> says Kytto neither edits, copies nor toggles it; a plugin is always
+/// read-only, a Claude Desktop extension is not (its own client still switches it).
+/// </summary>
+internal sealed record ServerSourceDto(
+    string Kind,
+    string DisplayName,
+    string? Version,
+    bool ReadOnly);
 
 internal sealed record ProvenanceDto(
     string SourceKind,

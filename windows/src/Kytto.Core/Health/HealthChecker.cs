@@ -51,7 +51,11 @@ public sealed class HealthChecker(
         {
             return (Failure(HealthFailureReason.NoCommand(), null, started), null);
         }
-        if (server.HasRelativeCommand)
+        // A relative command is only meaningful from the directory its owner runs it
+        // in. When something established one — a plugin root, an absolute `cwd` — it is
+        // resolved there; otherwise Kytto's own directory would answer a different
+        // question than the client's does.
+        if (server.HasRelativeCommand && server.WorkingDirectory is null)
         {
             return (Failure(
                 HealthFailureReason.RelativeCommand(command),
@@ -60,8 +64,10 @@ public sealed class HealthChecker(
                 HealthStatus.Unsupported), null);
         }
 
-        var extra = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var entry in server.Env)
+        // Case-insensitive, like the environment it is merged into: a plugin's
+        // CLAUDE_PLUGIN_ROOT must not sit beside a configured claude_plugin_root.
+        var extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in server.RunnableEnvironment)
         {
             if (entry.Value is { } value) extra.TryAdd(entry.Key, value);
         }
@@ -69,7 +75,7 @@ public sealed class HealthChecker(
         try
         {
             var (listing, stderr) = _client.ListTools(
-                command, arguments, _shell.With(extra), _timeout);
+                command, arguments, _shell.With(extra), _timeout, server.WorkingDirectory);
 
             return (new HealthResult(
                 Status: HealthStatus.Passed,

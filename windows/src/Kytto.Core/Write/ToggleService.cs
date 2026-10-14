@@ -37,6 +37,15 @@ public sealed class ToggleException(string message) : Exception(message)
             "file. Its definition lives in a cache the client rewrites, so Kytto will " +
             "not edit it — turn the plugin off in the client that installed it.");
 
+    /// <summary>
+    /// A plugin's server is not something to copy into another client, which would
+    /// make a definition up out of installed software (§4).
+    /// </summary>
+    public static ToggleException PluginNotPortable(string name) =>
+        new($"\"{name}\" comes from an installed plugin. Plugins are installed software, " +
+            "so Kytto will not copy their servers into another client — install the " +
+            "plugin there instead.");
+
     public static ToggleException NoParkedDefinition(string name) =>
         new($"Kytto has no stored definition for \"{name}\" to put back.");
 }
@@ -75,6 +84,16 @@ public sealed class ToggleService(
 
     public ToggleResult SetEnabled(bool enabled, Server server, ClientId clientId)
     {
+        // Plugins are refused here, not only greyed out in the UI, and per client
+        // rather than per row: a name can be a plugin's in one client and an ordinary
+        // entry in another, and the ordinary one stays controllable. A Claude Desktop
+        // extension is not a plugin and goes on being switched by its own client below.
+        if (server.HoldsPluginCopy(clientId)) throw ToggleException.BundledServerNotToggleable(server.Name);
+        if (server.IsPlugin && server.DefinitionsByClient.GetValueOrDefault(clientId) is not { IsBundled: false })
+        {
+            throw ToggleException.PluginNotPortable(server.Name);
+        }
+
         var descriptor = _descriptors.FirstOrDefault(candidate => candidate.Id == clientId)
             ?? throw ToggleException.NoSourceForClient(clientId);
 
@@ -129,6 +148,7 @@ public sealed class ToggleService(
             // Kytto's own bytes, going back exactly where they came from.
             return new ArrivingDefinition.Verbatim(parked.SourceText);
         }
+        if (server.IsPlugin) throw ToggleException.PluginNotPortable(server.Name);
         if (server.IsBundled)
         {
             // An extension or plugin is installed software, not a definition that

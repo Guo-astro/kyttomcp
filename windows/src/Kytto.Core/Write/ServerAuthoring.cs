@@ -47,6 +47,14 @@ public sealed class AuthoringException(string message) : Exception(message)
         new($"\"{name}\" is a Claude Desktop extension. Extensions are installed " +
             "bundles — change them in Claude Desktop, not here.");
 
+    /// <summary>
+    /// A plugin's server: declared by installed software, read from a package the client
+    /// rewrites, never something Kytto edits, copies or removes (§4).
+    /// </summary>
+    public static AuthoringException PluginNotEditable(string name) =>
+        new($"\"{name}\" comes from an installed plugin. Plugins are installed software — " +
+            "change or remove them in the client that installed them, not here.");
+
     public static AuthoringException ReadOnlySource(string name) =>
         new($"\"{name}\" exists only in a read-only custom source. Kytto never changes that file.");
 
@@ -106,9 +114,14 @@ public sealed class ServerAuthoring(
         Server server,
         IReadOnlyList<Server> existing)
     {
+        if (server.IsPlugin) throw AuthoringException.PluginNotEditable(server.Name);
         if (server.IsBundled) throw AuthoringException.NotEditable(server.Name);
 
         var clients = ClientsHolding(server);
+        if (clients.Count == 0 && server.DefinitionsByClient.Values.Any(copy => copy.IsPlugin))
+        {
+            throw AuthoringException.PluginNotEditable(server.Name);
+        }
         if (clients.Count == 0 && server.DefinitionsByClient.Values.Any(copy => copy.IsReadOnly))
         {
             throw AuthoringException.ReadOnlySource(server.Name);
@@ -191,6 +204,7 @@ public sealed class ServerAuthoring(
 
         foreach (var clientId in clients)
         {
+            if (server.HoldsPluginCopy(clientId)) throw AuthoringException.PluginNotEditable(server.Name);
             if (server.DefinitionsByClient.GetValueOrDefault(clientId)?.IsBundled == true)
             {
                 throw AuthoringException.NotEditable(server.Name);
@@ -275,6 +289,7 @@ public sealed class ServerAuthoring(
         foreach (var clientId in edits.Keys)
         {
             var copy = server.DefinitionsByClient.GetValueOrDefault(clientId);
+            if (server.HoldsPluginCopy(clientId)) throw AuthoringException.PluginNotEditable(server.Name);
             if (copy?.IsBundled == true) throw AuthoringException.NotEditable(server.Name);
             if (copy?.IsReadOnly == true) throw AuthoringException.ReadOnlySource(server.Name);
         }
@@ -357,7 +372,12 @@ public sealed class ServerAuthoring(
 
     public AuthoringResult Delete(Server server)
     {
+        if (server.IsPlugin) throw AuthoringException.PluginNotEditable(server.Name);
         var clients = ClientsHolding(server);
+        if (clients.Count == 0 && server.DefinitionsByClient.Values.Any(copy => copy.IsPlugin))
+        {
+            throw AuthoringException.PluginNotEditable(server.Name);
+        }
         if (clients.Count == 0 && server.DefinitionsByClient.Values.Any(copy => copy.IsReadOnly))
         {
             throw AuthoringException.ReadOnlySource(server.Name);
@@ -387,11 +407,15 @@ public sealed class ServerAuthoring(
         {
             throw AuthoringException.NotFound(server.Name);
         }
+        // This client's own copy, not the row's: a name can be a plugin's here and an
+        // ordinary entry in another client, which is still the user's to remove.
+        if (server.HoldsPluginCopy(clientId)) throw AuthoringException.PluginNotEditable(server.Name);
         return Remove(server, [clientId]);
     }
 
     private AuthoringResult Remove(Server server, IReadOnlyList<ClientId> clients)
     {
+        if (server.IsPlugin) throw AuthoringException.PluginNotEditable(server.Name);
         if (server.IsBundled) throw AuthoringException.NotEditable(server.Name);
         if (clients.Count == 0) throw AuthoringException.NotFound(server.Name);
 
@@ -662,9 +686,16 @@ public sealed class ServerAuthoring(
     private ConfigFormat? FormatOf(ClientId clientId) =>
         _descriptors.FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap?.Format;
 
+    /// <remarks>
+    /// Without the clients whose copy is a plugin's: those are installed software, and
+    /// writing a definition there would shadow the plugin with a config entry the user
+    /// never asked for (§4).
+    /// </remarks>
     private static IReadOnlyList<ClientId> ClientsHolding(Server server) =>
         server.EnabledIn
-            .Where(pair => pair.Value != Enablement.Absent && pair.Key.BuiltIn is not null)
+            .Where(pair => pair.Value != Enablement.Absent
+                && pair.Key.BuiltIn is not null
+                && !server.HoldsPluginCopy(pair.Key))
             .Select(pair => pair.Key.BuiltIn!.Value)
             .OrderBy(client => client.Raw(), StringComparer.Ordinal)
             .ToArray();

@@ -17,6 +17,14 @@ public sealed class ProcessException(HealthFailureReason failure) : Exception(fa
     public static ProcessException SpawnFailed(string command, int code) =>
         new(HealthFailureReason.SpawnFailed(command, code));
 
+    /// <summary>The definition's own working directory is not somewhere Kytto can start it.</summary>
+    public static ProcessException InvalidWorkingDirectory() =>
+        new(HealthFailureReason.InvalidWorkingDirectory());
+
+    /// <summary>An argument cannot reach a batch file exactly as written.</summary>
+    public static ProcessException UnsafeArgument() =>
+        new(HealthFailureReason.UnsafeArgument());
+
     public static ProcessException TimedOut(double seconds) =>
         new(HealthFailureReason.TimedOut(seconds));
 }
@@ -73,12 +81,25 @@ public sealed class ManagedProcess : IDisposable
     /// <summary>Told to the process so a timeout can name the budget it blew.</summary>
     public void SetTimeoutBudget(TimeSpan timeout) => _timeoutSeconds = timeout.TotalSeconds;
 
+    /// <param name="workingDirectory">
+    /// The directory the owning client or plugin registration established for this
+    /// server, or null. Anything given must be an existing absolute directory: a server
+    /// whose directory is missing is not started somewhere else instead, which would
+    /// answer a different question than the client's (§4).
+    /// </param>
     public ManagedProcess(
         string executable,
         IReadOnlyList<string> arguments,
-        IReadOnlyDictionary<string, string> environment)
+        IReadOnlyDictionary<string, string> environment,
+        string? workingDirectory = null)
     {
-        var resolved = ManagedExecutable.Resolve(executable, environment);
+        if (workingDirectory is not null
+            && !(Path.IsPathFullyQualified(workingDirectory) && Directory.Exists(workingDirectory)))
+        {
+            throw ProcessException.InvalidWorkingDirectory();
+        }
+
+        var resolved = ManagedExecutable.Resolve(executable, environment, workingDirectory);
         ResolvedExecutable = resolved.Path;
 
         var start = new ProcessStartInfo
@@ -93,8 +114,8 @@ public sealed class ManagedProcess : IDisposable
         };
 
         start.FileName = resolved.FileName;
-        foreach (var argument in resolved.PrefixArguments) start.ArgumentList.Add(argument);
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        ManagedExecutable.Apply(start, resolved, arguments);
+        if (workingDirectory is not null) start.WorkingDirectory = workingDirectory;
 
         start.Environment.Clear();
         foreach (var (key, value) in environment) start.Environment[key] = value;

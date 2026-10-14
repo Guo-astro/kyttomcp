@@ -71,9 +71,10 @@ public sealed class McpStdioClient
         string command,
         IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string> environment,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        string? workingDirectory = null)
     {
-        using var process = new ManagedProcess(command, arguments, environment);
+        using var process = new ManagedProcess(command, arguments, environment, workingDirectory);
         process.SetTimeoutBudget(timeout);
         var deadline = DateTimeOffset.UtcNow + timeout;
 
