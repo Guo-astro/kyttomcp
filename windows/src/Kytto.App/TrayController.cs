@@ -138,7 +138,13 @@ internal sealed class TrayController : IDisposable
             foreach (var server in servers)
             {
                 var enabled = server.EnabledIn[client.Value] == Enablement.Enabled;
-                var item = new Forms.ToolStripMenuItem(server.Name) { Checked = enabled };
+                // A plugin's server is shown for what is on, but belongs to the client
+                // that installed it (§4); the toggle is refused natively as well.
+                var item = new Forms.ToolStripMenuItem(server.Name)
+                {
+                    Checked = enabled,
+                    Enabled = !server.HoldsPluginCopy(client.Value),
+                };
                 var id = server.Id;
                 item.Click += (_, _) => Toggle(id, client.Value, !enabled);
                 menu.Items.Add(item);

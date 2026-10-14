@@ -215,7 +215,9 @@ public sealed class GatewayMigrationService
     {
         if (!File.Exists(_helperPath)) throw GatewayMigrationException.HelperUnavailable(_helperPath);
         if (server.Transport != Transport.Stdio) throw GatewayMigrationException.UnsupportedTransport();
-        if (server.IsBundled) throw GatewayMigrationException.BundledServer();
+        // Per client as well as per row: a name that is a plugin's in this client is
+        // installed software here whatever it is elsewhere (§4).
+        if (server.IsBundled || server.HoldsPluginCopy(clientId)) throw GatewayMigrationException.BundledServer();
         if (server.EnabledIn.GetValueOrDefault(clientId, Enablement.Absent) != Enablement.Enabled)
         {
             throw GatewayMigrationException.ServerNotEnabled();

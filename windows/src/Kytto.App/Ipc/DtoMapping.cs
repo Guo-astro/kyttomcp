@@ -80,10 +80,19 @@ internal static class DtoMapping
             pair => pair.Value.Raw()),
         OriginKind: server.Origin.Kind,
         IsBundled: server.IsBundled,
+        // Display metadata only. The plugin root, data directory, working directory
+        // and launch variables are native launch context and never cross (§4).
+        Source: server.Origin.Source.ToDto(),
         HasRelativePath: server.HasRelativePath,
         Health: server.Health?.ToDto(),
         TokenWeight: server.TokenWeight?.ToDto(),
         Provenance: server.Provenance.ToDto());
+
+    internal static ServerSourceDto ToDto(this ServerSource source) => new(
+        Kind: source.Kind,
+        DisplayName: source.DisplayName,
+        Version: source.Version,
+        ReadOnly: source.ReadOnly);
 
     internal static ProvenanceDto ToDto(this ServerProvenance provenance) => new(
         SourceKind: provenance.SourceKind,

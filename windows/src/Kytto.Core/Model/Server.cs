@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using Kytto.Core.Clients;
 using Kytto.Core.Health;
 
@@ -74,9 +75,63 @@ public abstract record Origin
 
     public sealed record ClaudeDesktopExtension(string BundleId) : Origin;
 
+    /// <summary>
+    /// A server declared by an installed, registered, enabled client plugin (§4).
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="ClaudeDesktopExtension"/>: an extension stays
+    /// controllable in its owning client, a plugin is read-only everywhere. The owner
+    /// is always the built-in client that registered it — a project scope is still
+    /// Claude Code's plugin — so the write services, which only ever receive a
+    /// <see cref="ClientId"/>, can compare against it directly. Paths and launch
+    /// substitutions deliberately stay out of this value: it is what the web layer is
+    /// told about the source, and it is not allowed to interpret a path.
+    /// </remarks>
+    public sealed record Plugin(
+        ClientId Client,
+        string PluginId,
+        string DisplayName,
+        string? Version) : Origin;
+
     /// <summary>The spelling <c>docs/ipc.md</c> gives this on the wire.</summary>
-    public string Kind => this is ClaudeDesktopExtension ? "extension" : "configFile";
+    public string Kind => this switch
+    {
+        ClaudeDesktopExtension => "extension",
+        Plugin => "plugin",
+        _ => "configFile",
+    };
+
+    /// <summary>Display metadata only: no path, no substitution, no launch context.</summary>
+    public ServerSource Source => this switch
+    {
+        ClaudeDesktopExtension => new ServerSource(
+            ServerSourceKinds.Extension, "Claude Desktop extension", null, ReadOnly: false),
+        Plugin plugin => new ServerSource(
+            ServerSourceKinds.Plugin, plugin.DisplayName, plugin.Version, ReadOnly: true),
+        ConfigFile file when file.Client.BuiltIn is not null => new ServerSource(
+            ServerSourceKinds.Config, "Configuration", null, ReadOnly: false),
+        _ => new ServerSource(
+            ServerSourceKinds.Custom, "Custom source", null, ReadOnly: true),
+    };
 }
+
+public static class ServerSourceKinds
+{
+    public const string Config = "config";
+    public const string Custom = "custom";
+    public const string Extension = "extension";
+    public const string Plugin = "plugin";
+}
+
+/// <summary>
+/// Where a server came from, in terms a person can read (<c>ServerDto.Source</c>).
+/// </summary>
+/// <remarks>
+/// Not <see cref="ServerProvenance"/>: that one says how a package is maintained, this
+/// one says which installation or file produced the definition. <c>ReadOnly</c> is the
+/// fact that Kytto neither edits, copies nor toggles it.
+/// </remarks>
+public sealed record ServerSource(string Kind, string DisplayName, string? Version, bool ReadOnly);
 
 /// <summary>One client's copy of a definition, as that client actually has it.</summary>
 /// <remarks>
@@ -113,6 +168,19 @@ public sealed record ClientDefinition(
     public bool IsReadOnly { get; init; }
 
     /// <summary>
+    /// The native launch context this client's definition needs, kept beside the
+    /// definition so a copy found through one client is never run with the context
+    /// of another. None of it crosses IPC (§4).
+    /// </summary>
+    public string? WorkingDirectory { get; init; }
+
+    public IReadOnlyDictionary<string, string> Placeholders { get; init; } =
+        new Dictionary<string, string>();
+
+    public IReadOnlyDictionary<string, string> LaunchEnvironment { get; init; } =
+        new Dictionary<string, string>();
+
+    /// <summary>
     /// The copy a single client holds, taken from the server as that client's
     /// source produced it — before any merging.
     /// </summary>
@@ -127,7 +195,13 @@ public sealed record ClientDefinition(
         server.DefinitionSource)
     {
         IsReadOnly = server.IsReadOnly,
+        WorkingDirectory = server.WorkingDirectory,
+        Placeholders = server.Placeholders,
+        LaunchEnvironment = server.LaunchEnvironment,
     };
+
+    /// <summary>This copy was declared by an installed plugin, not written by anyone.</summary>
+    public bool IsPlugin => Origin is Origin.Plugin;
 
     public string Fingerprint => Server.MakeFingerprint(Command, Args, Url);
 
@@ -164,8 +238,10 @@ public sealed class Server
     public required string Fingerprint { get; init; }
 
     /// <summary>
-    /// Bundled servers (Claude Desktop extensions) ship their own command and are
-    /// not editable.
+    /// Bundled servers (Claude Desktop extensions, registered plugins) ship their own
+    /// command and are not editable. What each may still do differs: an extension is
+    /// controlled by its owning client, a plugin is not toggled either (see
+    /// <see cref="IsPlugin"/>).
     /// </summary>
     public required bool IsBundled { get; init; }
 
@@ -212,6 +288,37 @@ public sealed class Server
     /// is what is really there.
     /// </remarks>
     public Dictionary<string, string> Placeholders { get; init; } = [];
+
+    /// <summary>
+    /// Absolute directory established by the owning configuration or by a plugin
+    /// registration, or null when nothing established one.
+    /// </summary>
+    /// <remarks>
+    /// Never guessed from Kytto's own launch directory: a definition whose directory
+    /// nothing can name is run, if at all, from wherever the process happens to be, and
+    /// that is exactly the case <see cref="HasRelativeCommand"/> exists to refuse.
+    /// Native only — it never reaches a DTO.
+    /// </remarks>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>
+    /// Path variables the owning client provides to the process, kept apart from the
+    /// raw config's <c>env</c> so what the file says is never rewritten (§4).
+    /// </summary>
+    public Dictionary<string, string> LaunchEnvironment { get; init; } = [];
+
+    /// <summary>This server is declared by an installed plugin and owned by <see cref="Origin.Plugin.Client"/>.</summary>
+    public bool IsPlugin => Origin is Origin.Plugin;
+
+    /// <summary>
+    /// Whether the copy this client holds is a plugin's. A merged row can carry a
+    /// plugin copy in one client and a plain config entry in another, and the write
+    /// services must refuse the first without blocking the second.
+    /// </summary>
+    public bool HoldsPluginCopy(ClientKey client) =>
+        DefinitionsByClient.TryGetValue(client, out var copy)
+            ? copy.IsPlugin
+            : Origin is Origin.Plugin plugin && client == plugin.Client;
 
     /// <summary>The last health check, if one has ever been run (§7.3).</summary>
     /// <remarks>
@@ -268,15 +375,44 @@ public sealed class Server
     public (string? Command, IReadOnlyList<string> Args) Runnable =>
         (Expand(Command), Args.Select(arg => Expand(arg) ?? arg).ToArray());
 
+    /// <summary>
+    /// The environment the process is started with: the definition's own variables
+    /// with their placeholders resolved, then the path variables the owning client
+    /// would add (§4).
+    /// </summary>
+    /// <remarks>
+    /// Windows environment names are case-insensitive, so a launch variable never
+    /// shadows a configured one that differs only in case — the file's spelling wins.
+    /// </remarks>
+    public IReadOnlyList<EnvEntry> RunnableEnvironment
+    {
+        get
+        {
+            var configured = Env.Select(entry => new EnvEntry(entry.Key, Expand(entry.Value))).ToList();
+            var keys = configured.Select(entry => entry.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in LaunchEnvironment.Keys.Order(StringComparer.Ordinal))
+            {
+                if (keys.Contains(key)) continue;
+                configured.Add(new EnvEntry(key, LaunchEnvironment[key]));
+            }
+            return configured;
+        }
+    }
+
+    /// <summary>Resolves the known placeholders in <paramref name="text"/> and nothing else.</summary>
+    internal string ExpandingKnownPlaceholders(string text) => Expand(text) ?? text;
+
+    private static readonly Regex PlaceholderPattern = new(
+        @"\$\{([^{}]+)\}", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private string? Expand(string? text)
     {
         if (text is null || Placeholders.Count == 0) return text;
-        var result = text;
-        foreach (var (token, value) in Placeholders)
-        {
-            result = result.Replace($"${{{token}}}", value, StringComparison.Ordinal);
-        }
-        return result;
+        // One pass over the original text: a substituted value is data, never another
+        // template. That is also what makes the result independent of dictionary
+        // iteration order, which a replace-per-token loop is not (§4).
+        return PlaceholderPattern.Replace(text, match =>
+            Placeholders.TryGetValue(match.Groups[1].Value, out var value) ? value : match.Value);
     }
 
     /// <summary>Single-line command for the matrix subtitle.</summary>
@@ -311,26 +447,33 @@ public sealed class Server
     /// looser flags <c>@modelcontextprotocol/server-github</c>, and a warning that
     /// cries wolf on half the matrix is worse than no warning at all.
     /// </para>
+    /// <para>
+    /// Judged on what would run, placeholders resolved: a plugin's
+    /// <c>${CLAUDE_PLUGIN_ROOT}/bin/tool</c> is an absolute path once its root is known,
+    /// and calling it relative because it starts with <c>$</c> would be exactly the
+    /// crying wolf the paragraph above warns about.
+    /// </para>
     /// </remarks>
     public bool HasRelativePath
     {
         get
         {
             if (Transport != Transport.Stdio) return false;
-            if (!string.IsNullOrEmpty(Command) && ContainsSeparator(Command) && !IsAbsolute(Command))
+            var (command, args) = Runnable;
+            if (!string.IsNullOrEmpty(command) && ContainsSeparator(command) && !IsAbsolute(command))
             {
                 return true;
             }
-            return Args.Any(OpensWithRelativePrefix);
+            return args.Any(OpensWithRelativePrefix);
         }
     }
 
     /// <summary>Whether the executable itself, rather than only an argument, is relative.</summary>
     public bool HasRelativeCommand =>
         Transport == Transport.Stdio &&
-        !string.IsNullOrEmpty(Command) &&
-        ContainsSeparator(Command) &&
-        !IsAbsolute(Command);
+        Runnable.Command is { Length: > 0 } command &&
+        ContainsSeparator(command) &&
+        !IsAbsolute(command);
 
     private static bool ContainsSeparator(string text) =>
         text.Contains('/', StringComparison.Ordinal) || text.Contains('\\', StringComparison.Ordinal);

@@ -126,11 +126,21 @@ public sealed class Discovery
                         foreach (var path in bundles.Directory.ResolveAll(_home)) AddTree(path);
                         foreach (var path in bundles.SettingsDirectory.ResolveAll(_home)) AddTree(path);
                         break;
-                    case ConfigSource.BundledPackages packages:
-                        // The client owns this tree and rewrites it on its own
-                        // schedule; watching the root is enough to notice a plugin
-                        // arriving or leaving.
-                        AddTree(_resolver.Resolve(packages.Root));
+                    case ConfigSource.RegisteredPlugins { Registry: PluginRegistrySource.ClaudeCode claude }:
+                        // Exact files, never the plugin cache: that tree is the
+                        // client's to rewrite and watching it would turn every
+                        // update it makes into a refresh. A new or changed
+                        // installation is a change to the registration.
+                        var installed = claude.Installed.Resolve(_home);
+                        AddFile(installed);
+                        AddFile(claude.Settings.Resolve(_home));
+                        foreach (var path in ClaudePluginFiles(installed)) AddFile(path);
+                        break;
+                    case ConfigSource.RegisteredPlugins { Registry: PluginRegistrySource.Codex codex }:
+                        // The registration is the config already watched above; the
+                        // cache is where a package arrives, so watch it as a tree.
+                        AddFile(_resolver.ResolveServerMap(codex.Config, ClientId.Codex));
+                        AddTree(_resolver.Resolve(codex.Cache));
                         break;
                 }
             }
@@ -193,21 +203,41 @@ public sealed class Discovery
         {
             var configExists = false;
             var countForClient = 0;
-            var projectClients = new List<DiscoveredClient>();
+            // Project scopes, folded across every source that names one: the shared
+            // config's `projects` entry and the plugin registrations can both describe
+            // the same project, and it is one scope with one id (§4).
+            var projectScopes = new Dictionary<ClientKey, (string Path, List<FoundServer> Servers)>();
 
             foreach (var source in descriptor.Sources)
             {
-                var outcome = Read(source, descriptor);
+                var knownProjects = projectScopes
+                    .Select(pair => new ProjectSource(pair.Key, pair.Value.Path, pair.Value.Servers))
+                    .ToArray();
+                var outcome = Read(source, descriptor, knownProjects);
                 diagnostics.AddRange(outcome.Diagnostics);
                 configExists = configExists || outcome.SourceExists;
 
                 foreach (var found in outcome.Servers)
                 {
-                    countForClient++;
                     var key = Server.Identity(found.Name);
 
                     if (merged.TryGetValue(key, out var existing))
                     {
+                        // One cell cannot faithfully describe two competing sources.
+                        // Keep the first (explicit config precedes packages) rather
+                        // than replace runnable evidence with something else that
+                        // happens to share a name.
+                        if (existing.DefinitionsByClient.ContainsKey(descriptor.Id))
+                        {
+                            diagnostics.Add(new Diagnostic(
+                                DiagnosticSeverity.Warning,
+                                descriptor.Id,
+                                descriptor.DisplayName,
+                                $"Multiple sources define \"{found.Name}\" in this client. " +
+                                "Kytto kept the first definition and did not change either source."));
+                            continue;
+                        }
+                        countForClient++;
                         // The disagreement itself is not reported here any more.
                         // Every client's copy is kept, so `ServerDrift` can say which
                         // clients differ and in what — a diagnostic in the footer
@@ -218,6 +248,7 @@ public sealed class Discovery
                     }
                     else
                     {
+                        countForClient++;
                         var server = found.Server;
                         server.EnabledIn[descriptor.Id] = found.Enablement;
                         server.DefinitionsByClient[descriptor.Id] =
@@ -229,49 +260,84 @@ public sealed class Discovery
 
                 foreach (var project in outcome.Projects)
                 {
-                    projectClientIDs.Add(project.ClientID);
+                    if (!projectScopes.TryGetValue(project.ClientID, out var scope))
+                    {
+                        scope = (project.Path, []);
+                        projectScopes[project.ClientID] = scope;
+                    }
                     foreach (var found in project.Servers)
                     {
-                        var key = Server.Identity(found.Name);
-                        if (merged.TryGetValue(key, out var existing))
+                        if (scope.Servers.Any(held =>
+                                Server.Identity(held.Name) == Server.Identity(found.Name)))
                         {
-                            existing.EnabledIn[project.ClientID] = found.Enablement;
-                            existing.DefinitionsByClient[project.ClientID] =
-                                ClientDefinition.From(found.Server);
+                            diagnostics.Add(new Diagnostic(
+                                DiagnosticSeverity.Warning,
+                                project.ClientID,
+                                _resolver.DisplayServerMap(
+                                    descriptor.EditableServerMap?.File ?? descriptor.Sources[0].Path,
+                                    descriptor.Id),
+                                $"Multiple sources define \"{found.Name}\" in Claude Code project " +
+                                $"\"{project.Path}\". Kytto kept the first definition and did not " +
+                                "change either source."));
+                            continue;
                         }
-                        else
-                        {
-                            var server = found.Server;
-                            server.EnabledIn[project.ClientID] = found.Enablement;
-                            server.DefinitionsByClient[project.ClientID] =
-                                ClientDefinition.From(found.Server);
-                            merged[key] = server;
-                            order.Add(key);
-                        }
+                        scope.Servers.Add(found);
                     }
-
-                    projectClients.Add(new DiscoveredClient(
-                        Id: project.ClientID,
-                        DisplayName: project.DisplayName,
-                        IconAsset: descriptor.IconAsset,
-                        IsInstalled: true,
-                        ConfigExists: true,
-                        ConfigPathDisplay: _resolver.DisplayServerMap(
-                            descriptor.EditableServerMap?.File ?? descriptor.Sources[0].Path,
-                            descriptor.Id),
-                        ConfigFormatDisplay: "JSON",
-                        OffSwitchSummary:
-                            "This Claude Code project scope is read-only. Kytto never changes " +
-                            "nested projects entries.",
-                        ServerCount: project.Servers.Count,
-                        SchemaQuirks:
-                            "Read-only workspace scope discovered from the existing " +
-                            "Claude Code projects map. Kytto does not crawl or edit project files.",
-                        IsReadOnly: true,
-                        ConfigurationScope: ConfigurationScope.Workspace,
-                        ScopeLabel: project.Path,
-                        ShortName: project.ShortName));
                 }
+            }
+
+            // Named only now that every source has had its say: a plugin registration
+            // can add a scope the shared config never mentioned, and the smallest
+            // distinguishing suffix has to be worked out over all of them (§4).
+            var projectClients = new List<DiscoveredClient>();
+            var compact = CompactProjectLeaves(projectScopes.Values.Select(scope => scope.Path).ToArray());
+            foreach (var (projectID, scope) in projectScopes
+                         .OrderBy(pair => pair.Value.Path, StringComparer.Ordinal))
+            {
+                projectClientIDs.Add(projectID);
+                foreach (var found in scope.Servers)
+                {
+                    var key = Server.Identity(found.Name);
+                    if (merged.TryGetValue(key, out var existing))
+                    {
+                        existing.EnabledIn[projectID] = found.Enablement;
+                        existing.DefinitionsByClient[projectID] =
+                            ClientDefinition.From(found.Server);
+                    }
+                    else
+                    {
+                        var server = found.Server;
+                        server.EnabledIn[projectID] = found.Enablement;
+                        server.DefinitionsByClient[projectID] =
+                            ClientDefinition.From(found.Server);
+                        merged[key] = server;
+                        order.Add(key);
+                    }
+                }
+
+                var shortName = compact[scope.Path];
+                projectClients.Add(new DiscoveredClient(
+                    Id: projectID,
+                    DisplayName: $"Claude Code · {shortName}",
+                    IconAsset: descriptor.IconAsset,
+                    IsInstalled: true,
+                    ConfigExists: true,
+                    ConfigPathDisplay: _resolver.DisplayServerMap(
+                        descriptor.EditableServerMap?.File ?? descriptor.Sources[0].Path,
+                        descriptor.Id),
+                    ConfigFormatDisplay: "JSON",
+                    OffSwitchSummary:
+                        "This Claude Code project scope is read-only. Kytto never changes " +
+                        "nested projects entries or project plugins.",
+                    ServerCount: scope.Servers.Count,
+                    SchemaQuirks:
+                        "Read-only workspace scope: the project's entry in the existing " +
+                        "Claude Code projects map plus the plugins registered for it. Kytto " +
+                        "does not crawl or edit project files.",
+                    IsReadOnly: true,
+                    ConfigurationScope: ConfigurationScope.Workspace,
+                    ScopeLabel: scope.Path,
+                    ShortName: shortName));
             }
 
             // The map the user can actually author into is what the client screen
@@ -483,11 +549,14 @@ public sealed class Discovery
         public bool SourceExists { get; set; }
     }
 
+    /// <summary>
+    /// One Claude Code project scope: the servers a single source found for it. Two
+    /// sources can describe the same project — its entry in the shared config and its
+    /// plugin registrations — and are folded into one scope before it is named.
+    /// </summary>
     private sealed record ProjectSource(
         ClientKey ClientID,
         string Path,
-        string DisplayName,
-        string ShortName,
         IReadOnlyList<FoundServer> Servers);
 
     /// <summary>
@@ -506,7 +575,10 @@ public sealed class Discovery
         return ClientKey.Custom(new Guid(bytes));
     }
 
-    private SourceOutcome Read(ConfigSource source, ClientDescriptor descriptor) => source switch
+    private SourceOutcome Read(
+        ConfigSource source,
+        ClientDescriptor descriptor,
+        IReadOnlyList<ProjectSource> knownProjects) => source switch
     {
         ConfigSource.ServerMap { Format: ConfigFormat.Json } map =>
             ReadJsonServerMap(map, descriptor),
@@ -514,8 +586,10 @@ public sealed class Discovery
             ReadTomlServerMap(map, descriptor),
         ConfigSource.ExtensionBundles bundles =>
             ReadExtensionBundles(bundles, descriptor),
-        ConfigSource.BundledPackages packages =>
-            ReadBundledPackages(packages, descriptor),
+        ConfigSource.RegisteredPlugins { Registry: PluginRegistrySource.ClaudeCode claude } =>
+            ReadClaudeCodePlugins(claude, descriptor, knownProjects),
+        ConfigSource.RegisteredPlugins { Registry: PluginRegistrySource.Codex codex } =>
+            ReadCodexPlugins(codex, descriptor),
         _ => new SourceOutcome(),
     };
 
@@ -731,25 +805,11 @@ public sealed class Discovery
                 found.Add(new FoundServer(member.Key, server, Enablement.Enabled));
             }
 
-            outcome.Projects.Add(new ProjectSource(
-                projectID,
-                project.Key,
-                "",
-                "",
-                found));
+            outcome.Projects.Add(new ProjectSource(projectID, project.Key, found));
         }
-
-        var compact = CompactProjectLeaves(outcome.Projects.Select(project => project.Path).ToArray());
-        for (var index = 0; index < outcome.Projects.Count; index++)
-        {
-            var project = outcome.Projects[index];
-            var shortName = compact[project.Path];
-            outcome.Projects[index] = project with
-            {
-                ShortName = shortName,
-                DisplayName = $"Claude Code · {shortName}",
-            };
-        }
+        // Naming waits until every source has said which projects it knows: a project
+        // that only a plugin registration names still has to be told apart from the
+        // others by the same smallest-distinguishing-suffix rule (§4).
     }
 
     /// <summary>Smallest distinguishing suffix for each discovered project path.</summary>
@@ -904,106 +964,215 @@ public sealed class Discovery
         return outcome;
     }
 
+    // MARK: - Registered plugins (§4)
+
     /// <summary>
-    /// Servers that arrive inside an installed package rather than being configured
-    /// by anyone — Codex plugins.
+    /// Servers declared by plugins Codex has registered and enabled.
     /// </summary>
     /// <remarks>
-    /// Read-only on purpose. The tree is a cache the client repopulates, so a write
-    /// here would be undone without warning, and the row is marked bundled so the
-    /// matrix refuses to copy it into another client for the same reason Claude
-    /// Desktop extensions are refused.
+    /// Read-only on purpose. The package is in a cache the client repopulates, so a
+    /// write here would be undone without warning, and the row is marked bundled so the
+    /// matrix refuses to copy it into another client for the same reason Claude Desktop
+    /// extensions are refused. What is read is what the registration points at; the
+    /// cache itself is never walked.
     /// </remarks>
-    private SourceOutcome ReadBundledPackages(
-        ConfigSource.BundledPackages packages,
+    private SourceOutcome ReadCodexPlugins(
+        PluginRegistrySource.Codex registry,
         ClientDescriptor descriptor)
     {
         var outcome = new SourceOutcome();
-        var directory = _resolver.Resolve(packages.Root);
-        if (!Directory.Exists(directory)) return outcome;
-        outcome.SourceExists = true;
+        // The config the user may have redirected in Settings: the same file the
+        // server map reads, so a plugin cannot be enabled in one and found in another.
+        var configPath = _resolver.ResolveServerMap(registry.Config, ClientId.Codex);
+        outcome.SourceExists = File.Exists(configPath);
 
-        foreach (var manifestPath in BundledManifestPaths(directory, packages.ManifestName))
+        var text = PluginTextReader();
+        var installations = PluginInstallations.ReadCodex(
+            configPath, _resolver.Resolve(registry.Cache), text);
+        var warn = PluginWarnings(registry, descriptor, outcome);
+        foreach (var message in installations.Warnings) warn(message);
+
+        var reader = new PluginServerReader(_home, text, warn);
+        foreach (var installation in installations.Packages)
         {
-            if (ReadTracked(manifestPath) is not { } text) continue;
-
-            JsonDocument document;
-            try
+            foreach (var server in reader.Read(installation))
             {
-                document = JsonDocument.Parse(text);
-            }
-            catch (JsonParseException)
-            {
-                continue;
-            }
-
-            if (document.Root[packages.ServersKey]?.Members is not { } members) continue;
-
-            foreach (var member in members)
-            {
-                if (member.Value.Members is null) continue;
-                var server = ServerFields.FromJson(member.Value).MakeServer(
-                    name: member.Key,
-                    origin: new Origin.ConfigFile(descriptor.Id),
-                    isBundled: true,
-                    sourceText: document.Slice(member.Value.Span));
-                outcome.Servers.Add(new FoundServer(member.Key, server, Enablement.Enabled));
+                outcome.Servers.Add(new FoundServer(server.Name, server, Enablement.Enabled));
             }
         }
-
         return outcome;
     }
 
     /// <summary>
-    /// Finds package manifests without walking through the payload of a package
-    /// after its manifest has been found.
+    /// Servers declared by plugins Claude Code has registered and switched on, for the
+    /// global scope and for every project scope a registration or the shared config
+    /// names.
     /// </summary>
     /// <remarks>
-    /// Codex plugin caches can contain entire runtimes and <c>node_modules</c>
-    /// trees; inspecting all of those files made every otherwise-small discovery
-    /// pass proportional to the cache's byte size. Hidden entries are not skipped:
-    /// the manifest this looks for is called <c>.mcp.json</c>, so skipping them
-    /// would skip the whole point.
+    /// <para>
+    /// User-scope registrations belong to the global scope and are also in effect in
+    /// each project, where that project's settings may switch them off; project- and
+    /// local-scope registrations belong only to their project. A project is never
+    /// found by looking at the disk — it is there because <c>.claude.json</c> says it
+    /// has servers or because a registration names it.
+    /// </para>
+    /// <para>
+    /// Not inferred: session-only, synced and managed activation, because nothing on
+    /// disk says what the client will load there (<c>docs/design.md</c>, registered
+    /// plugins).
+    /// </para>
     /// </remarks>
-    internal static IReadOnlyList<string> BundledManifestPaths(string root, string manifestName)
+    private SourceOutcome ReadClaudeCodePlugins(
+        PluginRegistrySource.ClaudeCode registry,
+        ClientDescriptor descriptor,
+        IReadOnlyList<ProjectSource> knownProjects)
     {
-        var pending = new Stack<string>([root]);
-        var manifests = new List<string>();
+        var outcome = new SourceOutcome();
+        var installedPath = registry.Installed.Resolve(_home);
+        var settingsPath = registry.Settings.Resolve(_home);
+        outcome.SourceExists = File.Exists(installedPath);
 
-        while (pending.TryPop(out var directory))
+        var text = PluginTextReader();
+        var warn = PluginWarnings(registry, descriptor, outcome);
+        var warnings = new List<string>();
+        var plugins = PluginInstallations.LoadClaudeRegistry(installedPath, text, warnings);
+        foreach (var message in warnings) warn(message);
+        if (plugins is null) return outcome;
+
+        var reader = new PluginServerReader(_home, text, warn);
+        IReadOnlyList<FoundServer> ServersFor(string? projectPath)
         {
-            var manifest = Path.Combine(directory, manifestName);
-            if (File.Exists(manifest))
-            {
-                manifests.Add(manifest);
-                // A manifest marks the root of one installed package. Anything below
-                // it is that package's implementation, not another package Kytto
-                // should recursively inspect.
-                continue;
-            }
-
-            try
-            {
-                foreach (var entry in Directory.EnumerateDirectories(directory))
-                {
-                    // A reparse point can point back up its own tree, and following
-                    // one turns this walk into a loop.
-                    var attributes = File.GetAttributes(entry);
-                    if (attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
-                    pending.Push(entry);
-                }
-            }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-            {
-                // An unreadable directory is not evidence of anything; the rest of
-                // the cache is still worth reading.
-            }
+            var result = PluginInstallations.ReadClaudeCode(plugins, settingsPath, projectPath, text);
+            foreach (var message in result.Warnings) warn(message);
+            return result.Packages
+                .SelectMany(reader.Read)
+                .Select(server => new FoundServer(server.Name, server, Enablement.Enabled))
+                .ToArray();
         }
 
-        // Sorted, so the matrix does not reorder itself between launches on the
-        // strength of directory enumeration order.
-        manifests.Sort(StringComparer.Ordinal);
-        return manifests;
+        outcome.Servers.AddRange(ServersFor(null));
+
+        // Explicit registrations only. A project that `.claude.json` already scopes
+        // keeps the id it has; one that only a plugin names gets the id its exact
+        // path derives, like any other (§4).
+        var byProject = new Dictionary<string, (ClientKey Id, string Path)>(StringComparer.Ordinal);
+        foreach (var known in knownProjects.OrderBy(project => project.Path, StringComparer.Ordinal))
+        {
+            byProject.TryAdd(PluginInstallations.ProjectKey(known.Path), (known.ClientID, known.Path));
+        }
+        foreach (var registered in plugins.ProjectPaths)
+        {
+            byProject.TryAdd(
+                PluginInstallations.ProjectKey(registered),
+                (ProjectClientID(registered), registered));
+        }
+        foreach (var (id, path) in byProject.Values.OrderBy(project => project.Path, StringComparer.Ordinal))
+        {
+            // Settings are read from `<project>\.claude`, which only means something
+            // for a path that names one place. `/work/demo` is a project key written
+            // on another system; evaluating plugins against the current drive would
+            // be a guess.
+            if (!PluginInstallations.IsAbsoluteWindowsPath(path)) continue;
+            var servers = ServersFor(path);
+            if (servers.Count > 0) outcome.Projects.Add(new ProjectSource(id, path, servers));
+        }
+        return outcome;
+    }
+
+    /// <summary>
+    /// Reads the files plugin discovery needs, once each per pass, and no more than a
+    /// config can reasonably be.
+    /// </summary>
+    private Func<string, string?> PluginTextReader()
+    {
+        var cache = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        return path =>
+        {
+            if (cache.TryGetValue(path, out var known)) return known;
+            string? result = null;
+            try
+            {
+                var info = new FileInfo(path);
+                // Over the cap is not a plugin file: skipped, and not recorded, so a
+                // settings file that happens to be large still has the digest the
+                // deny-list read gave it.
+                if (!info.Exists || info.Length <= PluginInstallations.MaxFileBytes)
+                {
+                    result = ReadTracked(path);
+                }
+            }
+            catch (Exception error) when (
+                error is IOException or UnauthorizedAccessException or ArgumentException
+                    or NotSupportedException)
+            {
+                // Absent or unreadable: nothing is registered there.
+            }
+            cache[path] = result;
+            return result;
+        };
+    }
+
+    /// <summary>One diagnostic per distinct message, however many scopes raise it.</summary>
+    private static Action<string> PluginWarnings(
+        PluginRegistrySource registry,
+        ClientDescriptor descriptor,
+        SourceOutcome outcome)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        return message =>
+        {
+            if (!seen.Add(message)) return;
+            outcome.Diagnostics.Add(new Diagnostic(
+                DiagnosticSeverity.Warning,
+                descriptor.Id,
+                registry.RegistrationFile.DisplayString(),
+                message));
+        };
+    }
+
+    /// <summary>
+    /// The exact files a registered Claude Code installation can change what is shown
+    /// from, for the watcher.
+    /// </summary>
+    /// <remarks>
+    /// Read without recording a digest: this is only a list of paths to watch, and the
+    /// discovery pass itself is what the write guard compares against.
+    /// </remarks>
+    private IEnumerable<string> ClaudePluginFiles(string installedPath)
+    {
+        var files = new List<string>();
+        try
+        {
+            var info = new FileInfo(installedPath);
+            if (!info.Exists || info.Length > PluginInstallations.MaxFileBytes) return files;
+            var registry = JsonDocument.Parse(File.ReadAllText(installedPath));
+            foreach (var plugin in registry.Root["plugins"]?.Members ?? [])
+            {
+                foreach (var entry in plugin.Value.Elements ?? [])
+                {
+                    if (entry["installPath"]?.StringValue is { } root
+                        && PluginInstallations.IsAbsoluteWindowsPath(root))
+                    {
+                        files.Add(Path.Combine(root, ".mcp.json"));
+                        files.Add(Path.Combine(root, ".claude-plugin", "plugin.json"));
+                    }
+                    if (entry["scope"]?.StringValue is "project" or "local"
+                        && entry["projectPath"]?.StringValue is { } project
+                        && PluginInstallations.IsAbsoluteWindowsPath(project))
+                    {
+                        files.Add(Path.Combine(project, ".claude", "settings.json"));
+                        files.Add(Path.Combine(project, ".claude", "settings.local.json"));
+                    }
+                }
+            }
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonParseException
+                or ArgumentException or NotSupportedException)
+        {
+            // Nothing readable, nothing extra to watch; the registration file itself is.
+        }
+        return files;
     }
 
     /// <summary>Names switched off in a separate settings file, normalized for comparison.</summary>

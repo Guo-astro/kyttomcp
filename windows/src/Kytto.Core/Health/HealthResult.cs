@@ -108,6 +108,11 @@ public sealed record HealthFailureReason(string Reason)
     public static HealthFailureReason SpawnFailed(string command, int code) =>
         new("spawnFailed") { Command = command, Code = code };
 
+    /// <summary>No path is stored: the directory is native context, not something to persist or show.</summary>
+    public static HealthFailureReason InvalidWorkingDirectory() => new("invalidWorkingDirectory");
+
+    public static HealthFailureReason UnsafeArgument() => new("unsafeArgument");
+
     public static HealthFailureReason InputClosed() => new("inputClosed");
 
     public static HealthFailureReason TimedOut(double seconds) =>
@@ -143,6 +148,13 @@ public sealed record HealthFailureReason(string Reason)
         "executableMissing" => $"{Command} was not found at {ResolvedPath}.",
         "notExecutable" => $"Kytto could not start {Path}; Windows did not accept it as an executable.",
         "spawnFailed" => $"Could not start {Command} (error {Code}).",
+        "invalidWorkingDirectory" =>
+            "The server's configured working directory is missing or is not an absolute " +
+            "directory. Kytto did not start it.",
+        "unsafeArgument" =>
+            "An argument contains a double quote, a percent sign or a line break, which " +
+            "cannot be passed through a Windows batch file exactly as written. Kytto did " +
+            "not start it with a different argument.",
         "inputClosed" =>
             "The server closed its input before Kytto could finish talking to it.",
         "timedOut" => TimeoutMessage(Seconds ?? 0),

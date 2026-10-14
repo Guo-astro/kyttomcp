@@ -62,15 +62,95 @@ public class WireFormatTests
             EnabledIn: new Dictionary<string, string> { ["cursor"] = "enabled" },
             OriginKind: "configFile",
             IsBundled: false,
+            Source: new ServerSourceDto("config", "Configuration", null, ReadOnly: false),
             HasRelativePath: false,
             Health: null,
             TokenWeight: null));
 
         Assert.Equal(
             ["id", "name", "transport", "commandSummary", "command", "args", "env",
-             "url", "enabledIn", "originKind", "isBundled", "hasRelativePath",
+             "url", "enabledIn", "originKind", "isBundled", "source", "hasRelativePath",
              "health", "tokenWeight", "provenance"],
             KeysOf(encoded));
+        Assert.Equal(
+            ["kind", "displayName", "version", "readOnly"],
+            KeysOf(encoded.GetProperty("source")));
+    }
+
+    /// <summary>
+    /// A plugin is told apart from a plain config entry and from a Claude Desktop
+    /// extension by exactly these spellings (docs/ipc.md), and nothing that locates or
+    /// launches it — root, data directory, working directory, launch variables — is on
+    /// the wire.
+    /// </summary>
+    [Theory]
+    [InlineData("plugin", "plugin", true, "Demo tools", "2.0", true)]
+    [InlineData("extension", "extension", true, "Claude Desktop extension", null, false)]
+    [InlineData("configFile", "config", false, "Configuration", null, false)]
+    [InlineData("configFile", "custom", false, "Custom source", null, true)]
+    public void EverySourceKindKeepsItsExactSpelling(
+        string originKind, string kind, bool isBundled, string displayName, string? version, bool readOnly)
+    {
+        Core.Model.Origin origin = kind switch
+        {
+            "plugin" => new Core.Model.Origin.Plugin(
+                Core.Clients.ClientId.ClaudeCode, "demo@example", "Demo tools", "2.0"),
+            "extension" => new Core.Model.Origin.ClaudeDesktopExtension("ant.dir.test"),
+            "config" => new Core.Model.Origin.ConfigFile(Core.Clients.ClientId.Cursor),
+            _ => new Core.Model.Origin.ConfigFile(
+                Core.Clients.ClientKey.Custom(Guid.Parse("11111111-2222-3333-4444-555555555555"))),
+        };
+        var server = new Core.Model.Server
+        {
+            Id = "demo", Name = "demo", Transport = Core.Model.Transport.Stdio,
+            Command = "node", Args = [], Env = [], Url = null, EnabledIn = [],
+            Origin = origin, Fingerprint = "0", IsBundled = isBundled, DefinitionSource = "",
+        };
+
+        var encoded = Encode(server.ToDto());
+
+        Assert.Equal(originKind, encoded.GetProperty("originKind").GetString());
+        Assert.Equal(isBundled, encoded.GetProperty("isBundled").GetBoolean());
+        var source = encoded.GetProperty("source");
+        Assert.Equal(["kind", "displayName", "version", "readOnly"], KeysOf(source));
+        Assert.Equal(kind, source.GetProperty("kind").GetString());
+        Assert.Equal(displayName, source.GetProperty("displayName").GetString());
+        Assert.Equal(version, source.GetProperty("version").GetString());
+        Assert.Equal(readOnly, source.GetProperty("readOnly").GetBoolean());
+    }
+
+    /// <summary>
+    /// The launch context is native (§4): nothing a plugin's root, data directory,
+    /// working directory or launch variables contain may appear anywhere in the
+    /// encoded server.
+    /// </summary>
+    [Fact]
+    public void ALaunchContextNeverReachesTheWire()
+    {
+        const string Root = @"C:\Users\example\.claude\plugins\cache\example\demo\2";
+        var server = new Core.Model.Server
+        {
+            Id = "plugin:demo:inspector", Name = "plugin:demo:inspector",
+            Transport = Core.Model.Transport.Stdio,
+            Command = "${CLAUDE_PLUGIN_ROOT}/bin/inspect", Args = ["${CLAUDE_PLUGIN_ROOT}/config.json"],
+            Env = [new Core.Model.EnvEntry("ROOT", "${CLAUDE_PLUGIN_ROOT}")], Url = null, EnabledIn = [],
+            Origin = new Core.Model.Origin.Plugin(
+                Core.Clients.ClientId.ClaudeCode, "demo@example", "Demo tools", "2"),
+            Fingerprint = "0", IsBundled = true, DefinitionSource = "{}",
+            Placeholders = { ["CLAUDE_PLUGIN_ROOT"] = Root },
+            LaunchEnvironment = { ["CLAUDE_PLUGIN_ROOT"] = Root, ["CLAUDE_PLUGIN_DATA"] = Root + "-data" },
+            WorkingDirectory = Root,
+        };
+
+        var text = Encode(server.ToDto()).GetRawText();
+
+        Assert.DoesNotContain("example\\\\.claude", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("-data", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("workingDirectory", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("launchEnvironment", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("placeholders", text, StringComparison.OrdinalIgnoreCase);
+        // What the plugin wrote is shown as written, unexpanded.
+        Assert.Contains("${CLAUDE_PLUGIN_ROOT}/bin/inspect", text, StringComparison.Ordinal);
     }
 
     /// <summary>

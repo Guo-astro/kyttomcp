@@ -31,6 +31,15 @@ public sealed class ServerFields
     public IReadOnlyList<string> Args { get; init; } = [];
     public IReadOnlyList<EnvEntry> Env { get; init; } = [];
 
+    /// <summary><c>cwd</c> exactly as the definition spells it, if it does.</summary>
+    /// <remarks>
+    /// Raw on purpose. Whether a relative or placeholder-bearing directory can be
+    /// resolved depends on a context only the owning client — or a registered plugin
+    /// root — supplies, so only an absolute one becomes a <see cref="Server"/> property
+    /// here and the rest is left to the code that has that context (§4).
+    /// </remarks>
+    public string? WorkingDirectory { get; init; }
+
     /// <param name="sourceText">
     /// The definition exactly as it appears in the file it came from, which is what
     /// gets parked and what gets copied verbatim into another client of the same
@@ -58,7 +67,33 @@ public sealed class ServerFields
         DefinitionSource = sourceText,
         Provenance = ServerProvenance.Infer(
             ResolveTransport(), Command, Args, Url),
+        // A relative cwd needs client context, and an ordinary config cannot supply
+        // one. Plugin discovery resolves it from its registered root instead.
+        WorkingDirectory = AbsoluteDirectory(WorkingDirectory),
     };
+
+    /// <summary>
+    /// A drive-letter or UNC directory, normalised lexically; anything else is null.
+    /// </summary>
+    /// <remarks>
+    /// <c>/work/demo</c> and <c>\work</c> are rooted but not absolute on Windows — they
+    /// mean "on the current drive", which is Kytto's, not the client's — so they are
+    /// refused here rather than resolved against the wrong place.
+    /// </remarks>
+    internal static string? AbsoluteDirectory(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Contains('\0')) return null;
+        if (!Path.IsPathFullyQualified(value)) return null;
+        try
+        {
+            return Path.TrimEndingDirectorySeparator(Path.GetFullPath(value));
+        }
+        catch (Exception error) when (
+            error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// <c>type</c> when the client states it, otherwise inferred. Clients disagree
@@ -81,6 +116,7 @@ public sealed class ServerFields
         Command = node["command"]?.StringValue,
         Url = node["url"]?.StringValue,
         DeclaredType = node["type"]?.StringValue,
+        WorkingDirectory = node["cwd"]?.StringValue,
         Args = node["args"]?.Elements?
             .Select(element => element.StringValue)
             .OfType<string>()
@@ -120,6 +156,7 @@ public sealed class ServerFields
             Command = table.Value("command")?.StringValue,
             Url = table.Value("url")?.StringValue,
             DeclaredType = table.Value("type")?.StringValue,
+            WorkingDirectory = table.Value("cwd")?.StringValue,
             Args = table.Value("args")?.Elements?
                 .Select(element => element.StringValue)
                 .OfType<string>()
