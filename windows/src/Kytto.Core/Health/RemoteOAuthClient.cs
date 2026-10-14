@@ -509,14 +509,25 @@ public sealed class RemoteOAuthClient
 
     private Uri ValidEndpoint(string text)
     {
+        Uri uri;
         try
         {
-            return RemoteHttpEndpoint.Validate(text, allowLoopbackHttp: _allowLoopbackHttp);
+            uri = RemoteHttpEndpoint.Validate(text, allowLoopbackHttp: _allowLoopbackHttp);
         }
         catch (RemoteHttpException failure)
         {
             throw new RemoteOAuthException(RemoteOAuthError.Discovery, failure);
         }
+
+        // The resource is the user's own address, and may be on their network. An
+        // issuer, an endpoint or a registration address is a server's word, and must
+        // not aim Kytto at this machine or at a private address: that is how a metadata
+        // document would turn a sign-in into a request to something internal.
+        if (!_allowLoopbackHttp && RemoteHttpEndpoint.IsLocalOrPrivateLiteral(uri.Host))
+        {
+            throw new RemoteOAuthException(RemoteOAuthError.Discovery);
+        }
+        return uri;
     }
 
     private static bool SafeCanonical(string text, string expected)

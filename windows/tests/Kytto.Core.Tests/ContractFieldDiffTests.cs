@@ -365,6 +365,34 @@ public class ContractFieldDiffTests
     }
 
     [Fact]
+    public void ManyChangedToolsCannotGrowTheStoredDetailsWithoutBound()
+    {
+        // A server that lists thousands of tools and changes all of them must not be able
+        // to turn that into megabytes of excerpts in the metadata file and every state update.
+        var filler = new string('x', 700);
+        string Schema(string value) =>
+            "{\"properties\":{" + string.Join(",", Enumerable.Range(0, 30).Select(i => $"\"p{i:D2}\":{{\"description\":\"{filler}{value}{i}\"}}")) + "}}";
+        var before = Enumerable.Range(0, 300).Select(i => new ToolSummary($"t{i:D3}", null, Schema("a"))).ToArray();
+        var after = Enumerable.Range(0, 300).Select(i => new ToolSummary($"t{i:D3}", null, Schema("b"))).ToArray();
+
+        var changes = ContractGuard.Changes(before, after);
+
+        // Every change is still reported, with its kind and its summary...
+        Assert.Equal(300, changes.Count);
+        Assert.All(changes, change => Assert.Equal(ContractChangeKind.InputSchemaChanged, change.Kind));
+        Assert.All(changes, change => Assert.NotEmpty(change.Details!));
+        // ...but the details held in all are bounded.
+        var fields = changes.SelectMany(change => change.Details!).ToArray();
+        Assert.True(fields.Length <= 400 + changes.Count);
+        Assert.True(
+            fields.Sum(field => (field.Before?.Length ?? 0) + (field.After?.Length ?? 0)) < 400_000,
+            "the excerpts held in all must stay bounded");
+        var omitted = changes.Last().Details!;
+        Assert.Contains("Too many changes", Assert.Single(omitted).Explanation, StringComparison.Ordinal);
+        Assert.True(changes.First().Details!.Count > 1);
+    }
+
+    [Fact]
     public void ToolsAddedAndRemovedCarryNoFieldDetails()
     {
         var changes = ContractGuard.Changes([new ToolSummary("old", null)], [new ToolSummary("new", null)]);

@@ -49,6 +49,7 @@ public static class ContractGuard
         var beforeNames = before.Keys.ToHashSet(StringComparer.Ordinal);
         var afterNames = after.Keys.ToHashSet(StringComparer.Ordinal);
         var changes = new List<ContractChange>();
+        var budget = new DetailBudget();
 
         foreach (var name in beforeNames.Except(afterNames).Order(StringComparer.Ordinal))
         {
@@ -77,7 +78,7 @@ public static class ContractGuard
                     ContractChangeSeverity.Warning,
                     name,
                     "Model-facing description changed",
-                    ContractFieldDiff.DescriptionDetails(left.Description, right.Description)));
+                    budget.Admit("description", ContractFieldDiff.DescriptionDetails(left.Description, right.Description))));
             }
             if (!SameSchema(left.InputSchemaJSON, right.InputSchemaJSON))
             {
@@ -86,7 +87,7 @@ public static class ContractGuard
                     ContractChangeSeverity.Breaking,
                     name,
                     "Input schema changed — review compatibility and safeguards",
-                    ContractFieldDiff.SchemaDetails(left.InputSchemaJSON, right.InputSchemaJSON)));
+                    budget.Admit("inputSchema", ContractFieldDiff.SchemaDetails(left.InputSchemaJSON, right.InputSchemaJSON))));
             }
             if (left.Annotations != right.Annotations)
             {
@@ -95,10 +96,46 @@ public static class ContractGuard
                     ContractChangeSeverity.Warning,
                     name,
                     "Safety annotations changed",
-                    ContractFieldDiff.AnnotationDetails(left.Annotations, right.Annotations)));
+                    budget.Admit("annotations", ContractFieldDiff.AnnotationDetails(left.Annotations, right.Annotations))));
             }
         }
         return changes;
+    }
+
+    /// <summary>How much field-level detail one comparison may hold in all (§7.10).</summary>
+    /// <remarks>
+    /// Each change is bounded on its own, but a server that lists ten thousand tools and
+    /// changes every one of them would still turn that into hundreds of megabytes in the
+    /// metadata file and in every state update. Past this budget a change keeps its kind,
+    /// its severity and its summary, and its details are one honest line saying they
+    /// were not kept.
+    /// </remarks>
+    private sealed class DetailBudget
+    {
+        private const int MaxFields = 400;
+        private const int MaxCharacters = 300_000;
+        private int _fields;
+        private long _characters;
+
+        internal IReadOnlyList<ContractFieldChange> Admit(string path, IReadOnlyList<ContractFieldChange> details)
+        {
+            var size = details.Sum(field =>
+                field.Path.Length + (field.Before?.Length ?? 0) + (field.After?.Length ?? 0) + (field.Explanation?.Length ?? 0));
+            if (_fields + details.Count > MaxFields || _characters + size > MaxCharacters)
+            {
+                return
+                [
+                    new ContractFieldChange(
+                        path,
+                        null,
+                        null,
+                        "Too many changes to show field by field. Inspect this tool in the server's tool list."),
+                ];
+            }
+            _fields += details.Count;
+            _characters += size;
+            return details;
+        }
     }
 
     /// <remarks>

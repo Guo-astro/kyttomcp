@@ -51,5 +51,38 @@ public static class RemoteHttpEndpoint
         return IPAddress.TryParse(bare, out var address) && IPAddress.IsLoopback(address);
     }
 
+    /// <summary>
+    /// Whether a host is spelled as this machine or a non-public address: <c>localhost</c>,
+    /// or a literal loopback, private, link-local, unique-local or unspecified IP.
+    /// </summary>
+    /// <remarks>
+    /// Spelling only, like <see cref="IsLoopbackHost"/>: a name that merely resolves
+    /// somewhere private is not caught here, and nothing here asks a resolver.
+    /// </remarks>
+    internal static bool IsLocalOrPrivateLiteral(string host)
+    {
+        var bare = host.Trim('[', ']');
+        if (bare.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            bare.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        if (!IPAddress.TryParse(bare, out var address)) return false;
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) return true;
+
+        var bytes = address.GetAddressBytes();
+        if (bytes.Length == 4)
+        {
+            return bytes[0] is 10 or 0 or >= 224 ||
+                   (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) ||
+                   (bytes[0] == 192 && bytes[1] == 168) ||
+                   (bytes[0] == 169 && bytes[1] == 254) ||
+                   (bytes[0] == 100 && bytes[1] is >= 64 and <= 127);
+        }
+        return address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6Multicast ||
+               (bytes[0] & 0xFE) == 0xFC;
+    }
+
     private static RemoteHttpException Invalid() => new(RemoteHttpFailure.InvalidEndpoint);
 }

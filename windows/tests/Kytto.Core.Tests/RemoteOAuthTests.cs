@@ -153,6 +153,17 @@ public class RemoteOAuthTests
     [InlineData("http://127.0.0.1:9/")]
     [InlineData("https://auth.example/?x=1")]
     [InlineData("https://user:pw@auth.example")]
+    // A server's word must not aim Kytto at this machine or a private address.
+    [InlineData("https://127.0.0.1")]
+    [InlineData("https://localhost")]
+    [InlineData("https://app.localhost")]
+    [InlineData("https://[::1]")]
+    [InlineData("https://10.0.0.5")]
+    [InlineData("https://172.20.1.1")]
+    [InlineData("https://192.168.1.1")]
+    [InlineData("https://169.254.169.254")]
+    [InlineData("https://[fe80::1]")]
+    [InlineData("https://[fd00::1]")]
     public async Task AnUnsafeIssuerIsRefusedBeforeItIsContacted(string issuer)
     {
         var metadata = ResourceMetadata.Replace("https://auth.example/tenant", issuer, StringComparison.Ordinal);
@@ -161,6 +172,32 @@ public class RemoteOAuthTests
             new RemoteOAuthClient(transport).DiscoverAsync(Resource, "Bearer resource_metadata=\"https://mcp.example/meta\""));
         Assert.Equal(RemoteOAuthError.Discovery, failure.Error);
         Assert.Single(transport.Requests);
+    }
+
+    [Theory]
+    [InlineData("authorization_endpoint")]
+    [InlineData("token_endpoint")]
+    [InlineData("registration_endpoint")]
+    public async Task AnEndpointAimedAtAPrivateAddressIsRefused(string field)
+    {
+        var metadata = ServerMetadata.Replace(
+            "\"code_challenge_methods_supported\"",
+            $"\"{field}\":\"https://10.1.2.3/x\",\"code_challenge_methods_supported\"",
+            StringComparison.Ordinal);
+        var failure = await Assert.ThrowsAsync<RemoteOAuthException>(() =>
+            new RemoteOAuthClient(new ScriptedTransport(Reply(ResourceMetadata), Reply(metadata)))
+                .DiscoverAsync(Resource, "Bearer resource_metadata=\"https://mcp.example/meta\""));
+        Assert.Equal(RemoteOAuthError.Discovery, failure.Error);
+    }
+
+    [Fact]
+    public async Task TheResourceItselfMayLiveOnThePrivateNetwork()
+    {
+        // The resource is the user's own address; only a server's word is held to the rule.
+        var metadata = ResourceMetadata.Replace("https://mcp.example/mcp", "https://10.0.0.8/mcp", StringComparison.Ordinal);
+        var config = await new RemoteOAuthClient(new ScriptedTransport(Reply(metadata), Reply(ServerMetadata)))
+            .DiscoverAsync("https://10.0.0.8/mcp", "Bearer resource_metadata=\"https://10.0.0.8/meta\"");
+        Assert.Equal("https://10.0.0.8/mcp", config.ResourceUrl);
     }
 
     [Fact]
