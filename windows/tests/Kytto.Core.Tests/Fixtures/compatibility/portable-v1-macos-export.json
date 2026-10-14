@@ -1,0 +1,110 @@
+{
+  "format" : "kytto-portable-setup",
+  "profiles" : [
+    {
+      "name" : "Research",
+      "serverIDs" : [
+        "memory",
+        "remote"
+      ],
+      "tokenBudget" : 12000
+    }
+  ],
+  "requirements" : [
+    {
+      "id" : "0789d69f-9575-467c-9ef8-0877681a18fb",
+      "kind" : "value",
+      "label" : "memory (cursor): argument 3"
+    },
+    {
+      "id" : "100d1ef6-5a01-465f-beb2-73024676f9bd",
+      "kind" : "path",
+      "label" : "memory (cursor): argument 4"
+    },
+    {
+      "id" : "3eb1d212-f457-473e-a1bb-bd5c0ac4807f",
+      "kind" : "secret",
+      "label" : "memory (cursor): environment FIXTURE_TOKEN"
+    },
+    {
+      "id" : "c881010d-a7c6-4c9d-a03b-bfa8ef7dc794",
+      "kind" : "path",
+      "label" : "memory (cursor): working directory"
+    },
+    {
+      "id" : "7ba970e8-a356-46a3-aa36-df1982e8b197",
+      "kind" : "secret",
+      "label" : "remote (cursor): header Authorization"
+    },
+    {
+      "id" : "7e65d400-1083-430a-987f-61c5584e668c",
+      "kind" : "secret",
+      "label" : "remote (cursor): remote URL"
+    }
+  ],
+  "reviewedContracts" : [
+    {
+      "serverID" : "memory",
+      "toolDigests" : {
+        "search" : "0b5dc197c72a84fe06e0ded91d25246100918997f0e6dbf5ccf0744389c5450d"
+      }
+    }
+  ],
+  "servers" : [
+    {
+      "args" : [
+        {
+          "literal" : "-y"
+        },
+        {
+          "literal" : "@modelcontextprotocol/server-memory"
+        },
+        {
+          "requirementID" : "0789d69f-9575-467c-9ef8-0877681a18fb"
+        },
+        {
+          "requirementID" : "100d1ef6-5a01-465f-beb2-73024676f9bd"
+        }
+      ],
+      "command" : {
+        "literal" : "npx"
+      },
+      "environment" : {
+        "FIXTURE_TOKEN" : {
+          "requirementID" : "3eb1d212-f457-473e-a1bb-bd5c0ac4807f"
+        }
+      },
+      "headers" : {
+
+      },
+      "name" : "memory",
+      "sourceClient" : "cursor",
+      "transport" : "stdio",
+      "wasEnabled" : true,
+      "workingDirectory" : {
+        "requirementID" : "c881010d-a7c6-4c9d-a03b-bfa8ef7dc794"
+      }
+    },
+    {
+      "args" : [
+
+      ],
+      "environment" : {
+
+      },
+      "headers" : {
+        "Authorization" : {
+          "requirementID" : "7ba970e8-a356-46a3-aa36-df1982e8b197"
+        }
+      },
+      "name" : "remote",
+      "sourceClient" : "cursor",
+      "transport" : "http",
+      "url" : {
+        "requirementID" : "7e65d400-1083-430a-987f-61c5584e668c"
+      },
+      "wasEnabled" : true
+    }
+  ],
+  "version" : 1
+}

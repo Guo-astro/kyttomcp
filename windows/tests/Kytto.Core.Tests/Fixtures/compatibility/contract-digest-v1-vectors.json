@@ -1,0 +1,62 @@
+[
+  {
+    "expectedDigest" : "f79cbb453fda20618f4164a136b34b9e5cb06966bc850860a625a1c201304922",
+    "label" : "vector-1",
+    "tool" : {
+      "name" : "minimal"
+    }
+  },
+  {
+    "expectedCanonicalSchema" : "{\"properties\":{\"query\":{\"default\":\"a/b\",\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"}",
+    "expectedDigest" : "0b5dc197c72a84fe06e0ded91d25246100918997f0e6dbf5ccf0744389c5450d",
+    "label" : "vector-2",
+    "tool" : {
+      "annotations" : {
+        "destructiveHint" : false,
+        "readOnlyHint" : true
+      },
+      "description" : "Find / files & <notes> — čučoriedka 😀",
+      "inputSchemaJSON" : "{\"required\":[\"query\"],\"properties\":{\"query\":{\"type\":\"string\",\"default\":\"a/b\"}},\"type\":\"object\"}",
+      "name" : "search",
+      "tokenCount" : 999
+    }
+  },
+  {
+    "expectedCanonicalSchema" : "{\"properties\":{\"query\":{\"default\":\"a/b\",\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"}",
+    "expectedDigest" : "0b5dc197c72a84fe06e0ded91d25246100918997f0e6dbf5ccf0744389c5450d",
+    "label" : "vector-3",
+    "tool" : {
+      "annotations" : {
+        "destructiveHint" : false,
+        "readOnlyHint" : true
+      },
+      "description" : "Find / files & <notes> — čučoriedka 😀",
+      "inputSchemaJSON" : "{ \"type\": \"object\", \"properties\": {\"query\": {\"default\":\"a/b\", \"type\":\"string\"}}, \"required\": [\"query\"] }",
+      "name" : "search",
+      "tokenCount" : 1
+    }
+  },
+  {
+    "expectedCanonicalSchema" : "{\"properties\":{\"amount\":{\"default\":1},\"choices\":{\"enum\":[\"b\",\"a\",null]},\"scale\":{\"default\":0.001}},\"type\":\"object\"}",
+    "expectedDigest" : "9e9835d2d37243dd8466bd8035bca1839fd852631941a102ebd695115d5fa356",
+    "label" : "vector-4",
+    "tool" : {
+      "annotations" : {
+        "idempotentHint" : false,
+        "openWorldHint" : true
+      },
+      "description" : "nulls, numeric defaults, array ordering",
+      "inputSchemaJSON" : "{\"properties\":{\"amount\":{\"default\":1.0},\"scale\":{\"default\":0.001},\"choices\":{\"enum\":[\"b\",\"a\",null]}},\"type\":\"object\"}",
+      "name" : "numbers"
+    }
+  },
+  {
+    "expectedDigest" : "96c0e40778748a95b68071e305e86f1e413b68c37dab3412725c32998bf62c9f",
+    "label" : "vector-5",
+    "tool" : {
+      "description" : "Conservative raw schema fallback",
+      "inputSchemaJSON" : "{broken",
+      "name" : "malformed"
+    }
+  }
+]
