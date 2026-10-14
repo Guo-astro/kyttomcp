@@ -43,6 +43,20 @@ public sealed class ProfileStore(KyttoPaths paths)
         lock (_lock) return Load(strict: false);
     }
 
+    /// <summary>
+    /// Every profile, or <see cref="ProfileException"/> when the store cannot be read.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="All"/> shows a damaged store as empty, which is right for a screen
+    /// and wrong for anything deciding whether a name is taken: portable setup
+    /// checks collisions against this, so an unreadable store stops the import
+    /// instead of being treated as "no profiles" (§6.4).
+    /// </remarks>
+    public IReadOnlyList<Profile> AllStrict()
+    {
+        lock (_lock) return Load(strict: true);
+    }
+
     public Profile Get(string id) =>
         All().FirstOrDefault(profile => profile.Id == id)
         ?? throw ProfileException.NotFound(id);
@@ -52,6 +66,7 @@ public sealed class ProfileStore(KyttoPaths paths)
         IReadOnlyList<string> serverIds,
         int? tokenBudget = null)
     {
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var profiles = Load(strict: true).ToList();
@@ -73,6 +88,7 @@ public sealed class ProfileStore(KyttoPaths paths)
         IReadOnlyList<string> serverIds,
         int? tokenBudget = null)
     {
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var profiles = Load(strict: true).ToList();
@@ -94,6 +110,7 @@ public sealed class ProfileStore(KyttoPaths paths)
 
     public IReadOnlyList<Profile> Delete(string id)
     {
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var profiles = Load(strict: true).ToList();
@@ -113,6 +130,7 @@ public sealed class ProfileStore(KyttoPaths paths)
         var newIdentity = Server.Identity(newName);
         if (oldIdentity == newIdentity) return;
 
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var profiles = Load(strict: true).ToList();
@@ -129,6 +147,41 @@ public sealed class ProfileStore(KyttoPaths paths)
                 changed = true;
             }
             if (changed) Save(profiles);
+        }
+    }
+
+    /// <summary>
+    /// Adds the profiles a portable setup carried, as one mutation (§6.4).
+    /// </summary>
+    /// <remarks>
+    /// The ids are minted here, so a file cannot replace a profile by naming the id
+    /// of one that exists. A name that is taken refuses the whole batch before
+    /// anything is saved — the same rule as <see cref="Create"/>, applied to every
+    /// entry against the store as it will stand after the earlier ones.
+    /// </remarks>
+    public IReadOnlyList<Profile> ImportProfiles(
+        IReadOnlyList<(string Name, IReadOnlyList<string> ServerIds, int? TokenBudget)> incoming)
+    {
+        lock (MutationCoordinator.Gate)
+        lock (_lock)
+        {
+            var profiles = Load(strict: true).ToList();
+            var imported = new List<Profile>();
+            foreach (var (name, serverIds, tokenBudget) in incoming)
+            {
+                var profile = new Profile(
+                    Guid.NewGuid().ToString("N"),
+                    ValidateName(name, profiles, excludingId: null),
+                    Normalize(serverIds),
+                    NormalizeBudget(tokenBudget));
+                profiles.Add(profile);
+                imported.Add(profile);
+            }
+            if (imported.Count == 0) return imported;
+
+            Sort(profiles);
+            Save(profiles);
+            return imported;
         }
     }
 

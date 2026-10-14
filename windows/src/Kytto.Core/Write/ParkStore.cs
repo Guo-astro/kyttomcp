@@ -44,12 +44,31 @@ public sealed class ParkStore(KyttoPaths paths)
 
     public void Park(ClientId client, string serverName, string sourceText)
     {
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var entries = Load(forWrite: true);
             entries[Key(client, serverName)] = new Entry(
                 client, serverName, sourceText, Timestamp.Now);
             Save(entries);
+        }
+    }
+
+    /// <summary>
+    /// Throws <see cref="InvalidDataException"/> when the store cannot be read as it
+    /// stands, without changing anything.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Parked"/> shows a damaged store as empty. A caller about to rely on
+    /// "nothing is parked under this name" — portable setup checking for a collision
+    /// — has to know the difference, or a definition Kytto is the only keeper of is
+    /// overwritten by an import that could not see it (§6.4).
+    /// </remarks>
+    public void VerifyReadable()
+    {
+        lock (_lock)
+        {
+            _ = Load(forWrite: true);
         }
     }
 
@@ -63,6 +82,7 @@ public sealed class ParkStore(KyttoPaths paths)
 
     public void Unpark(ClientId client, string serverName)
     {
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var entries = Load(forWrite: true);
@@ -265,6 +285,7 @@ public sealed class MetadataStore(KyttoPaths paths)
     /// <summary>Applies <paramref name="change"/> and saves if it reports a change.</summary>
     private void Mutate(Func<Dictionary<string, ServerMetadata>, bool> change)
     {
+        lock (MutationCoordinator.Gate)
         lock (_lock)
         {
             var entries = new Dictionary<string, ServerMetadata>(LoadForMutation());
@@ -301,6 +322,31 @@ public sealed class MetadataStore(KyttoPaths paths)
                 "so it left it untouched instead of overwriting it. Move the file out of Kytto's " +
                 "data folder to start fresh.",
                 error);
+        }
+    }
+
+    /// <summary>
+    /// What is on disk right now, or <see cref="InvalidDataException"/> when it cannot
+    /// be read — never a cache, and never an unreadable store passed off as empty.
+    /// </summary>
+    /// <remarks>
+    /// Imported contract references are compared with what the last local check
+    /// recorded. That comparison must see a check another store instance wrote a
+    /// moment ago, and must fail closed rather than conclude "no check" from a file
+    /// it could not read (§7.10).
+    /// </remarks>
+    internal static IReadOnlyDictionary<string, ServerMetadata> ReadStrict(KyttoPaths paths)
+    {
+        if (!File.Exists(paths.MetadataFile)) return new Dictionary<string, ServerMetadata>();
+        try
+        {
+            var text = File.ReadAllText(paths.MetadataFile);
+            return JsonSerializer.Deserialize<Dictionary<string, ServerMetadata>>(text, Options) ?? [];
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            throw new InvalidDataException("Kytto's measurements file could not be read.", error);
         }
     }
 
