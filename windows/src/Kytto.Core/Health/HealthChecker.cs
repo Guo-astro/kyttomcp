@@ -10,15 +10,39 @@ namespace Kytto.Core.Health;
 public sealed class HealthChecker(
     ShellEnvironment? shell = null,
     TimeSpan? timeout = null,
-    McpStdioClient? client = null)
+    McpStdioClient? client = null,
+    McpHttpClient? httpClient = null)
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
 
     private readonly ShellEnvironment _shell = shell ?? ShellEnvironment.Current;
     private readonly TimeSpan _timeout = timeout ?? DefaultTimeout;
     private readonly McpStdioClient _client = client ?? new McpStdioClient();
+    private readonly McpHttpClient _httpClient = httpClient ?? new McpHttpClient();
 
-    public (HealthResult Health, TokenWeight? TokenWeight) Check(Server server)
+    /// <summary>Checks one server; a remote one with Kytto's own sign-in, if it has one.</summary>
+    /// <param name="httpHeaders">
+    /// Headers Kytto itself holds for a Streamable HTTP server — its OAuth token. They
+    /// replace the definition's headers of the same name, case-insensitively, and nothing
+    /// else.
+    /// </param>
+    public (HealthResult Health, TokenWeight? TokenWeight) Check(
+        Server server,
+        IReadOnlyDictionary<string, string>? httpHeaders = null) =>
+        server.Transport == Transport.Http
+            ? CheckRemoteAsync(server, httpHeaders, CancellationToken.None).GetAwaiter().GetResult()
+            : CheckLocal(server);
+
+    /// <summary>The same check without holding a thread for a remote one.</summary>
+    public Task<(HealthResult Health, TokenWeight? TokenWeight)> CheckAsync(
+        Server server,
+        IReadOnlyDictionary<string, string>? httpHeaders = null,
+        CancellationToken cancellationToken = default) =>
+        server.Transport == Transport.Http
+            ? CheckRemoteAsync(server, httpHeaders, cancellationToken)
+            : Task.Run(() => CheckLocal(server), cancellationToken);
+
+    private (HealthResult Health, TokenWeight? TokenWeight) CheckLocal(Server server)
     {
         var started = Timestamp.Now;
 
@@ -118,6 +142,98 @@ public sealed class HealthChecker(
             return (Failure(ReasonFor(error), null, started), null);
         }
     }
+
+    /// <summary>Streamable HTTP: the handshake and the tool list, never a tool call (§7.3).</summary>
+    /// <remarks>
+    /// One deadline spans the network, the parsing and the token count. Nothing the
+    /// server said is kept when it fails — not a body, not a challenge, not a JSON-RPC
+    /// message — because any of them can echo a credential or a signed URL (§6).
+    /// </remarks>
+    private async Task<(HealthResult Health, TokenWeight? TokenWeight)> CheckRemoteAsync(
+        Server server,
+        IReadOnlyDictionary<string, string>? overrides,
+        CancellationToken cancellationToken)
+    {
+        var started = Timestamp.Now;
+        var clock = DateTimeOffset.UtcNow;
+        var budget = _timeout < TimeSpan.FromMilliseconds(50) ? TimeSpan.FromMilliseconds(50)
+            : _timeout > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60)
+            : _timeout;
+        var deadline = clock + budget;
+
+        try
+        {
+            var url = server.Url ?? throw new RemoteHttpException(RemoteHttpFailure.InvalidEndpoint);
+            var extra = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var entry in server.Env)
+            {
+                if (entry.Value is { } value) extra.TryAdd(entry.Key, value);
+            }
+            var configured = RemoteHttpHeaders.Resolve(
+                server.DefinitionSource,
+                _shell.With(extra),
+                omitAuthorization: overrides?.Keys.Any(name =>
+                    string.Equals(name, "Authorization", StringComparison.OrdinalIgnoreCase)) == true);
+            var headers = RemoteHttpHeaders.Merge(configured, overrides);
+
+            var listing = await _httpClient
+                .ListToolsAsync(url, headers, deadline - DateTimeOffset.UtcNow, cancellationToken)
+                .ConfigureAwait(false);
+            var weight = TokenWeight.Measuring(listing.RawToolsJson, deadline);
+
+            return (new HealthResult(
+                Status: HealthStatus.Passed,
+                CheckedAt: started,
+                ToolCount: listing.Tools.Count,
+                Tools: listing.Tools,
+                Message: null,
+                Stderr: null,
+                DurationSeconds: (Timestamp.Now - started).TotalSeconds,
+                ServerName: listing.ServerName,
+                ServerVersion: listing.ServerVersion)
+                {
+                    ProtocolVersion = listing.NegotiatedProtocolVersion,
+                    CapabilityNames = listing.CapabilityNames,
+                    PromptCount = listing.PromptCount,
+                    ResourceCount = listing.ResourceCount,
+                    InspectionNotes = listing.InspectionNotes,
+                    EnvironmentSource = RemoteEnvironmentSource,
+                },
+                weight);
+        }
+        catch (RemoteHttpException failure)
+        {
+            var status = failure.Failure == RemoteHttpFailure.AuthorizationRequired
+                ? HealthStatus.NeedsAuthorization
+                : HealthStatus.Failed;
+            return (RemoteFailure(
+                HealthFailureReason.RemoteHttp(failure.Failure, failure.Status, failure.Detail),
+                started,
+                status), null);
+        }
+        catch (TimeoutException)
+        {
+            return (RemoteFailure(HealthFailureReason.RemoteHttp(RemoteHttpFailure.TimedOut), started), null);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return (RemoteFailure(HealthFailureReason.RemoteHttp(RemoteHttpFailure.TimedOut), started), null);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Deliberately not the exception's own text: see the remarks above.
+            return (RemoteFailure(HealthFailureReason.Other("The remote check could not be completed."), started), null);
+        }
+    }
+
+    /// <summary>What the detail view shows as the "environment" of a remote check.</summary>
+    internal const string RemoteEnvironmentSource = "Streamable HTTP";
+
+    private static HealthResult RemoteFailure(
+        HealthFailureReason reason,
+        DateTimeOffset started,
+        HealthStatus status = HealthStatus.Failed) =>
+        Failure(reason, null, started, status) with { EnvironmentSource = RemoteEnvironmentSource };
 
     private static HealthResult Failure(
         HealthFailureReason reason,

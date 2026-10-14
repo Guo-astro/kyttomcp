@@ -117,13 +117,7 @@ public static class McpDoctor
 
         if (server.Transport != Transport.Stdio)
         {
-            findings.Add(new DoctorFinding(
-                "remote-check-unavailable",
-                DoctorSeverity.Info,
-                "Remote health checks are not available yet",
-                "Kytto can preserve this remote definition, but the current checker only starts local stdio servers.",
-                "Verify the endpoint in its client. Remote HTTP and OAuth diagnostics remain on the roadmap."));
-            return new DoctorServerReport(server.Id, server.Name, findings);
+            return new DoctorServerReport(server.Id, server.Name, AnalyzeRemote(server));
         }
 
         var missingEnvironment = server.Env
@@ -210,6 +204,60 @@ public static class McpDoctor
         }
 
         return new DoctorServerReport(server.Id, server.Name, findings);
+    }
+
+    /// <summary>Findings for a remote server, from what its last check measured (§7.3).</summary>
+    /// <remarks>
+    /// Legacy SSE is the one transport Kytto cannot inspect, and says so plainly.
+    /// Streamable HTTP is read from the stored outcome only: nothing here makes a
+    /// request. The tools a remote server offered are scanned like any other
+    /// contract — a description is no safer for having arrived over HTTPS.
+    /// </remarks>
+    private static List<DoctorFinding> AnalyzeRemote(Server server)
+    {
+        var findings = new List<DoctorFinding>();
+        if (server.Transport == Transport.Sse)
+        {
+            findings.Add(new DoctorFinding(
+                "remote-check-unavailable",
+                DoctorSeverity.Info,
+                "Legacy SSE inspection is not supported",
+                "Remote Doctor supports Streamable HTTP endpoints.",
+                "Use the server's Streamable HTTP endpoint if available; otherwise verify the legacy endpoint in its client."));
+        }
+        else if (server.Health is not { } health)
+        {
+            findings.Add(new DoctorFinding(
+                "not-checked",
+                DoctorSeverity.Info,
+                "This remote server has not been checked",
+                "Its MCP handshake and tool contract have not been verified by Kytto.",
+                "Run Remote Doctor to inspect the endpoint on request.",
+                DoctorAction.RunHealthCheck));
+        }
+        else if (health.Status == HealthStatus.NeedsAuthorization)
+        {
+            findings.Add(new DoctorFinding(
+                "needs-authorization",
+                DoctorSeverity.Info,
+                "Remote authorization is required",
+                "The remote endpoint requires a sign-in or additional permissions.",
+                "Sign in from the server detail or review its configured credentials, then check again.",
+                DoctorAction.RunHealthCheck));
+        }
+        else if (health.Status == HealthStatus.Failed)
+        {
+            findings.Add(new DoctorFinding(
+                "remote-check-failed",
+                DoctorSeverity.Error,
+                "Remote MCP inspection did not complete",
+                health.CurrentMessage ?? "The endpoint did not complete the MCP handshake and tools listing.",
+                "Review the endpoint, HTTP status, TLS connection and configured credentials in server detail.",
+                DoctorAction.RunHealthCheck));
+        }
+
+        findings.AddRange(ToolSafetyScanner.Scan(server.KnownTools).Select(Finding));
+        return findings;
     }
 
     /// <summary>A package fetched by name with no exact version (§7.10).</summary>

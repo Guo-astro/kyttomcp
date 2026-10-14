@@ -38,6 +38,27 @@ public sealed record TokenWeight(int Estimate, string Method, DateTimeOffset Mea
                 MeasuredAt: at ?? Timestamp.Now)
             : Estimating(text, at);
 
+    /// <summary>Measures under a shared inspection deadline, or throws rather than lying (§7.3, §7.4).</summary>
+    /// <remarks>
+    /// Remote inspection spends one budget on the network, the parsing and this count.
+    /// A deadline that passes mid-count is a timeout, never a partial weight.
+    /// </remarks>
+    /// <exception cref="TimeoutException">The deadline passed.</exception>
+    public static TokenWeight Measuring(string text, DateTimeOffset deadline, DateTimeOffset? at = null)
+    {
+        if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException();
+        if (BpeTokenizer.Cl100kBase is { } tokenizer)
+        {
+            return new(
+                Estimate: tokenizer.CountTokens(text, deadline),
+                Method: BpeTokenizer.Cl100kMethod,
+                MeasuredAt: at ?? Timestamp.Now);
+        }
+        var fallback = Estimating(text, at);
+        if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException();
+        return fallback;
+    }
+
     /// <summary>Characters divided by four — the pre-vocabulary heuristic.</summary>
     /// <remarks>
     /// Kept only as the fallback for a build whose rank table is missing. It
@@ -55,7 +76,7 @@ public enum HealthStatus
 {
     Passed,
     Failed,
-    /// <summary>Not something Kytto can check yet — a remote server, for now.</summary>
+    /// <summary>Not something Kytto can check — a legacy SSE server.</summary>
     Unsupported,
     /// <summary>The handshake reached an interactive browser sign-in and is waiting.</summary>
     NeedsAuthorization,
@@ -126,6 +147,14 @@ public sealed record HealthFailureReason(string Reason)
 
     public static HealthFailureReason AwaitingAuthorization() => new("awaitingAuthorization");
 
+    /// <summary>A Streamable HTTP check that did not complete, by kind (§7.3).</summary>
+    /// <remarks>
+    /// Structured so that the words can change later, and so that nothing the server
+    /// said — a body, a challenge, an error text — is ever kept on disk.
+    /// </remarks>
+    public static HealthFailureReason RemoteHttp(RemoteHttpFailure failure, int? status = null, string? detail = null) =>
+        new("remoteHttp") { Detail = detail, Status = status, Code = (int)failure };
+
     public static HealthFailureReason Other(string message) =>
         new("other") { CustomMessage = message };
 
@@ -134,7 +163,11 @@ public sealed record HealthFailureReason(string Reason)
     {
         "noCommand" => "This server has no command to run.",
         "remoteTransport" =>
-            $"Kytto cannot check remote servers yet — this one is reached over {Transport}.",
+            $"Kytto checks Streamable HTTP; the legacy {Transport} transport is not supported.",
+        "remoteHttp" => RemoteHttpException.MessageFor(
+            Enum.IsDefined(typeof(RemoteHttpFailure), Code ?? -1) ? (RemoteHttpFailure)Code!.Value : RemoteHttpFailure.Protocol,
+            Status,
+            Detail),
         "commandNotFound" => CommandNotFoundMessage(),
         "relativeCommand" =>
             $"Kytto cannot safely check the relative command {Command}. The owning client " +
