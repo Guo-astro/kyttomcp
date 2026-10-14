@@ -223,20 +223,25 @@ public abstract record ConfigSource
     }
 
     /// <summary>
-    /// Servers that arrive inside installed packages, each carrying a config file
-    /// in the ordinary <c>mcpServers</c> shape somewhere under a root directory.
+    /// Servers declared by plugins the client has itself registered and enabled.
     /// </summary>
     /// <remarks>
-    /// Codex plugins. Like Claude Desktop extensions these are installed software,
-    /// not something Kytto authors into — the directory is a cache the client
-    /// repopulates — so they are read and shown, never written.
+    /// <para>
+    /// Claude Code and Codex plugins. Like Claude Desktop extensions these are
+    /// installed software, not something Kytto authors into — the package directory
+    /// is a cache the client repopulates — so they are read and shown, never written.
+    /// </para>
+    /// <para>
+    /// The registration is the source of truth, not the cache. An earlier version
+    /// walked <c>~/.codex/plugins</c> for any <c>.mcp.json</c> and so reported stale
+    /// versions, uninstalled leftovers and test fixtures as live servers; reading only
+    /// what a registration points at (and only what the package itself declares) is
+    /// the whole difference (§4).
+    /// </para>
     /// </remarks>
-    public sealed record BundledPackages(
-        PlatformPath Root,
-        string ManifestName,
-        string ServersKey) : ConfigSource
+    public sealed record RegisteredPlugins(PluginRegistrySource Registry) : ConfigSource
     {
-        public override PlatformPath Path => Root;
+        public override PlatformPath Path => Registry.RegistrationFile;
     }
 
     public abstract PlatformPath Path { get; }
@@ -277,8 +282,8 @@ public sealed record ClientDescriptor(
     /// </summary>
     /// <remarks>
     /// Every client has exactly one. The other source kinds — Claude Desktop's
-    /// extension bundles, Codex's plugins — are installed software, not something
-    /// Kytto authors into.
+    /// extension bundles, the Claude Code and Codex plugins — are installed software,
+    /// not something Kytto authors into.
     /// </remarks>
     public ConfigSource.ServerMap? EditableServerMap =>
         Sources.OfType<ConfigSource.ServerMap>().FirstOrDefault();
@@ -314,7 +319,7 @@ public sealed record ClientDescriptor(
                             "carries its own on/off flag beside the bundle, so switching one " +
                             "off removes nothing.");
                         break;
-                    case ConfigSource.BundledPackages:
+                    case ConfigSource.RegisteredPlugins:
                         parts.Add(
                             "Servers that arrive inside installed plugins are read-only — that " +
                             "directory is a cache the client rewrites, so Kytto shows them and " +

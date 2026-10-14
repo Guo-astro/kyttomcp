@@ -118,12 +118,19 @@ public static class ClientRegistry
                         Windows: @"%USERPROFILE%\.claude\settings.json"),
                     Key: "deniedMcpServers",
                     NameField: "serverName")),
+            // Installed, enabled plugins: read-only, and only what a registration
+            // names (§4). Project and local registrations become workspace scopes.
+            new ConfigSource.RegisteredPlugins(PluginRegistrySource.ClaudeCodeDefault),
         ],
         SchemaQuirks:
             "`~/.claude.json` is not a small config file — it also holds per-project " +
             "history and routinely runs to hundreds of kilobytes. Only the top-level " +
             "`mcpServers` is writable; `projects.<path>.mcpServers` is surfaced as a " +
             "read-only workspace column (§4), so it must never become a write target. " +
+            "Installed plugins that Claude Code itself has registered (`~/.claude/plugins/" +
+            "installed_plugins.json`) and enabled (`enabledPlugins` in user, project or " +
+            "local settings) are a second, read-only source: only the MCP definitions the " +
+            "plugin declares are read, and nothing in the plugin cache is ever written. " +
             "Enablement lives " +
             "in a different file entirely: `~/.claude/settings.json` → `deniedMcpServers`, " +
             "an array of objects with a `serverName` field. A denied server stays in the " +
@@ -235,12 +242,13 @@ public static class ClientRegistry
                 Format: ConfigFormat.Toml,
                 ServersKey: "mcp_servers",
                 Enablement: new EnablementStrategy.InlineFlag("enabled")),
-            new ConfigSource.BundledPackages(
-                Root: new PlatformPath(
-                    Darwin: "~/.codex/plugins",
-                    Windows: @"%USERPROFILE%\.codex\plugins"),
-                ManifestName: ".mcp.json",
-                ServersKey: "mcpServers"),
+            new ConfigSource.RegisteredPlugins(new PluginRegistrySource.Codex(
+                Config: new PlatformPath(
+                    Darwin: "~/.codex/config.toml",
+                    Windows: @"%USERPROFILE%\.codex\config.toml"),
+                Cache: new PlatformPath(
+                    Darwin: "~/.codex/plugins/cache",
+                    Windows: @"%USERPROFILE%\.codex\plugins\cache"))),
         ],
         SchemaQuirks:
             "The only TOML client, and the only one whose off switch is genuinely " +
@@ -251,9 +259,14 @@ public static class ClientRegistry
             "file is not small — a real one carries dozens of `[projects.\"…\"]` tables " +
             "recording per-directory history — and none of that may move when a server " +
             "is added. Two front ends share one config: the ChatGPT app and the `codex` " +
-            "CLI. Plugins under `~/.codex/plugins` can bundle their own `.mcp.json` in " +
-            "the ordinary `mcpServers` shape; those are installed packages in a cache " +
-            "directory the client repopulates, so they are read and shown but never written.",
+            "CLI. A plugin counts only when `[plugins.\"name@marketplace\"]` in that same " +
+            "file says `enabled = true` and its package is in `~/.codex/plugins/cache`; " +
+            "Kytto reads the MCP definitions the package declares (its root `.mcp.json` " +
+            "and the paths its `.codex-plugin/plugin.json` names), at the registered " +
+            "version or the only installed one. A cache with several versions and no " +
+            "registered one is skipped with a diagnostic, and a cache nobody registered " +
+            "is never read. Packages sit in a directory the client repopulates, so they " +
+            "are shown but never written.",
         // No tool limit: none is documented, and MCP tools are deferred behind tool
         // search where the model supports it
         // (https://github.com/openai/codex/pull/29486).
