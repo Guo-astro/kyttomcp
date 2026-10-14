@@ -3862,6 +3862,12 @@ body[data-stubbed='true'] .statusbar::after {
   background: var(--bg-elevated);
 }
 
+/* Both bars at once leave a corner, which defaults to white — a hole in a dark
+   card. */
+.matrix-list .table-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .matrix-list .placeholder {
   flex: 1 1 auto;
 }
