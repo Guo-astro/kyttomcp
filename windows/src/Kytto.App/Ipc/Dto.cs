@@ -260,7 +260,9 @@ internal sealed record StateDto(
     /// only when there is a disagreement.
     IReadOnlyList<ServerDriftDto> Drift,
     /// Restart notices hidden by the user without changing the applied baseline.
-    IReadOnlyList<string>? DismissedRestarts = null);
+    IReadOnlyList<string>? DismissedRestarts = null,
+    /// Imported contract fingerprints awaiting a local check and a review (§7.13).
+    PendingContractImportsDto? PendingContractImports = null);
 
 internal sealed record DriftVariantDto(
     IReadOnlyList<string> ClientIDs,

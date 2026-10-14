@@ -442,7 +442,9 @@ internal sealed partial class AppModel : IDisposable
         // Asking about a server that is not there is a mistake worth reporting,
         // rather than a no-op that looks like it worked.
         _ = ServerById(serverId);
-        _metadata.AcknowledgeContract(serverId);
+        // An imported fingerprint for this server is retired in the same step, and
+        // only after a local check that postdates it (§7.13).
+        AcknowledgeWithPendingReview(serverId, () => _metadata.AcknowledgeContract(serverId));
         Reload();
     }
 
@@ -680,6 +682,7 @@ internal sealed partial class AppModel : IDisposable
             });
         // Custom sources and path overrides both change discovery's read/watch
         // targets. Rebuild them only after the settings write succeeded.
+        ResetPortableSetupIfReconfigured(previous, updated);
         Reload();
         SettingsChanged?.Invoke(updated);
         return updated;
@@ -1232,6 +1235,7 @@ internal sealed partial class AppModel : IDisposable
 
     public void Dispose()
     {
+        DisposePortableSetup();
         _watcher?.Dispose();
         _updates.Dispose();
         _updatePackages.Dispose();

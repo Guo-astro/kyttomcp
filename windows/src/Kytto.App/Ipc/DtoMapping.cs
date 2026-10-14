@@ -284,7 +284,8 @@ internal static class DtoMapping
             DismissedRestarts: model.DismissedRestarts
                 .Select(client => client.Raw())
                 .Order(StringComparer.Ordinal)
-                .ToArray());
+                .ToArray(),
+            PendingContractImports: model.ToPendingContractImportsDto());
     }
 
     internal static ServerDriftDto ToDto(this ServerDrift drift) => new(

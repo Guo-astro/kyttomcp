@@ -116,6 +116,7 @@ public enum PortableSetupFailure
     PendingContractsUnreadable,
     LocalContractNotChecked,
     StoreUnreadable,
+    NoDestination,
 }
 
 /// <summary>
@@ -149,6 +150,12 @@ public sealed class PortableSetupException(
             PortableSetupFailure.RollbackFailed,
             $"The import failed and could not completely restore its previous files: {detail}",
             cause);
+
+    /// <summary>The setup has servers and there is no client to put them in.</summary>
+    public static PortableSetupException NoDestination() =>
+        new(
+            PortableSetupFailure.NoDestination,
+            "No installed client that Kytto can write to is available to receive this setup.");
 
     /// <summary>One of Kytto's own stores could not be read, so nothing was changed.</summary>
     public static PortableSetupException StoreUnreadable(string store, Exception? cause = null) =>

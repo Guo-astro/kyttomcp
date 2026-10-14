@@ -208,7 +208,7 @@ public sealed class PortableCompatibilityTests
             Assert.Single(keys);
             if (keys[0] == "requirementID")
             {
-                Assert.Contains(element.GetProperty("requirementID").GetString(), ids);
+                Assert.Contains(element.GetProperty("requirementID").GetString()!, ids);
                 Assert.True(used.Add(element.GetProperty("requirementID").GetString()!));
             }
             else
