@@ -83,6 +83,12 @@ capabilities are available. `updates` is advertised only when the signed update
 pipeline is available; the other flags describe read-only inspection or safe
 authoring surfaces.
 
+`health.http` and `health.oauth` are advertised only where the native path exists:
+the first means `health.check` and `health.checkAll` inspect Streamable HTTP
+servers, the second that `health.signInRemote` and `health.forgetRemoteAuthorization`
+work. The UI shows a remote sign-in button only when `health.oauth` is present,
+never from the platform name.
+
 `platformDisplayName` is for display only — branching on it is a §3.2 violation.
 
 `secretStoreDisplayName` is what this platform calls the credential store Kytto
@@ -299,6 +305,28 @@ definitions and environment values do not cross IPC.
 action names (`runHealthCheck`, `pinResolvedCommand`, `pinPackageVersion`).
 `contractAlerts` contains tool names and model-facing contract
 change summaries. Neither contains environment values or tool-call payloads.
+
+Each `contractAlerts[].changes[]` entry is `{ kind, severity, toolName, summary,
+details }`. `details` is `null` for an added or removed tool and for a change
+recorded before 1.0.8 (such records still load); otherwise it is an array of
+`{ path, before, after, explanation }` for the model-visible fields that changed:
+
+- `path` is `description`, `annotations.<hint>` or `inputSchema/…`, the latter an
+  escaped JSON Pointer (`~` is `~0`, `/` is `~1`). Object keys are compared
+  canonically, so a server that only reorders keys reports nothing; arrays keep
+  their order and are shown whole.
+- `before` and `after` are bounded display excerpts, at most 800 Unicode scalars
+  and then a truncation marker; `null` means the field was absent. They are
+  never used to decide whether anything changed — that is decided natively on the
+  full values, and an excerpt that reads the same on both sides says so in
+  `explanation`.
+- `explanation` is `null` or prose: a `dry_run`, `dryrun`, `confirm` or `approval`
+  field, or a confirmation entry in `required`, asks the reader to verify the
+  server's actual enforcement; an annotation is only a hint to the client.
+- At most 40 fields are returned per change, followed by one entry with an
+  omission notice; at most 500 differing nodes are walked, to depth 12, and a
+  schema above 1,000,000 UTF-8 bytes, malformed, or nested past 128 levels is
+  compared as raw text and shown as one `inputSchema` excerpt.
 An authorization wait adds the info finding `needs-authorization` with action
 `runHealthCheck`; it is not classified as a health failure.
 
@@ -773,8 +801,9 @@ private, and that has to be true.
 { "serverID": "github" }
 ```
 
-Runs the server, does the MCP handshake, calls `tools/list`, and records what
-came back. A paginated tool list is followed through `nextCursor` within the same
+Runs a stdio server, or connects to a Streamable HTTP endpoint, does the MCP
+handshake, calls `tools/list`, and records what came back. `tools/call` is never
+sent. A paginated tool list is followed through `nextCursor` within the same
 deadline; a page that cannot be read ends the walk with an inspection note rather
 than failing the check. When the server advertises prompts or resources, the same
 inspection also requests their first page. Takes up to ten seconds; the native
@@ -819,11 +848,31 @@ first page when a continuation cursor is returned.
 thing you can show a user whose server is broken, so it is never summarised,
 truncated at the front, or interpreted. The UI shows it in a `<pre>`.
 
-`unsupported` means Kytto cannot check this kind of server yet — currently
-anything remote, since there is no process to start.
+`unsupported` means Kytto cannot check this kind of server — currently only a
+legacy SSE endpoint. Streamable HTTP is checked: `initialize`,
+`notifications/initialized`, then paginated `tools/list`, with JSON or event-stream
+responses matched by JSON-RPC id, the session and protocol headers, and a bounded
+best-effort `DELETE` to end the session. The definition's own headers are kept
+(environment and bearer forms resolved natively, placeholders expanded once), with
+only `Authorization` replaced by Kytto's own sign-in. HTTPS only, or HTTP to the
+loopback interface; no redirect is followed, no cookie kept, no ambient Windows
+credential sent. Limits: 4 MiB per response, 8 MiB in all, 50 pages, 10,000 tools,
+JSON nested at most 128 deep with no duplicate keys, and one 10 second deadline
+covering the network, parsing and token counting. Nothing a server says — body,
+challenge, JSON-RPC error text — is kept in the result or its message, so a health
+result never carries a token or a signed URL. A remote result has
+`environmentSource` `Streamable HTTP` and no `resolvedCommand`.
 
-`needsAuthorization` means the failed handshake's captured stderr explicitly
-said that the process is waiting for browser authorization. It is neither a
+A remote check that finishes after the server was edited, renamed, removed, or
+signed in or out meanwhile is returned but not recorded: the name alone is not
+enough, the definition and the authorization generation are compared as well.
+
+For a Streamable HTTP server, `needsAuthorization` is a `401`, or a `403` that
+carries an authentication challenge; a plain `403` is `failed` ("HTTP 403"). It
+never records an `authorizationURL`: sign in with `health.signInRemote`.
+
+For a stdio process, `needsAuthorization` means the failed handshake's captured
+stderr explicitly said that the process is waiting for browser authorization. It is neither a
 passing nor a failing verdict. Its blue UI state carries the current message,
 verbatim stderr, and an optional native-validated `authorizationURL`. An
 OAuth-looking URL without a wait marker remains `failed`; `http://` is never
@@ -837,7 +886,8 @@ from then on, read from Kytto's own store rather than measured again.
 ### `health.checkAll` → `StateDTO`
 
 No payload. Checks every stdio server except one already waiting for interactive
-authorization, one at a time. Sequential on purpose:
+authorization, and every Streamable HTTP server, one at a time. Legacy SSE servers
+have no check and are skipped. Sequential on purpose:
 these are arbitrary commands, and starting a dozen node processes at once to save
 a few seconds is not a trade worth making on someone's laptop.
 
@@ -857,6 +907,61 @@ never supply the URL. If no valid page was captured, the command fails with:
 ```text
 No authorization page is recorded for this server. Check it again to capture one.
 ```
+
+### `health.signInRemote` → `StateDTO`
+
+```json
+{ "serverID": "remote" }
+```
+
+Capability `health.oauth`. An explicit, native-only sign-in of Kytto's own remote
+checks for one Streamable HTTP server; it never runs at launch, never changes a
+client configuration and never signs another MCP client in. Only the server id
+crosses: no URL, endpoint, code, client ID or token is accepted from or returned to
+the web layer.
+
+1. Native discovers the protected-resource and authorization-server metadata and
+   validates it: HTTPS, the metadata's `resource` equal to this exact resource, a
+   same-origin metadata hint, the first advertised issuer matching the issuer in its
+   own document, and `S256` PKCE advertised. A resource URL with a query string is
+   refused, because the resource is sent to the issuer.
+2. A native confirmation names the server, the provider (issuer) and the requested
+   scopes. Declining returns the unchanged state.
+3. A short-lived listener is opened on `127.0.0.1` only, on a free port, at
+   `/oauth/callback`. Nothing is installed and no protocol, URL reservation or
+   firewall rule is registered; the listener exists until the sign-in ends.
+4. The provider's public dynamic registration is used when advertised (the public
+   client carries no secret, and a secret in the reply is refused). Otherwise a native
+   prompt asks for a public client ID registered for that loopback redirect; cancelling
+   returns the unchanged state.
+5. The system browser is opened on the validated HTTPS authorization URL (PKCE with a
+   random verifier and `state`, the exact resource, the scopes). A native window
+   waits and can be cancelled; giving up is an error.
+6. The callback is accepted once, only for the exact route, host and `state`; the
+   `iss` parameter must match, an error or a repeated parameter is refused, and the
+   transaction is spent before the token request. Stray or replayed requests are
+   answered and ignored.
+7. The tokens are validated and saved in the system credential store under Kytto's own
+   prefix, bound to the canonical resource, as small checksummed pieces; a record too
+   large to store safely is refused, never truncated. A new sign-in wins over a
+   refresh that started before it.
+8. A check of the server follows, so the reply shows what the new authorization does.
+
+An explicit later check may refresh an expiring token (and keeps a rotated refresh
+token); nothing refreshes in the background. A refresh that the provider refuses, or a
+saved record that cannot be read, reads as `needsAuthorization` with the message to
+sign in again. One sign-in runs at a time (`A sign-in is already open.`).
+
+### `health.forgetRemoteAuthorization` → `{}`
+
+```json
+{ "serverID": "remote" }
+```
+
+Capability `health.oauth`. Deletes only Kytto's own saved sign-in for this server's
+exact resource. The authorization generation is raised before the delete, so a
+refresh already in flight cannot store its tokens afterwards. Forgetting something that
+is not saved is not an error. No URL or token is accepted from the web layer.
 
 ### `profiles.list` → `ProfileDTO[]`
 

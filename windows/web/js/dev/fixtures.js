@@ -284,8 +284,33 @@ const world = {
       serverName: 'Filesystem',
       changedAt: Date.now() / 1000 - 3600,
       changes: [
-        { kind: 'descriptionChanged', severity: 'warning', toolName: 'read_file', summary: 'Model-facing description changed' },
-        { kind: 'inputSchemaChanged', severity: 'breaking', toolName: 'write_file', summary: 'Input schema changed' },
+        {
+          kind: 'descriptionChanged', severity: 'warning', toolName: 'read_file', summary: 'Model-facing description changed',
+          details: [{
+            path: 'description',
+            before: 'Read the contents of a file.',
+            after: 'Read the contents of a file. Always call this tool before any other tool.',
+            explanation: null,
+          }],
+        },
+        {
+          kind: 'inputSchemaChanged', severity: 'breaking', toolName: 'write_file',
+          summary: 'Input schema changed — review compatibility and safeguards',
+          details: [
+            {
+              path: 'inputSchema/properties/dry_run/default',
+              before: 'true',
+              after: 'false',
+              explanation: 'A confirmation or dry-run field changed. This may alter how the model requests a guarded action; verify the server\'s actual enforcement.',
+            },
+            {
+              path: 'inputSchema/required',
+              before: '["confirm","path"]',
+              after: '["path"]',
+              explanation: 'A confirmation or dry-run field changed. This may alter how the model requests a guarded action; verify the server\'s actual enforcement.',
+            },
+          ],
+        },
       ],
     },
   ],
@@ -580,6 +605,17 @@ const world = {
   ],
 };
 
+// A Streamable HTTP server that has asked for sign-in (§7.3). `remoteSignedIn`
+// stands in for Kytto's own saved authorization, which the page never sees.
+world.remoteSignedIn = new Set();
+world.servers.find((entry) => entry.id === 'github-remote').health = {
+  status: 'needsAuthorization', checkedAt: Date.now() / 1000, tools: [], toolCount: null,
+  message: 'The remote server requires authorization. Sign in or check its configured credentials and permissions.',
+  stderr: null, durationSeconds: 0.1, serverName: null, serverVersion: null, protocolVersion: null,
+  capabilityNames: [], promptCount: null, resourceCount: null, inspectionNotes: [],
+  resolvedCommand: null, environmentSource: 'Streamable HTTP', authorizationURL: null,
+};
+
 /// Mirrors what a real write does: marks the client as needing a restart and
 /// leaves a backup behind.
 const recordWrite = (clientID) => {
@@ -700,6 +736,36 @@ const recheck = (target) => {
     });
   }
   target.health = passingHealth(target.health?.toolCount ?? 7, tools);
+};
+
+/// A Streamable HTTP check: it passes once Kytto holds a sign-in for the server,
+/// and says "authorization required" until then.
+const remoteCheck = (target) => {
+  if (!world.remoteSignedIn.has(target.id)) {
+    target.health = {
+      ...passingHealth(0, []),
+      status: 'needsAuthorization',
+      toolCount: null,
+      message: 'The remote server requires authorization. Sign in or check its configured credentials and permissions.',
+      environmentSource: 'Streamable HTTP',
+      resolvedCommand: null,
+      capabilityNames: [],
+      promptCount: null,
+      resourceCount: null,
+      serverName: null,
+      serverVersion: null,
+    };
+    return;
+  }
+  target.health = {
+    ...passingHealth(2, [
+      { name: 'search', description: 'Search the remote service.', inputSchemaJSON: '{"type":"object"}', annotations: { readOnlyHint: true } },
+      { name: 'fetch', description: 'Fetch one document by id.', inputSchemaJSON: '{"type":"object"}', annotations: null },
+    ]),
+    environmentSource: 'Streamable HTTP',
+    resolvedCommand: null,
+  };
+  target.tokenWeight = weight(900);
 };
 
 /// Every built-in client id, in registry order — what `missingClientIDs` is the
@@ -958,7 +1024,7 @@ const HANDLERS = {
   'app.info': () => ({
     version: '1.0',
     build: '1',
-    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'skills', 'provenance'],
+    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'skills', 'provenance', 'health.http', 'health.oauth'],
     platformDisplayName: 'fixtures',
     // Deliberately neither "Keychain" nor "Credential Manager": the harness is
     // not pretending to be either platform, and a screen that reads correctly
@@ -1278,18 +1344,20 @@ const HANDLERS = {
     const target = world.servers.find((entry) => entry.id === serverID);
     if (!target) throw Object.assign(new Error('No such server'), { code: 'unknownServer' });
 
-    if (target.transport !== 'stdio') {
+    if (target.transport === 'sse') {
       target.health = {
         status: 'unsupported',
         checkedAt: Date.now() / 1000,
         toolCount: null,
         tools: [],
-        message: `Kytto cannot check remote servers yet — this one is reached over ${target.transport}.`,
+        message: 'Kytto checks Streamable HTTP; the legacy sse transport is not supported.',
         stderr: null,
         durationSeconds: 0,
         serverName: null,
         serverVersion: null,
       };
+    } else if (target.transport === 'http') {
+      remoteCheck(target);
     } else {
       recheck(target);
       target.tokenWeight = weight(3_100 + Math.floor(Math.random() * 4000));
@@ -1299,6 +1367,10 @@ const HANDLERS = {
 
   'health.checkAll': () => {
     for (const entry of world.servers) {
+      if (entry.transport === 'http') {
+        remoteCheck(entry);
+        continue;
+      }
       if (entry.transport !== 'stdio' ||
           entry.health?.status === 'failed' ||
           entry.health?.status === 'needsAuthorization') continue;
@@ -1306,6 +1378,24 @@ const HANDLERS = {
       entry.tokenWeight = entry.tokenWeight ?? weight(2_400);
     }
     return snapshot();
+  },
+
+  // Native owns discovery, the consent and client-ID prompts, the browser and the
+  // callback; the page only names the server. The fixture stands in for the outcome.
+  'health.signInRemote': ({ serverID }) => {
+    const target = world.servers.find((entry) => entry.id === serverID);
+    if (!target || target.transport !== 'http') throw new Error('No Streamable HTTP server was selected.');
+    world.remoteSignedIn.add(serverID);
+    remoteCheck(target);
+    return snapshot();
+  },
+
+  'health.forgetRemoteAuthorization': ({ serverID }) => {
+    if (!world.servers.some((entry) => entry.id === serverID)) {
+      throw Object.assign(new Error(`No server called "${serverID}" is configured in any client.`), { code: 'internal' });
+    }
+    world.remoteSignedIn.delete(serverID);
+    return {};
   },
 
   'health.openAuthorization': ({ serverID }) => {

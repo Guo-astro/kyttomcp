@@ -1256,6 +1256,45 @@ async function checkServer(serverId) {
   }
 }
 
+// MARK: - Remote sign-in (§7.3)
+//
+// Only an opaque server id crosses. Discovery, the consent and client-ID prompts, the
+// browser, the loopback callback and every token are native; what comes back is the
+// ordinary state, and the next check shows what the new authorization does.
+
+async function signInRemote(serverId) {
+  // The same busy flag as a check: a sign-in, a check and a check-all never overlap.
+  if (getState().checking.has(serverId) || getState().healthProgress) return;
+  setChecking(serverId, true);
+  try {
+    applyState(await invoke('health.signInRemote', { serverID: serverId }));
+    const server = getState().servers.find((entry) => entry.id === serverId);
+    setState({
+      notice: server?.health?.status === 'passed'
+        ? { kind: 'info', message: `Signed in. Kytto checked “${server.name}” with its saved authorization.` }
+        : { kind: 'info', message: 'The sign-in dialog closed. The server’s details show the latest check.' },
+    });
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setChecking(serverId, false);
+  }
+}
+
+async function forgetRemoteAuthorization(serverId) {
+  try {
+    await invoke('health.forgetRemoteAuthorization', { serverID: serverId });
+    setState({
+      notice: {
+        kind: 'info',
+        message: 'Kytto’s saved sign-in was removed from the credential store. Your clients’ own sign-ins are untouched.',
+      },
+    });
+  } catch (error) {
+    reportFailure(error);
+  }
+}
+
 async function openAuthorization(serverId) {
   try {
     await invoke('health.openAuthorization', { serverID: serverId });
@@ -1601,6 +1640,12 @@ root.addEventListener('click', async (event) => {
       break;
     case 'open-authorization':
       await openAuthorization(target.dataset.serverId);
+      break;
+    case 'sign-in-remote':
+      await signInRemote(target.dataset.serverId);
+      break;
+    case 'forget-remote-authorization':
+      await forgetRemoteAuthorization(target.dataset.serverId);
       break;
     case 'check-all':
       await checkAll();
