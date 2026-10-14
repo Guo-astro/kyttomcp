@@ -72,6 +72,7 @@ test('the updater is capability-gated, native-only, and renders the shared banne
 test('1.0.5 read-only tools use preview-first native flows and expose provenance safely', async () => {
   const main = await readFile(path.join(webRoot, 'js', 'main.js'), 'utf8');
   const matrix = await readFile(path.join(webRoot, 'js', 'screens', 'matrix.js'), 'utf8');
+  const sidebar = await readFile(path.join(webRoot, 'js', 'screens', 'sidebar.js'), 'utf8');
   const tools = await readFile(path.join(webRoot, 'js', 'screens', 'tools.js'), 'utf8');
   const detail = await readFile(path.join(webRoot, 'js', 'screens', 'serverDetail.js'), 'utf8');
 
@@ -84,8 +85,12 @@ test('1.0.5 read-only tools use preview-first native flows and expose provenance
     assert.match(main, new RegExp(`invoke\\('${escaped}'`));
   }
   assert.match(matrix, /capabilityButton\(state, 'agent-import'/);
-  assert.match(matrix, /capabilityButton\(state, 'library'/);
-  assert.match(matrix, /capabilityButton\(state, 'skills'/);
+  // MCP Library and Skills moved from the toolbar to the sidebar's Discover group
+  // (§7.1.1). They are still capability-gated and still open the same sheets.
+  assert.match(sidebar, /capability: 'library', action: 'open-library'/);
+  assert.match(sidebar, /capability: 'skills', action: 'open-skills'/);
+  assert.match(sidebar, /hasCapability\(state, entry\.capability\)/);
+  assert.doesNotMatch(matrix, /capabilityButton\(state, '(?:library|skills)'/);
   assert.match(tools, /Preview import/);
   assert.match(tools, /button\('Import'/);
   assert.match(tools, /Read-only/);

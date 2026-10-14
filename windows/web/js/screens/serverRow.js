@@ -8,7 +8,7 @@
 // that the disk agreed are stated once, because a second copy is how they drift.
 
 import { el, glyph, GLYPH } from '../dom.js';
-import { cellKey, matchingTools } from '../state.js';
+import { cellKey, matchingTools, serverIsReadOnly, sourceKind } from '../state.js';
 
 const CELL_LABEL = {
   enabled: 'Enabled — click to turn off. Clicking updates the client configuration.',
@@ -48,7 +48,18 @@ export function toggle(state, server, client, value, flipped) {
   // A stable column must not turn an undetected client into a write target. A
   // custom config path in Settings is the explicit way to make it editable.
   const portable = !(server.isBundled && value === 'absent');
-  if (client.isReadOnly) {
+  if (isPlugin(server)) {
+    // A plugin is installed software that the owning client registers and
+    // enables; the file Kytto can read is its cache, which the client rewrites.
+    // Unlike a Claude Desktop extension, which carries its own on/off flag in the
+    // client that installed it, there is no switch of ours to flip (§4).
+    button.disabled = true;
+    button.classList.add('read-only');
+    button.title =
+      value === 'absent'
+        ? 'Plugin servers belong to their client installation and cannot be copied.'
+        : 'Read-only plugin. Manage its enablement in the owning client.';
+  } else if (client.isReadOnly) {
     button.disabled = true;
     button.classList.add('read-only');
     button.title = 'Kytto never changes this file.';
@@ -60,7 +71,7 @@ export function toggle(state, server, client, value, flipped) {
   } else if (!portable) {
     // An extension is an installed bundle, not a definition that can be copied.
     button.disabled = true;
-    button.title = 'Bundled extensions cannot be copied into another client.';
+    button.title = 'Installed extensions and plugins cannot be copied into another client.';
   } else if (value === 'absent' && server.hasRelativePath) {
     // Copyable, and probably not worth copying. Nothing stops the click — the
     // file is written correctly either way and the user may know something Kytto
@@ -91,6 +102,14 @@ export function toggle(state, server, client, value, flipped) {
   return button;
 }
 
+/// Plugin servers are read-only everywhere, in every client column. The three
+/// spellings are the same fact from three generations of the payload: the
+/// source kind, the origin kind, and a bundle whose source says read-only.
+export const isPlugin = (server) =>
+  server.originKind === 'plugin' ||
+  server.source?.kind === 'plugin' ||
+  (server.isBundled === true && server.source?.readOnly === true);
+
 /// What each cell currently says, for `changedIn` to diff against the render
 /// before it. Both screens snapshot the same way, under their own group name.
 export const cellSnapshot = (clients, servers) =>
@@ -115,18 +134,49 @@ const DOT_STATE = {
 const DOT_LABEL = {
   passed: 'Health check passed',
   failed: 'Health check failed',
-  unsupported: 'Not checked — remote server',
+  unsupported: 'Check unsupported — open details for the reason',
   needsAuthorization: 'Waiting for you to authorize it — open the server for the sign-in link',
 };
 
+/// The same verdict in words. The dot is a redundant cue, never the only one
+/// (§7.1.2): a row has to read correctly to someone who cannot tell green from
+/// red, and in compact density it is the only line that says how the last check
+/// went.
+const STATUS_TEXT = {
+  passed: 'Check passed',
+  failed: 'Check failed',
+  needsAuthorization: 'Sign-in required',
+  unsupported: 'Check unavailable',
+};
+
+/// "Read-only · Plugin · Demo tools 2.0" — what kind of thing this row is, who
+/// supplied it, and whether Kytto may touch it.
+export function sourceLabel(server) {
+  const source = server.source ?? { kind: sourceKind(server), displayName: null, version: null };
+  const name = source.displayName ?? '';
+  const version = source.version ? ` ${source.version}` : '';
+  const kind =
+    source.kind === 'plugin'
+      ? `Plugin${name ? ` · ${name}${version}` : ''}`
+      : source.kind === 'extension'
+        ? `Extension${name && name !== 'Claude Desktop extension' ? ` · ${name}${version}` : ''}`
+        : source.kind === 'custom'
+          ? 'Custom source'
+          : 'Configuration';
+  return `${serverIsReadOnly(server) ? 'Read-only · ' : ''}${kind}`;
+}
+
 /// Health, name, what it is, and what it runs — as one button that opens the
-/// detail sheet (§7.5).
+/// server (§7.5). On the matrix that is the persistent inspector (§7.1.2); on the
+/// client screen, which has no inspector, it is the detail sheet. The label says
+/// "selected" through `aria-pressed` only where there is something to press.
 ///
 /// @param {boolean} settled a check just finished, and the dot says so once.
 export function serverOpener(state, server, settled) {
   const opener = el('button', 'server-opener');
   opener.dataset.action = 'open-server';
   opener.dataset.serverId = server.id;
+  if (state.panel === null) opener.setAttribute('aria-pressed', String(state.selectedServerId === server.id));
 
   const busy = state.checking.has(server.id);
   const status = server.health?.status;
@@ -157,13 +207,9 @@ export function serverOpener(state, server, settled) {
       'The tools this server offers, or what it says about them, changed since the last check. Open it to review.';
     title.append(badge);
   }
-  // Titled because a narrow row can cut a badge down to a stub.
-  if (server.isBundled) {
-    const badge = el('span', 'badge', 'extension');
-    badge.title = 'Installed Claude Desktop extension';
-    title.append(badge);
-  }
-  if (server.transport !== 'stdio') {
+  // Titled because a narrow row can cut a badge down to a stub. What an
+  // extension or plugin is, and which one, is the source line under the title.
+  if (server.transport !== 'stdio' && !server.isBundled) {
     const badge = el('span', 'badge', server.transport);
     badge.title = `Remote server over ${server.transport}`;
     title.append(badge);
@@ -173,6 +219,19 @@ export function serverOpener(state, server, settled) {
     title.append(el('span', 'tool-count', `${count} ${count === 1 ? 'tool' : 'tools'}`));
   }
   opener.append(title);
+
+  // Status in words beside where the row came from. Wrapping rather than
+  // truncating the pair: a long plugin name must not push the verdict off the row.
+  const meta = el('div', 'server-meta');
+  const label = el(
+    'span',
+    `server-health-label ${busy ? 'checking' : DOT_STATE[status] ?? 'unchecked'}`,
+    busy ? 'Checking…' : (STATUS_TEXT[status] ?? 'Not checked'),
+  );
+  const origin = el('span', 'server-source-label', sourceLabel(server));
+  origin.title = origin.textContent;
+  meta.append(label, origin);
+  opener.append(meta);
 
   // A failed check replaces the command with the reason it failed — that is what
   // the user needs at a glance, and the command is one click away in the detail.

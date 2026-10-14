@@ -14,6 +14,8 @@ import {
   contextWindow,
   toolBudgetFigure,
   toolBudgetStrained,
+  scopeOptions,
+  SOURCE_FILTERS,
 } from '../state.js';
 import {
   el,
@@ -39,6 +41,7 @@ import {
 import { renderSecrets, renderRotateSheet } from './secrets.js';
 import {
   renderServerDetail,
+  renderServerInspector,
   renderDeleteConfirm,
   renderRemoveConfirm,
   renderGatewayPreview,
@@ -154,12 +157,8 @@ export function render(root) {
     screen = renderSecrets(state);
   } else if (state.panel === 'client') {
     screen = renderClient(state);
-  } else if (state.servers.length === 0) {
-    screen = emptyState(clients);
-  } else if (servers.length === 0) {
-    screen = el('div', 'placeholder', `Nothing matches “${state.filter}”.`);
   } else {
-    screen = table(state, clients, servers);
+    screen = matrixWorkspace(state, clients, servers);
   }
   if (panelChanged) screen.classList.add('panel-entering', `panel-${panelDirection}`);
   content.append(screen);
@@ -339,17 +338,16 @@ function chromeBand(state) {
     search.setAttribute('aria-label', 'Filter servers');
 
     actions.append(button('Add server', 'add-server', { className: 'button primary' }));
-    for (const control of [
-      capabilityButton(state, 'agent-import', 'Import agent…', 'open-agent-import'),
-      capabilityButton(state, 'library', 'MCP library…', 'open-library'),
-      capabilityButton(state, 'skills', 'Skills…', 'open-skills'),
-    ]) {
-      if (control) actions.append(control);
-    }
+    // MCP Library and Skills moved to the sidebar's Discover group (§7.1.1); what
+    // stays here is what you do to the matrix itself.
+    const importAgent = capabilityButton(state, 'agent-import', 'Import agent…', 'open-agent-import');
+    if (importAgent) actions.append(importAgent);
+    // "Check visible" runs the checks for the rows the filters leave, one after
+    // another. Every server at once is MCP Doctor's "Check all servers".
     actions.append(
       button(
-        checking ? `Checking ${checking.index}/${checking.total}…` : 'Check all',
-        checking ? 'noop' : 'check-all',
+        checking ? `Checking ${checking.index}/${checking.total}…` : 'Check visible',
+        checking ? 'noop' : 'check-visible',
         { className: checking ? 'button busy' : 'button' },
       ),
     );
@@ -436,6 +434,127 @@ function progressLine({ index, total }) {
   return track;
 }
 
+// MARK: - Matrix with detail
+
+/// The matrix and the inspector beside it (§7.1.2), under a heading and the three
+/// filters (§7.1.1). A section rather than a bare table so both halves share one
+/// density and one place to wrap when the window narrows.
+function matrixWorkspace(state, clients, servers) {
+  const workspace = el('section', `matrix-workspace density-${state.density}`);
+
+  const header = el('header', 'matrix-heading');
+  const identity = el('div');
+  const scope = scopeOptions(state).find((entry) => entry.id === state.scopeFilter);
+  identity.append(
+    el('span', 'eyebrow', scope?.label ?? 'All sources'),
+    el('h1', null, 'Server matrix'),
+    el(
+      'p',
+      'muted',
+      `${servers.length} of ${state.servers.length} servers · ${clients.length} configuration ${clients.length === 1 ? 'source' : 'sources'}`,
+    ),
+  );
+  header.append(identity);
+  // [stream S] portable-setup actions (Export / Import setup) join this header
+  // as a sibling of `identity`; the header already wraps and aligns them.
+  workspace.append(header);
+
+  const filters = el('div', 'matrix-filters');
+  filters.append(
+    filterSelect('Scope', 'scope-filter', state.scopeFilter, scopeOptions(state), GLYPH.matrix),
+    filterSelect('Source', 'source-filter', state.sourceFilter, SOURCE_FILTERS, GLYPH.library),
+    filterSelect(
+      'Rows',
+      'row-density',
+      state.density,
+      [
+        { id: 'comfortable', label: 'Comfortable' },
+        { id: 'compact', label: 'Compact' },
+      ],
+      ['M3 4h10', 'M3 8h10', 'M3 12h10'],
+    ),
+  );
+  if (state.scopeFilter !== 'all' || state.sourceFilter !== 'all' || state.filter) {
+    filters.append(button('Reset filters', 'reset-matrix-filters', { className: 'button subtle' }));
+  }
+  workspace.append(filters);
+
+  const split = el('div', 'matrix-split');
+  const list = el('section', 'matrix-list');
+  list.setAttribute('aria-label', 'Servers and client configuration');
+  if (state.servers.length === 0) {
+    list.append(emptyState(clients));
+  } else if (servers.length === 0) {
+    list.append(noMatches(state));
+  } else {
+    list.append(table(state, clients, servers));
+  }
+
+  // The selection is shown only while its row is: `setState` clears an id the
+  // filters hide, and this guards the one render in between.
+  const selected = servers.find((server) => server.id === state.selectedServerId);
+  const inspector = renderServerInspector(state, selected?.id);
+  if (changed('inspector-subject', selected?.id ?? '', 180)) inspector.classList.add('inspector-entering');
+  split.append(list, inspector);
+  workspace.append(split);
+  return workspace;
+}
+
+/// One filter: a real `<select>` — native menu, keyboard and typeahead intact —
+/// drawn with our own closed appearance (§10.1). The icon and the chevron are
+/// decorative SVG, `aria-hidden` and inert to the pointer, so the whole control
+/// is the select; the label wraps both, which is what associates them.
+function filterSelect(label, action, selected, options, icon) {
+  const field = el('label', 'matrix-filter');
+  // Accent when it is narrowing something, so a filter left on is visible from
+  // across the room and not only on reading its value.
+  if (selected !== options[0]?.id) field.classList.add('is-active');
+
+  const control = el('span', 'filter-control');
+  const leading = glyph(icon);
+  leading.classList.add('filter-icon');
+
+  const select = el('select', 'scope-select');
+  select.dataset.action = action;
+  for (const item of options) {
+    const option = el('option', null, item.label);
+    option.value = item.id;
+    option.selected = item.id === selected;
+    select.append(option);
+  }
+
+  const chevron = glyph(GLYPH.disclosure);
+  chevron.classList.add('filter-chevron');
+  control.append(leading, select, chevron);
+  field.append(el('span', 'matrix-filter-label', label), control);
+  return field;
+}
+
+/// Why the list is empty, and the one way out. Text alone keeps the sentence it
+/// always had; a scope or source type that hides everything says so, and says
+/// when the cause is a folded sidebar rather than the data.
+function noMatches(state) {
+  const box = el('div', 'placeholder');
+  const textOnly = state.filter && state.scopeFilter === 'all' && state.sourceFilter === 'all';
+  box.append(
+    el(
+      'p',
+      null,
+      textOnly ? `Nothing matches “${state.filter}”.` : 'No servers match these filters.',
+    ),
+  );
+  if (
+    !textOnly &&
+    state.settings?.showsCustomSources === false &&
+    state.scopeFilter === 'all' &&
+    state.sourceFilter === 'custom'
+  ) {
+    box.append(el('p', 'muted', 'Custom sources are folded away in the sidebar. Show them there to list their servers.'));
+  }
+  box.append(button(textOnly ? 'Clear filter' : 'Show all sources', 'reset-matrix-filters'));
+  return box;
+}
+
 // MARK: - Table
 
 function table(state, clients, servers) {
@@ -447,15 +566,14 @@ function table(state, clients, servers) {
   // The list itself is a different question: it animates when the set of rows
   // changes — first load, a refresh, a filter — and never when a value inside
   // one of them does.
-  const added = addedIn('matrix-rows', servers.map((server) => server.id), 320);
-  const filtering = changed('matrix-filter', state.filter, 180);
+  const added = addedIn('matrix-rows', servers.map((server) => server.id), 180);
 
   // The table lives inside a scroll container rather than being a flex child
   // itself. As a flex item it would stretch to fill the window and hand the
   // extra height to the rows, which is the opposite of a dense instrument panel.
   const scroller = el('div', 'table-scroll');
   scroller.dataset.scrollKey = 'matrix';
-  const table = el('table', filtering ? 'matrix is-filtering' : 'matrix');
+  const table = el('table', 'matrix');
   table.style.setProperty(
     '--matrix-min-width',
     `calc(var(--col-server-min) + var(--col-weight-width) + ${clients.length} * var(--col-client-width))`,
@@ -513,7 +631,7 @@ function table(state, clients, servers) {
     const tr = row(state, server, clients, flipped, settled.has(server.id));
     if (added.has(server.id)) {
       tr.classList.add('row-entering');
-      tr.style.animationDelay = stagger(index);
+      tr.style.animationDelay = stagger(index, 8, 40);
     }
     body.append(tr);
   });
@@ -526,6 +644,7 @@ function table(state, clients, servers) {
 function row(state, server, clients, flipped, settled) {
   const tr = el('tr');
   tr.dataset.serverId = server.id;
+  if (state.selectedServerId === server.id) tr.classList.add('selected-server');
 
   const heavy =
     (server.tokenWeight?.estimate ?? 0) >= (state.settings?.tokenWarningThreshold ?? 20000) &&
@@ -533,7 +652,8 @@ function row(state, server, clients, flipped, settled) {
   if (heavy) tr.classList.add('heavy');
 
   const nameCell = el('td', 'col-server');
-  // The whole name block opens the detail sheet (§7.5).
+  // The whole name block selects the server for the inspector (§7.1.2); Expand
+  // there opens the full detail sheet (§7.5).
   nameCell.append(serverOpener(state, server, settled));
   tr.append(nameCell);
 
