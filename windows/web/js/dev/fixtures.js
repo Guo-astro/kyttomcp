@@ -764,6 +764,9 @@ const remoteCheck = (target) => {
     ]),
     environmentSource: 'Streamable HTTP',
     resolvedCommand: null,
+    capabilityNames: ['tools'],
+    promptCount: null,
+    resourceCount: null,
   };
   target.tokenWeight = weight(900);
 };
