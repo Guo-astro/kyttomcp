@@ -175,7 +175,12 @@ internal static class DtoMapping
             Raw(change.Kind),
             Raw(change.Severity),
             change.ToolName,
-            change.Summary)).ToArray());
+            change.Summary,
+            change.Details?.Select(field => new ContractFieldChangeDto(
+                field.Path,
+                field.Before,
+                field.After,
+                field.Explanation)).ToArray())).ToArray());
 
     internal static DoctorFixPreviewDto ToDto(this DoctorFixPreview preview) => new(
         preview.ServerID,

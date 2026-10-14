@@ -954,16 +954,10 @@ internal sealed partial class AppModel : IDisposable
     /// </remarks>
     internal async Task<HealthResult> CheckHealthAsync(string serverId)
     {
-        var server = ServerById(serverId);
-        var (health, weight) = await Task.Run(() => new HealthChecker().Check(server));
-
-        // The check can take ten seconds and the window stays usable meanwhile. A
-        // server deleted (or renamed) in that time must not get its metadata back
-        // from a result nobody is waiting for any more.
-        if (!_current.Servers.Any(candidate => candidate.Id == server.Id)) return health;
-        _metadata.Record(server.Id, health, weight);
-        Reload();
-        return health;
+        // Recorded in AppModel.Remote.cs: the same rule for every transport (a server
+        // deleted, renamed or edited meanwhile gets nothing back), plus Kytto's own
+        // saved sign-in for a Streamable HTTP server.
+        return await RecordHealthAsync(ServerById(serverId));
     }
 
     /// <summary>Opens only the HTTPS page captured by native during the last check.</summary>
@@ -980,17 +974,21 @@ internal sealed partial class AppModel : IDisposable
         _authorizationPageLauncher.Open(health.AuthorizationURL!);
     }
 
-    /// <summary>Checks every stdio server, one at a time.</summary>
+    /// <summary>Checks every stdio and Streamable HTTP server, one at a time.</summary>
     /// <remarks>
     /// Sequential on purpose (§7.3): these are arbitrary commands, and starting a
     /// dozen node processes at once to save a few seconds is not a trade worth
-    /// making on someone's laptop.
+    /// making on someone's laptop. Legacy SSE has no check. A stdio server that is
+    /// already waiting for a browser sign-in is not started again; a remote one
+    /// costs a request, so it is asked again — the sign-in may have been completed
+    /// since.
     /// </remarks>
     internal async Task CheckAllHealthAsync(Action<string, int, int> onProgress)
     {
         var servers = _current.Servers
-            .Where(server => server.Transport == Transport.Stdio &&
-                             server.Health?.Status != HealthStatus.NeedsAuthorization)
+            .Where(server => server.Transport == Transport.Http ||
+                             (server.Transport == Transport.Stdio &&
+                              server.Health?.Status != HealthStatus.NeedsAuthorization))
             .ToArray();
 
         for (var index = 0; index < servers.Length; index++)

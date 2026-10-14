@@ -427,11 +427,26 @@ internal sealed record DoctorServerReportDto(
     string ServerName,
     IReadOnlyList<DoctorFindingDto> Findings);
 
+/// <param name="Details">
+/// Field-level before/after, bounded natively (§7.10). Null — written as null, not
+/// omitted — for an added or removed tool, and for a change recorded before 1.0.8.
+/// </param>
 internal sealed record ContractChangeDto(
     string Kind,
     string Severity,
     string ToolName,
-    string Summary);
+    string Summary,
+    IReadOnlyList<ContractFieldChangeDto>? Details = null);
+
+/// <summary>
+/// One changed field, as display text: an escaped JSON Pointer path, bounded excerpts
+/// (null means absent) and an optional explanation. Never used to decide equality.
+/// </summary>
+internal sealed record ContractFieldChangeDto(
+    string Path,
+    string? Before,
+    string? After,
+    string? Explanation);
 
 internal sealed record ContractAlertDto(
     string ServerID,
