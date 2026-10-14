@@ -21,6 +21,7 @@ export class FakeElement {
     this.title = '';
     this.id = '';
     this.parent = null;
+    this.style = { setProperty: (name, value) => { this.style[name] = value; } };
     this._classes = new Set();
     this._text = '';
     this.classList = {
@@ -77,13 +78,17 @@ export class FakeElement {
   matches(selector) {
     // Compound selectors only: `tag`, `.class`, `[data-x]`, `[data-x="y"]`, and
     // any run of them (`button.cell-toggle[data-state="enabled"]`).
-    const parts = selector.match(/^([a-zA-Z][\w-]*)?((?:\.[\w-]+|\[[^\]]+\])*)$/);
+    const parts = selector.match(/^([a-zA-Z][\w-]*)?((?:\.[\w-]+|#[\w-]+|\[[^\]]+\])*)$/);
     if (!parts) throw new Error(`FakeElement cannot match “${selector}”.`);
     const [, tag, rest] = parts;
     if (tag && this.tagName !== tag.toUpperCase()) return false;
-    for (const token of rest.match(/\.[\w-]+|\[[^\]]+\]/g) ?? []) {
+    for (const token of rest.match(/\.[\w-]+|#[\w-]+|\[[^\]]+\]/g) ?? []) {
       if (token.startsWith('.')) {
         if (!this._classes.has(token.slice(1))) return false;
+        continue;
+      }
+      if (token.startsWith('#')) {
+        if (this.id !== token.slice(1)) return false;
         continue;
       }
       const [, name, value] = token.match(/^\[([\w-]+)(?:="([^"]*)")?\]$/);
@@ -95,9 +100,22 @@ export class FakeElement {
     return true;
   }
 
+  /// `a b > c` is not supported; `a b c` (descendants) and `a, b` are.
+  matchesChain(steps) {
+    if (!this.matches(steps[steps.length - 1])) return false;
+    let index = steps.length - 2;
+    for (let ancestor = this.parent; ancestor && index >= 0; ancestor = ancestor.parent) {
+      if (ancestor.matches(steps[index])) index -= 1;
+    }
+    return index < 0;
+  }
+
   querySelectorAll(selector) {
-    const alternatives = selector.split(',').map((part) => part.trim()).filter(Boolean);
-    return this.descendants().filter((node) => alternatives.some((part) => node.matches(part)));
+    const alternatives = selector
+      .split(',')
+      .map((part) => part.trim().match(/(?:\[[^\]]*\]|\S)+/g) ?? [])
+      .filter((steps) => steps.length > 0);
+    return this.descendants().filter((node) => alternatives.some((steps) => node.matchesChain(steps)));
   }
 
   querySelector(selector) {
