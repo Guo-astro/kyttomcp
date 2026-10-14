@@ -276,7 +276,8 @@ This is the section that decides whether the product survives. Breaking someone'
 
 **Where Kytto keeps its own data on Windows.** Everything lives under
 `%APPDATA%\Kytto`: `Backups\<client>\`, `parked.json`, `settings.json`,
-`metadata.json`, `profiles.json`, `gateway-routes.json`, the gateway event log
+`metadata.json`, `profiles.json`, `pending-contract-imports.json` (§7.13),
+`gateway-routes.json`, the gateway event log
 and the update staging folder. Windows has no mode bits, so rule 1's "readable by
 this user and nobody else" is a **protected DACL**: inheritance switched off, and
 full control for the current user, `SYSTEM` and `Administrators` only. Folders are
@@ -437,6 +438,26 @@ tool-contract weight with that budget, calls out unmeasured and unusually heavy
 servers, and detects duplicate tool names inside the stack. Recommendations are
 advisory; Kytto never removes a member automatically.
 
+#### Profiles header actions
+
+The Profiles screen's header holds the heading copy and **one** group of actions —
+Export setup, Import setup and New profile (§7.13) — and that group is a direct
+child of the header, never a separate row below it. A row of its own is what left
+the buttons against the panel's left edge, detached from everything above it.
+
+The rules, which `portable-setup.test.js` pins:
+
+- The header and the empty state use the same content gutter, so the heading, the
+  empty-state text and "Create a profile" share a left edge whether or not the
+  portable-setup capability is present. Without it the group holds New profile
+  alone; there is no empty container left to take room.
+- The three buttons share one height (32 px) and one centre line, and the group is
+  centred against the heading copy when they sit on one row.
+- The group wraps **as a whole** when the window narrows — moving below the text
+  inside the same gutter — rather than letting a button be cut off or the page
+  scroll sideways. Light and dark, wide and narrow, and the empty panel are all
+  checked.
+
 ### 7.10 MCP Doctor and Contract Guard
 
 MCP Doctor turns config and health evidence into actionable findings. Automatic
@@ -557,6 +578,56 @@ bytes are a copy like any other and can drift like one, so unifying updates them
 where they actually live. Writing them into the file instead would be
 indistinguishable from switching the server *on*, which is why the two outcomes
 are counted apart and only a real config write asks anyone to restart.
+
+### 7.13 Portable setup
+
+A setup moves between machines — and between the macOS and Windows apps, which read
+and write the same file — as versioned JSON: `kytto-portable-setup`, version 1,
+carrying `servers`, `profiles`, `requirements` and, optionally, `reviewedContracts`.
+It is a **whitelist**, not a copy of anyone's config. Only writable, built-in client
+definitions and profiles are exported; custom and workspace sources, installed
+plugins and extension bundles never are, and the credential store is never read.
+Exact launcher names, known flags and a verified registry package identifier may stay
+literal; every other argument, every environment and header value, every remote URL
+and every private path becomes a **requirement** of kind `secret`, `path` or `value`
+that the destination supplies natively.
+
+*Reading* a file is as strict as writing one is careful: a size cap, strict JSON
+(no comments or trailing commas), valid UTF-8, no key twice, no key outside the
+known set, every value of exactly the declared type, and every limit the macOS app
+applies. A literal outside the whitelist is refused, so an unknown command or
+argument cannot ride in as "public" text. A byte-order mark is skipped.
+An export refuses to land on a live client config or one of Kytto's own stores —
+by what each path finally names, with symbolic links, junctions, mount points, short
+names and letter case followed through.
+
+**Import is a preview and an apply.** The preview reads everything, collects the
+inputs in a native window (masked for secrets, URLs and plain values; file and
+folder browsing for paths), and keeps a plan natively under an opaque id: single
+use, ten minutes, at most four at a time, discarded by Cancel, Escape and the
+backdrop, and invalidated when the client paths or sources change. Neither the file's
+path nor anything typed crosses to the page. The apply checks the digest of the setup
+file, of every config it would write or read, and of Kytto's own stores again; refuses
+a name or profile that now exists; and writes Kytto's stores first and the configs
+last, as one §6 transaction with a backup of each. If the config transaction
+refuses, the stores are put back byte for byte, and anything that could not be put
+back is named in the error rather than hidden. **An imported server is always
+switched off** — `enabled = false` for Codex, a deny-list entry for Claude Code, a
+held definition for the presence-only clients — and no command has a way to ask
+otherwise. Existing parked copies, comments, unknown keys and everything else in the
+user's files survive because nothing is regenerated. No server is launched.
+
+**Reviewed contracts** are optional and exported only on request. Each tool becomes a
+SHA-256 digest of a canonical envelope — sorted keys, the schema as its canonical
+text rather than a nested object, token measurements excluded, nothing escaped that
+does not need to be — written by hand so that no serializer default can change it;
+the digest vectors the macOS app produced are test fixtures. On import a reference is
+**pending evidence, never a baseline**: it gets this machine's own import time, shows
+`matching: null` until a check that passed *after* that time exists, and is then only
+compared. Acknowledging a Contract Guard alert reads both stores and requires that
+fresh check *before* either is written; an unreadable pending store is kept as it is,
+blocks the review, and never leaves a local alert half acknowledged. Imported hashes
+are never copied into trust.
 
 ---
 
