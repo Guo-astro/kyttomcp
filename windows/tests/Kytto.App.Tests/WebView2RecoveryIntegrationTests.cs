@@ -146,6 +146,11 @@ public sealed class WebView2RecoveryIntegrationTests : IDisposable
             Assert.Equal(Visibility.Visible, window.Web.Visibility);
             var control = window.Web;
 
+            // The window draws its own WPF content (the panel) in software: hardware
+            // rendering painted nothing over the glass and backdrop when checked by eye.
+            var target = ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(window)).CompositionTarget;
+            Assert.Equal(System.Windows.Interop.RenderMode.SoftwareOnly, target.RenderMode);
+
             // What WebHost reports when the page's renderer ends — twice, as it can.
             window.RecoveryState!.ReportProcessFailure(InterfaceFailureKind.RendererExited);
             window.RecoveryState.ReportProcessFailure(InterfaceFailureKind.RendererExited);

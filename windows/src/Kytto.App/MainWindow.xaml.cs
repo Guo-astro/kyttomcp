@@ -91,6 +91,31 @@ public partial class MainWindow : Window
 
     internal CommandRouter Router => _router;
 
+    /// <summary>
+    /// Renders this window's own WPF content in software (§7.14).
+    /// </summary>
+    /// <remarks>
+    /// Until the recovery panel nothing WPF drew in this window was ever on screen:
+    /// the page covers it, and the caption buttons are a Popup, which is a separate
+    /// window of its own. The panel is drawn in the window itself, over a sheet of
+    /// glass with a system backdrop behind it. On the machine this was verified on,
+    /// hardware-accelerated WPF painted nothing there — a solid-coloured grid, the
+    /// window background and all text were invisible, leaving only the backdrop —
+    /// and a bare WPF window with one TextBlock was blank too, so it is a property
+    /// of that display path rather than of this tree. Rendered in software the same
+    /// tree shows, deterministically, and it costs nothing here: this window holds
+    /// no WPF content but the panel. Only this window's target is switched; the
+    /// page is a separate composition and draws as before.
+    /// </remarks>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        if (PresentationSource.FromVisual(this) is HwndSource { CompositionTarget: { } target })
+        {
+            target.RenderMode = RenderMode.SoftwareOnly;
+        }
+    }
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         if (_initializationStarted) return;

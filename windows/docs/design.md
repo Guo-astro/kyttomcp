@@ -613,7 +613,12 @@ state machine behind it, with the window as a testable seam:
 
 The caption buttons, the page-declared drag region, the tray, DPI and theme keep
 working while the panel shows; the panel carries its own drag strip and follows
-the window's light/dark decision. There is no telemetry SDK, no automatic crash
+the window's light/dark decision. The window renders its own WPF content in
+software: on the machine this was checked on, hardware-accelerated WPF painted
+nothing in a window with extended glass and a system backdrop (nothing in that
+window had ever been WPF-drawn before — the page covers it and the caption
+buttons are a Popup), while the same tree in software showed at once. The page
+is a separate composition and is unaffected. There is no telemetry SDK, no automatic crash
 report and no detection of a previous crash of the whole app: when the process
 dies the operating system handles it.
 
