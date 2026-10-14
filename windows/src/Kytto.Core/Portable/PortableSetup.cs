@@ -115,6 +115,7 @@ public enum PortableSetupFailure
     RollbackFailed,
     PendingContractsUnreadable,
     LocalContractNotChecked,
+    StoreUnreadable,
 }
 
 /// <summary>
@@ -122,8 +123,10 @@ public enum PortableSetupFailure
 /// never carries a value the user typed or a definition's contents — only names the
 /// user already sees, so it can be shown anywhere (§6).
 /// </summary>
-public sealed class PortableSetupException(PortableSetupFailure failure, string message)
-    : Exception(message)
+public sealed class PortableSetupException(
+    PortableSetupFailure failure,
+    string message,
+    Exception? innerException = null) : Exception(message, innerException)
 {
     public PortableSetupFailure Failure { get; } = failure;
 
@@ -141,10 +144,18 @@ public sealed class PortableSetupException(PortableSetupFailure failure, string 
             PortableSetupFailure.StalePreview,
             "The setup or destination changed after the preview. Preview the import again.");
 
-    public static PortableSetupException RollbackFailed(string detail) =>
+    public static PortableSetupException RollbackFailed(string detail, Exception? cause = null) =>
         new(
             PortableSetupFailure.RollbackFailed,
-            $"The import failed and could not completely restore its previous files: {detail}");
+            $"The import failed and could not completely restore its previous files: {detail}",
+            cause);
+
+    /// <summary>One of Kytto's own stores could not be read, so nothing was changed.</summary>
+    public static PortableSetupException StoreUnreadable(string store, Exception? cause = null) =>
+        new(
+            PortableSetupFailure.StoreUnreadable,
+            $"Kytto could not read its own {store}, so it left everything untouched.",
+            cause);
 
     public static PortableSetupException PendingContractsUnreadable() =>
         new(
