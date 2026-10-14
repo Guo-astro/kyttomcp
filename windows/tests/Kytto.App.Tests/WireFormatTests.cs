@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Kytto.App.Ipc;
 using Kytto.Core.Health;
+using Kytto.Core.Portable;
 
 namespace Kytto.App.Tests;
 
@@ -478,6 +479,88 @@ public class WireFormatTests
         // Null means "keep whatever is already in the config" — an empty string
         // would overwrite a real token (§6).
         Assert.Null(draft.Env[0].Value);
+    }
+
+    /// <summary>
+    /// Portable setup crosses as names, counts and an opaque id (§7.13). A wrong key
+    /// here renders a blank preview sheet, so every shape the page reads is pinned.
+    /// </summary>
+    [Fact]
+    public void PortableSetupRepliesCarryExactlyTheKeysThePageReads()
+    {
+        Assert.Equal(
+            ["cancelled", "serverCount", "profileCount", "warnings"],
+            KeysOf(Encode(new PortableExportDto(false, 3, 1, ["Plugins were not copied."]))));
+        Assert.Equal(
+            ["cancelled", "serverCount", "profileCount", "warnings"],
+            KeysOf(Encode(PortableExportDto.CancelledExport)));
+        Assert.True(Encode(PortableExportDto.CancelledExport).GetProperty("cancelled").GetBoolean());
+
+        var preview = Encode(new PortableImportPreviewDto(
+            "opaque-preview", ["memory"], ["Coding"], ["cursor"], [@"%USERPROFILE%\.cursor\mcp.json"], 1,
+            ["All imported servers start switched off."], Enabled: false));
+        Assert.Equal(
+            ["id", "serverNames", "profileNames", "targetClients", "pathDisplays",
+             "pendingContractCount", "warnings", "enabled"],
+            KeysOf(preview));
+        Assert.False(preview.GetProperty("enabled").GetBoolean());
+
+        // Absent preview (cancelled) is a null, not an object with empty fields.
+        Assert.Equal("null", JsonSerializer.Serialize<PortableImportPreviewDto?>(null, Envelope.Json));
+
+        var payload = JsonSerializer.Deserialize<PortableApplyPayload>(
+            """{ "previewID": "opaque-preview" }""", Envelope.Json);
+        Assert.Equal("opaque-preview", payload?.PreviewID);
+        Assert.Throws<JsonException>(() =>
+            JsonSerializer.Deserialize<PortableApplyPayload>("{}", Envelope.Json));
+    }
+
+    [Fact]
+    public void PendingContractImportsAreEvidenceWithAnUnknownMatchUntilACheckSaysOtherwise()
+    {
+        var encoded = Encode(new PendingContractImportsDto(
+            [
+                new PendingContractImportDto("memory", 2, null),
+                new PendingContractImportDto("github", 5, true),
+                new PendingContractImportDto("filesystem", 1, false),
+            ],
+            null));
+
+        Assert.Equal(["entries", "error"], KeysOf(encoded));
+        var entries = encoded.GetProperty("entries");
+        Assert.Equal(["serverID", "toolCount", "matching"], KeysOf(entries[0]));
+        // Three states, spelled three ways: unknown is null, never false.
+        Assert.Equal(JsonValueKind.Null, entries[0].GetProperty("matching").ValueKind);
+        Assert.Equal(JsonValueKind.True, entries[1].GetProperty("matching").ValueKind);
+        Assert.Equal(JsonValueKind.False, entries[2].GetProperty("matching").ValueKind);
+        Assert.Equal(JsonValueKind.Null, encoded.GetProperty("error").ValueKind);
+
+        var failed = Encode(new PendingContractImportsDto([], "Imported contract fingerprints could not be read."));
+        Assert.Equal("Imported contract fingerprints could not be read.", failed.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public void TheStateCarriesPendingContractImportsAsItsLastKey()
+    {
+        var encoded = Encode(EmptyState with
+        {
+            PendingContractImports = new PendingContractImportsDto([], null),
+        });
+
+        Assert.Equal("pendingContractImports", KeysOf(encoded).Last());
+        Assert.Equal(
+            ["entries", "error"],
+            KeysOf(encoded.GetProperty("pendingContractImports")));
+    }
+
+    [Fact]
+    public void APortableSetupFailureIsDataWithItsOwnCodeAndAMessageThatNamesNoValue()
+    {
+        using var failure = JsonDocument.Parse(Envelope.Failure(PortableSetupException.Conflict("memory in cursor")));
+        Assert.Equal("portableSetup", failure.RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(
+            "memory in cursor already exists. The import left it untouched.",
+            failure.RootElement.GetProperty("error").GetProperty("message").GetString());
     }
 
     private static StateDto EmptyState => new(

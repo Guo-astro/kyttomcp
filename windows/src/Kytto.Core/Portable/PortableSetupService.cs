@@ -114,7 +114,8 @@ public sealed partial class PortableSetupService
         }
     }
 
-    internal int RetainedPlanCount
+    /// <summary>How many previews are being held — and so how many sets of typed values.</summary>
+    public int RetainedPlanCount
     {
         get
         {
