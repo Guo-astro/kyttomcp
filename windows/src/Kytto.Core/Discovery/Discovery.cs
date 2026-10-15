@@ -58,6 +58,8 @@ public sealed record ParkedEntry(ClientId ClientID, string ServerName, string So
 public sealed class Discovery
 {
     private readonly string _home;
+    // Projects whose `.claude\settings*.json` decided which plugins show, filled while a pass runs (§4).
+    private readonly HashSet<string> _pluginProjectPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly IAppLocator _locator;
     private readonly IReadOnlyList<ClientDescriptor> _descriptors;
     private readonly IReadOnlyList<CustomConfigSource> _customSources;
@@ -135,6 +137,13 @@ public sealed class Discovery
                         AddFile(installed);
                         AddFile(claude.Settings.Resolve(_home));
                         foreach (var path in ClaudePluginFiles(installed)) AddFile(path);
+                        // A project known only from `.claude.json` has its plugin settings read
+                        // too, so toggling a plugin there must refresh the matrix as well.
+                        foreach (var project in _pluginProjectPaths)
+                        {
+                            AddFile(Path.Combine(project, ".claude", "settings.json"));
+                            AddFile(Path.Combine(project, ".claude", "settings.local.json"));
+                        }
                         break;
                     case ConfigSource.RegisteredPlugins { Registry: PluginRegistrySource.Codex codex }:
                         // The registration is the config already watched above; the
@@ -1073,6 +1082,7 @@ public sealed class Discovery
             // on another system; evaluating plugins against the current drive would
             // be a guess.
             if (!PluginInstallations.IsAbsoluteWindowsPath(path)) continue;
+            _pluginProjectPaths.Add(path);
             var servers = ServersFor(path);
             if (servers.Count > 0) outcome.Projects.Add(new ProjectSource(id, path, servers));
         }

@@ -454,6 +454,11 @@ internal sealed partial class AppModel : IDisposable
     {
         RequireDirect(serverId);
         var server = ServerById(serverId);
+        if (server.IsBundled)
+        {
+            throw new InvalidOperationException(
+                $"“{server.Name}” is installed software rather than configuration, so Kytto does not change its command.");
+        }
         if (action == DoctorAction.PinPackageVersion) return PackagePinPreview(server);
         var health = server.Health;
         var currentCommand = server.Command;

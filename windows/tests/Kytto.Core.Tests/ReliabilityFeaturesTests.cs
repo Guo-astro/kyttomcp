@@ -28,6 +28,16 @@ public sealed class ReliabilityFeaturesTests : IDisposable
     }
 
     [Fact]
+    public void DoctorOffersNoCommandPinForInstalledSoftwareKyttoCannotEdit()
+    {
+        var server = Server(command: "npx", isBundled: true);
+        server.Health = Passing([], Path.Combine(_root, "npx.cmd"));
+
+        Assert.DoesNotContain(McpDoctor.Analyze(server).Findings, item =>
+            item.Code == "unpinned-command");
+    }
+
+    [Fact]
     public void DoctorNeverGuessesMissingEnvironmentValues()
     {
         var server = Server(command: "npx", env: [new EnvEntry("API_TOKEN", null)]);
@@ -238,7 +248,8 @@ public sealed class ReliabilityFeaturesTests : IDisposable
         string id = "server",
         string name = "Server",
         string command = "npx",
-        IReadOnlyList<EnvEntry>? env = null) => new()
+        IReadOnlyList<EnvEntry>? env = null,
+        bool isBundled = false) => new()
     {
         Id = id,
         Name = name,
@@ -250,7 +261,7 @@ public sealed class ReliabilityFeaturesTests : IDisposable
         EnabledIn = new Dictionary<ClientKey, Enablement> { [ClientId.Cursor] = Enablement.Enabled },
         Origin = new Origin.ConfigFile(ClientId.Cursor),
         Fingerprint = Kytto.Core.Model.Server.MakeFingerprint(command, [], null),
-        IsBundled = false,
+        IsBundled = isBundled,
         DefinitionSource = "{}",
     };
 

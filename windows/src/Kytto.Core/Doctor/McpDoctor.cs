@@ -188,6 +188,8 @@ public static class McpDoctor
         findings.AddRange(ToolSafetyScanner.Scan(server.KnownTools).Select(Finding));
 
         if (health.Status == HealthStatus.Passed &&
+            // A plugin or extension ships its own command; there is no editable definition to pin (§4).
+            !server.IsBundled &&
             server.Command?.Trim() is { Length: > 0 } configured &&
             health.ResolvedCommand is { Length: > 0 } resolved &&
             !string.Equals(configured, resolved, StringComparison.OrdinalIgnoreCase) &&

@@ -459,8 +459,8 @@ function matrixWorkspace(state, clients, servers) {
     ),
   );
   header.append(identity);
-  // [stream S] portable-setup actions (Export / Import setup) join this header
-  // as a sibling of `identity`; the header already wraps and aligns them.
+  // Export / Import setup live in the Profiles header, not here (§7.13); this header
+  // carries only the workspace identity and the matrix controls.
   workspace.append(header);
 
   const filters = el('div', 'matrix-filters');

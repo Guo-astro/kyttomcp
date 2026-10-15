@@ -712,6 +712,36 @@ public class PluginDiscoveryTests
     }
 
     [Fact]
+    public void AProjectKnownOnlyFromClaudeJsonHasItsPluginSettingsWatchedToo()
+    {
+        using var harness = new ToggleHarness();
+        var project = harness.Full(@"projects\demo");
+        harness.RegisterClaude("demo@example", Entry("user", harness.Full($@"{ClaudeCache}\demo\1"), "1"));
+        harness.Write(
+            JsonSerializer.Serialize(new
+            {
+                projects = new Dictionary<string, object>
+                {
+                    [project] = new { mcpServers = new { local = new { command = "node" } } },
+                },
+            }),
+            ".claude.json");
+
+        // Discovery reads that project's `.claude\settings*.json` to decide which plugins
+        // apply, so toggling a plugin there has to refresh the matrix without a manual refresh.
+        var discovery = new Discovery(harness.Home, new AllInstalledLocator());
+        discovery.Run();
+        var targets = discovery.WatchTargets();
+
+        foreach (var file in new[] { "settings.json", "settings.local.json" })
+        {
+            Assert.Contains(targets, target =>
+                !target.IncludeSubdirectories
+                && string.Equals(target.Path, Path.Combine(project, ".claude", file), StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    [Fact]
     public void DiscoveryAcrossBothClientsCreatesAndChangesNothing()
     {
         using var harness = new ToggleHarness();
