@@ -9,6 +9,27 @@ without a backup.
 
 ## [Unreleased]
 
+### Added (Windows)
+
+- Report a bug from Settings, the tray menu's Help submenu, error notices and interface failure screens, using the private website form or public GitHub Issues. The links open in your browser and attach nothing. If the interface fails to load, or its WebView2 browser process ends, a native recovery panel keeps Reload and the report links available.
+- Workspace and source filters, grouped sidebar navigation, and a matrix with a persistent server inspector. Selection, scrolling and keyboard focus survive updates; Rows can be Comfortable or Compact; motion respects the system animation setting.
+- Read-only discovery of registered, enabled Claude Code and Codex MCP plugins, with their source and version. A plugin is never switched, edited or copied by Kytto; stale caches, disabled plugins and nested test fixtures are not treated as active servers.
+- Readable Contract Guard changes: bounded before/after text for descriptions, annotations, schema fields, defaults and required arguments, with an explanation when a confirmation or dry-run field changes.
+- Remote Doctor for Streamable HTTP servers: MCP initialization, JSON and SSE replies, paginated tool discovery and token measurements, all bounded and never calling a tool. Legacy SSE servers stay unsupported.
+- Explicit sign-in for remote servers that ask for it, started only by you: discovered issuer metadata, S256 PKCE, a loopback callback that exists only while you sign in, and resource-bound credentials kept in Windows Credential Manager. Kytto's sign-in does not sign in your other MCP clients.
+- Portable setup: export writable server definitions and profiles to a JSON file and import them on another machine, or from the macOS app. Credentials, private paths and every remote URL become inputs you type on import. Imported servers always start disabled, existing names are never overwritten, writes use backups and stale-file guards, and any failure restores what was there. Reviewed contract fingerprints are optional and stay pending until a fresh local check.
+- Export setup, Import setup and New profile share one aligned action group in the Profiles header.
+
+### Changed (Windows)
+
+- MCP Library and Skills moved from the toolbar to the sidebar's Discover group.
+- A `.cmd` launcher now receives its arguments exactly as written, including JSON and URL-encoded values. An argument that `cmd.exe` would expand, or that contains a line break, is refused with an explanation instead of being started changed.
+- Links in the app window open only Kytto's two report pages, and only when you click them.
+
+### Fixed (Windows)
+
+- A health check that finishes after its server definition changes no longer records its result against the replacement definition.
+- Scope, Source and Rows pickers use styled controls with icons, a single chevron, consistent height and keyboard focus.
 <!-- Working area for the next release. Add entries here as you build, under
      whichever of these headings apply, then move the whole block down into a new
      version section when you ship:

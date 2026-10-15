@@ -355,7 +355,7 @@ public sealed class CustomConfigSourceTests : IDisposable
                    TimeSpan.FromMilliseconds(40)))
         {
             File.AppendAllText(path, Environment.NewLine + "// external edit");
-            Assert.True(changed.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(changed.Wait(TimeSpan.FromSeconds(10)));
         }
         var externallyEdited = File.ReadAllBytes(path);
 

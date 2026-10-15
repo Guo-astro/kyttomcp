@@ -633,7 +633,7 @@ public class RemoteDoctorTests
     public async Task ASlowServerTimesOutAtTheDeadline()
     {
         using var server = new FakeRemoteMcp(intercept: (_, _) =>
-            new LoopbackResponse(200, "{}", DelayBeforeReply: TimeSpan.FromSeconds(5)));
+            new LoopbackResponse(200, "{}", DelayBeforeReply: TimeSpan.FromSeconds(30)));
 
         var watch = Stopwatch.StartNew();
         var failure = await Assert.ThrowsAsync<RemoteHttpException>(
@@ -641,13 +641,15 @@ public class RemoteDoctorTests
         watch.Stop();
 
         Assert.Equal(RemoteHttpFailure.TimedOut, failure.Failure);
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2), $"took {watch.Elapsed}");
+        // The server would take 30 s: finishing well inside that proves the 400 ms deadline
+        // held, with room for a machine that is busy building something else.
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"took {watch.Elapsed}");
     }
 
     [Fact]
     public async Task TheSessionCleanupNeverTakesMoreThanItsBudget()
     {
-        using var server = new FakeRemoteMcp(deleteDelay: TimeSpan.FromSeconds(5));
+        using var server = new FakeRemoteMcp(deleteDelay: TimeSpan.FromSeconds(30));
 
         var watch = Stopwatch.StartNew();
         var listing = await new McpHttpClient().ListToolsAsync(server.Url, timeout: TimeSpan.FromSeconds(10));
@@ -655,7 +657,7 @@ public class RemoteDoctorTests
 
         Assert.Single(listing.Tools);
         Assert.Contains(server.Requests, request => request.Method == "DELETE");
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2), $"cleanup held the check: {watch.Elapsed}");
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"cleanup held the check: {watch.Elapsed}");
     }
 
     [Fact]

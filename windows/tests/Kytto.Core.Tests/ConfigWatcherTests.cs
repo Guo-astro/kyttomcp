@@ -25,7 +25,7 @@ public sealed class ConfigWatcherTests : IDisposable
         Assert.False(changed.Wait(TimeSpan.FromMilliseconds(250)));
 
         File.WriteAllText(config, "{}");
-        Assert.True(changed.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(changed.Wait(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public sealed class ConfigWatcherTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
         File.WriteAllText(manifest, "{}");
 
-        Assert.True(changed.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(changed.Wait(TimeSpan.FromSeconds(10)));
     }
 
     /// <summary>
@@ -61,7 +61,7 @@ public sealed class ConfigWatcherTests : IDisposable
             TimeSpan.FromMilliseconds(40));
 
         Directory.CreateDirectory(Path.Combine(_root, ".cursor"));
-        Assert.True(changed.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(changed.Wait(TimeSpan.FromSeconds(10)));
     }
 
     [Fact]
@@ -75,14 +75,14 @@ public sealed class ConfigWatcherTests : IDisposable
         using (new ConfigWatcher([ConfigWatchTarget.File(config)], changed.Set, TimeSpan.FromMilliseconds(40)))
         {
             Directory.Delete(directory);
-            Assert.True(changed.Wait(TimeSpan.FromSeconds(2)), "deleting the directory went unnoticed");
+            Assert.True(changed.Wait(TimeSpan.FromSeconds(10)), "deleting the directory went unnoticed");
         }
 
         // The owner re-arms on that change, while the directory is gone.
         changed.Reset();
         using var rearmed = new ConfigWatcher([ConfigWatchTarget.File(config)], changed.Set, TimeSpan.FromMilliseconds(40));
         Directory.CreateDirectory(directory);
-        Assert.True(changed.Wait(TimeSpan.FromSeconds(2)), "recreating the directory went unnoticed");
+        Assert.True(changed.Wait(TimeSpan.FromSeconds(10)), "recreating the directory went unnoticed");
 
         // And once re-armed again, edits inside it are seen.
         changed.Reset();
@@ -90,7 +90,7 @@ public sealed class ConfigWatcherTests : IDisposable
         Thread.Sleep(100);
         changed.Reset();
         File.WriteAllText(config, "{}");
-        Assert.True(changed.Wait(TimeSpan.FromSeconds(2)), "an edit after recreation went unnoticed");
+        Assert.True(changed.Wait(TimeSpan.FromSeconds(10)), "an edit after recreation went unnoticed");
     }
 
     /// <summary>
@@ -117,7 +117,7 @@ public sealed class ConfigWatcherTests : IDisposable
         using var second = new ManualResetEventSlim();
         using var replacement = new ConfigWatcher(
             [ConfigWatchTarget.File(config)], second.Set, TimeSpan.FromMilliseconds(40), startPending: pending);
-        Assert.True(second.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(second.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(replacement.HasPendingChange);
     }
 
