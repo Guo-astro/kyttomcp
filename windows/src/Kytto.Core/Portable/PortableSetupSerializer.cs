@@ -75,7 +75,16 @@ internal static class PortableSetupSerializer
 
         using (document)
         {
-            return DecodeRoot(document.RootElement);
+            try
+            {
+                return DecodeRoot(document.RootElement);
+            }
+            catch (InvalidOperationException)
+            {
+                // A string holding a lone surrogate escape parses but cannot be read as
+                // text. That is a file this format does not allow, not an internal fault.
+                throw PortableSetupException.Invalid(Unsupported);
+            }
         }
     }
 

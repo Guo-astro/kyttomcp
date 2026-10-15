@@ -83,8 +83,13 @@ public static class ContractDigest
             var text = new StringBuilder();
             return Write(document.RootElement, text) ? text.ToString() : null;
         }
-        catch (JsonException)
+        catch (Exception error) when (
+            error is JsonException or InvalidOperationException or ArgumentException)
         {
+            // A lone surrogate escape parses but cannot be decoded, which is the same
+            // thing as a schema that does not parse: the raw text stands in for it. An
+            // exception here would otherwise reach every state update that summarises
+            // a pending reference, and with it the whole window.
             return null;
         }
     }

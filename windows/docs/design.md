@@ -838,7 +838,10 @@ applies. A literal outside the whitelist is refused, so an unknown command or
 argument cannot ride in as "public" text. A byte-order mark is skipped.
 An export refuses to land on a live client config or one of Kytto's own stores —
 by what each path finally names, with symbolic links, junctions, mount points, short
-names and letter case followed through.
+names and letter case followed through. A share of this very computer
+(`\\localhost\C$\…`, its own name or address) is refused outright: the file-sharing
+stack names the file by the share, never by its drive path, so the comparison above
+cannot see through it.
 
 **Import is a preview and an apply.** The preview reads everything, collects the
 inputs in a native window (masked for secrets, URLs and plain values; file and
@@ -847,7 +850,9 @@ use, ten minutes, at most four at a time, discarded by Cancel, Escape and the
 backdrop, and invalidated when the client paths or sources change. Neither the file's
 path nor anything typed crosses to the page. The apply checks the digest of the setup
 file, of every config it would write or read, and of Kytto's own stores again; refuses
-a name or profile that now exists; and writes Kytto's stores first and the configs
+a name or profile that now exists — a name an installed plugin or extension already
+provides to that client included, since a config entry beside it would shadow it; and
+writes Kytto's stores first and the configs
 last, as one §6 transaction with a backup of each. If the config transaction
 refuses, the stores are put back byte for byte, and anything that could not be put
 back is named in the error rather than hidden. **An imported server is always

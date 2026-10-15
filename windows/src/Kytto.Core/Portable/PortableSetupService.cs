@@ -49,6 +49,7 @@ public sealed partial class PortableSetupService
     private readonly IReadOnlyList<ClientDescriptor> _descriptors;
     private readonly ClientPathResolver _resolver;
     private readonly IReadOnlyList<string> _additionalProtectedPaths;
+    private readonly Func<IReadOnlyList<Server>>? _existingServers;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Dictionary<string, Plan> _plans = new(StringComparer.Ordinal);
 
@@ -62,8 +63,10 @@ public sealed partial class PortableSetupService
         IReadOnlyList<ClientDescriptor>? descriptors = null,
         IReadOnlyDictionary<string, string>? pathOverrides = null,
         IReadOnlyList<string>? additionalProtectedPaths = null,
-        Func<DateTimeOffset>? clock = null)
+        Func<DateTimeOffset>? clock = null,
+        Func<IReadOnlyList<Server>>? existingServers = null)
     {
+        _existingServers = existingServers;
         _home = home;
         _writer = writer;
         _parkStore = parkStore;
@@ -92,7 +95,36 @@ public sealed partial class PortableSetupService
         IReadOnlyList<PortableProfile> Profiles,
         IReadOnlyList<PortableContractReference> Contracts,
         IReadOnlyList<Snapshot> Owned,
-        DateTimeOffset CreatedAt);
+        DateTimeOffset CreatedAt,
+        IReadOnlyList<(string Identity, string Name, ClientId Client)> Destinations);
+
+    /// <summary>
+    /// Why a client already shows a server under this name although its config file does
+    /// not hold it, or null when nothing does.
+    /// </summary>
+    /// <remarks>
+    /// The config and the park store are read from the destination itself. What they
+    /// cannot say is that the client is already served this name by installed software:
+    /// a plugin's server, or a Claude Desktop extension's. Writing an ordinary entry
+    /// beside it shadows the installed one and makes discovery report two sources for
+    /// one name, which is exactly what <c>ServerAuthoring.Create</c> refuses to do (§4).
+    /// The names are the discovery's own, so the answer is the one the matrix shows.
+    /// </remarks>
+    private string? ShownByTheClient(string identity, ClientId clientId)
+    {
+        if (_existingServers?.Invoke() is not { } servers) return null;
+
+        foreach (var server in servers)
+        {
+            if (Server.Identity(server.Name) != identity) continue;
+            if (server.HoldsPluginCopy(clientId)) return "provided by an installed plugin";
+            if (server.EnabledIn.GetValueOrDefault(clientId, Enablement.Absent) != Enablement.Absent)
+            {
+                return "already listed for this client";
+            }
+        }
+        return null;
+    }
 
     private string PendingFile => Path.Combine(_paths.Root, "pending-contract-imports.json");
 
@@ -213,6 +245,7 @@ public sealed partial class PortableSetupService
                 .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
             var edits = new List<FileEdit>();
             var parks = new List<ParkEdit>();
+            var imports = new List<(string Identity, string Name, ClientId Client)>();
             var observed = new List<Snapshot>();
             var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -245,6 +278,11 @@ public sealed partial class PortableSetupService
                     {
                         throw PortableSetupException.Conflict($"{copy.Name} in {clientId.Raw()}");
                     }
+                    if (ShownByTheClient(identity, clientId) is { } shown)
+                    {
+                        throw PortableSetupException.Conflict($"{copy.Name} in {clientId.Raw()} ({shown})");
+                    }
+                    imports.Add((identity, copy.Name, clientId));
 
                     var draft = new ServerDraft
                     {
@@ -350,7 +388,7 @@ public sealed partial class PortableSetupService
                 _plans.Remove(_plans.OrderBy(pair => pair.Value.CreatedAt).First().Key);
             }
             _plans[id] = new Plan(
-                preview, source, edits, parks, setup.Profiles, setup.ReviewedContracts, owned, _clock());
+                preview, source, edits, parks, setup.Profiles, setup.ReviewedContracts, owned, _clock(), imports);
             return preview;
         }
     }
@@ -390,6 +428,15 @@ public sealed partial class PortableSetupService
                         string.Equals(candidate.Name, profile.Name, StringComparison.OrdinalIgnoreCase)))
                 {
                     throw PortableSetupException.Conflict($"Profile {profile.Name}");
+                }
+            }
+
+            // The same for what installed software provides, which no digest above covers.
+            foreach (var (identity, name, client) in plan.Destinations)
+            {
+                if (ShownByTheClient(identity, client) is { } shown)
+                {
+                    throw PortableSetupException.Conflict($"{name} in {client.Raw()} ({shown})");
                 }
             }
 

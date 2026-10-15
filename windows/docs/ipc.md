@@ -1060,7 +1060,8 @@ private path and argument Kytto cannot prove public. Installed plugins and
 extension bundles, custom sources and everything else are not copied, and nothing
 is read from the credential store. A destination that is, or aliases, a live client
 configuration or one of Kytto's own stores is refused — a symbolic link, a junction
-or a mount point on the way does not change that.
+or a mount point on the way does not change that, and neither does reaching it through
+a share of this computer, which is refused whatever it points at.
 
 ```json
 { "cancelled": false, "serverCount": 3, "profileCount": 1, "warnings": [] }
@@ -1099,7 +1100,9 @@ written. `enabled` is always `false` from the application.
 ```
 
 Commits the plan, once. It checks every digest again and refuses with a message
-rather than merge if anything moved; refuses a name or profile that now exists;
+rather than merge if anything moved; refuses a name or profile that now exists, and a
+name an installed plugin or extension already provides to that client (the preview
+refuses it first);
 backs up each existing config; and writes only through the §6 pipeline. Kytto's own
 stores are written first and put back byte for byte if the config transaction
 fails; if anything cannot be put back, the error says which, and is never hidden.
