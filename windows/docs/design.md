@@ -284,9 +284,15 @@ the established directory. A batch file receives one raw command line,
 `cmd /d /s /c ""shim.cmd" arg …"`, so cmd strips only the outer quotes and a shim
 under `C:\Program Files\nodejs` keeps working when an argument needs quotes; each
 argument is quoted when it holds a space or a cmd metacharacter, which is literal
-inside quotes. A double quote, a percent sign or a line break cannot be made literal
-for every batch file, so an argument containing one fails the check without
-starting the server instead of starting it with a different one.
+inside quotes. A double quote inside an argument is written `""`, which cmd reads as
+a quote that stays inside the pair and a program parsing its command line the usual
+way reads as one literal quote, so a JSON argument arrives intact. A line break, a
+backslash directly before a quote, or a `%NAME%` naming a variable cmd would
+substitute (one in the environment the server is started with, or one of cmd's own
+such as `%CD%`) cannot be made literal for every batch file, so an argument
+containing one fails the check without starting the server instead of starting it
+with a different one. A percent sign that cannot expand (`100%`, `?q=%7B`) is left
+alone by cmd and passed as written.
 
 **Read-only, natively.** A plugin's server is not editable, deletable, unifiable,
 copyable into another client or toggleable, and the services refuse it themselves

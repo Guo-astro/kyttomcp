@@ -114,7 +114,7 @@ public sealed class ManagedProcess : IDisposable
         };
 
         start.FileName = resolved.FileName;
-        ManagedExecutable.Apply(start, resolved, arguments);
+        ManagedExecutable.Apply(start, resolved, arguments, environment);
         if (workingDirectory is not null) start.WorkingDirectory = workingDirectory;
 
         start.Environment.Clear();

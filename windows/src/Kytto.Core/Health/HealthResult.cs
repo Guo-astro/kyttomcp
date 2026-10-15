@@ -185,9 +185,10 @@ public sealed record HealthFailureReason(string Reason)
             "The server's configured working directory is missing or is not an absolute " +
             "directory. Kytto did not start it.",
         "unsafeArgument" =>
-            "An argument contains a double quote, a percent sign or a line break, which " +
-            "cannot be passed through a Windows batch file exactly as written. Kytto did " +
-            "not start it with a different argument.",
+            "An argument contains a line break, a backslash directly before a double quote, " +
+            "or a %NAME% that Windows would replace with a variable's value, which cannot " +
+            "be passed through a Windows batch file exactly as written. Kytto did not start " +
+            "it with a different argument.",
         "inputClosed" =>
             "The server closed its input before Kytto could finish talking to it.",
         "timedOut" => TimeoutMessage(Seconds ?? 0),

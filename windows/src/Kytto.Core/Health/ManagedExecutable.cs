@@ -65,7 +65,7 @@ public static class ManagedExecutable
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        Apply(start, resolved, arguments);
+        Apply(start, resolved, arguments, environment);
         if (workingDirectory is not null) start.WorkingDirectory = workingDirectory;
         start.Environment.Clear();
         foreach (var (key, value) in environment) start.Environment[key] = value;
@@ -79,13 +79,14 @@ public static class ManagedExecutable
     public static void Apply(
         ProcessStartInfo start,
         ResolvedExecutable resolved,
-        IReadOnlyList<string> arguments)
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         if (resolved.IsBatch)
         {
             // One raw command line, because cmd's own quoting rules apply to it and
             // .NET's argument list quotes for a different parser.
-            start.Arguments = BatchCommandLine(resolved.Path, arguments);
+            start.Arguments = BatchCommandLine(resolved.Path, arguments, environment);
             return;
         }
         foreach (var argument in resolved.PrefixArguments) start.ArgumentList.Add(argument);
@@ -107,18 +108,34 @@ public static class ManagedExecutable
     /// </para>
     /// <para>
     /// An argument is quoted whenever it holds anything cmd treats specially, and inside
-    /// quotes <c>&amp; | &lt; &gt; ^ ( )</c> are literal. What quoting cannot protect is
-    /// refused: a double quote ends the quoted span, <c>%</c> is expanded by cmd even
-    /// inside one, and a line break ends the command. There is no escape for those that
-    /// holds for every batch file, so a definition using them is not started rather
-    /// than started with a different argument.
+    /// quotes <c>&amp; | &lt; &gt; ^ ( )</c> are literal. A double quote inside one is
+    /// written <c>""</c>, which keeps cmd's quote parity balanced and reaches a program
+    /// that parses its command line the usual way as one literal quote — so a JSON
+    /// argument (<c>--config {"key":"v"}</c>, the shape Smithery installs write) arrives
+    /// intact, as it did before arguments were quoted for cmd at all.
+    /// </para>
+    /// <para>
+    /// What quoting cannot protect is refused: a line break ends the command, a
+    /// backslash directly before a quote would be read as an escape by the program and
+    /// not as the end of the pair, and <c>%name%</c> is expanded by cmd even inside
+    /// quotes. The last one only matters when <c>name</c> is something cmd would replace
+    /// — a variable in <paramref name="environment"/> or one of its own dynamic ones.
+    /// A percent sign that cannot expand (<c>100%</c>, <c>?q=%7Bx%7D</c>) is left
+    /// alone by cmd and passed as written. Without an environment to judge by, every
+    /// percent sign is refused. A definition using what cannot be passed is not started
+    /// rather than started with a different argument.
     /// </para>
     /// </remarks>
-    public static string BatchCommandLine(string script, IReadOnlyList<string> arguments)
+    public static string BatchCommandLine(
+        string script,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var parts = new List<string> { QuoteForBatch(script, alwaysQuote: true) };
         foreach (var argument in arguments) parts.Add(QuoteForBatch(argument, alwaysQuote: false));
-        return "/d /s /c \"" + string.Join(' ', parts) + "\"";
+        var line = "/d /s /c \"" + string.Join(' ', parts) + "\"";
+        if (line.Contains('%') && MightExpand(line, environment)) throw ProcessException.UnsafeArgument();
+        return line;
     }
 
     private static readonly Regex PlainArgument = new(
@@ -126,7 +143,7 @@ public static class ManagedExecutable
 
     private static string QuoteForBatch(string value, bool alwaysQuote)
     {
-        if (value.IndexOfAny(['"', '%', '\r', '\n', '\0']) >= 0)
+        if (value.IndexOfAny(['\r', '\n', '\0']) >= 0 || value.Contains("\\\"", StringComparison.Ordinal))
         {
             throw ProcessException.UnsafeArgument();
         }
@@ -135,7 +152,46 @@ public static class ManagedExecutable
         // Backslashes directly before the closing quote would escape it for the
         // program that parses the line afterwards, so they are doubled.
         var trailing = value.Length - value.TrimEnd('\\').Length;
-        return "\"" + value + new string('\\', trailing) + "\"";
+        return "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + new string('\\', trailing) + "\"";
+    }
+
+    /// <summary>What cmd replaces whether or not the environment names it.</summary>
+    private static readonly HashSet<string> CmdDynamicVariables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CD", "DATE", "TIME", "RANDOM", "ERRORLEVEL", "CMDEXTVERSION", "CMDCMDLINE",
+        "HIGHESTNUMANODENUMBER",
+    };
+
+    /// <summary>
+    /// Whether any <c>%…%</c> pair on the line names something cmd would substitute.
+    /// Every pair of percent signs is tried, not just neighbours, because an
+    /// unexpanded one lets the scan resume at the next.
+    /// </summary>
+    private static bool MightExpand(string line, IReadOnlyDictionary<string, string>? environment)
+    {
+        if (environment is null) return true;
+
+        var positions = new List<int>();
+        for (var index = line.IndexOf('%'); index >= 0; index = line.IndexOf('%', index + 1))
+        {
+            positions.Add(index);
+            // Not a plausible command line, and the pair scan is quadratic.
+            if (positions.Count > 256) return true;
+        }
+
+        var defined = new HashSet<string>(environment.Keys, StringComparer.OrdinalIgnoreCase);
+        for (var first = 0; first < positions.Count; first++)
+        {
+            for (var second = first + 1; second < positions.Count; second++)
+            {
+                var name = line[(positions[first] + 1)..positions[second]];
+                // `%name:~1,3%` and `%name:a=b%` are substitutions of `name`.
+                var colon = name.IndexOf(':');
+                if (colon > 0) name = name[..colon];
+                if (name.Length > 0 && (defined.Contains(name) || CmdDynamicVariables.Contains(name))) return true;
+            }
+        }
+        return false;
     }
 
     private static string Find(

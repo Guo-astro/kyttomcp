@@ -894,9 +894,11 @@ path variables such as `CLAUDE_PLUGIN_ROOT`. A relative command is resolved
 against that directory; with none established it is `unsupported`, as before.
 A working directory that does not exist is a `failed` check and the server is
 not started elsewhere. A command through `cmd.exe` (`npx`, any `.cmd` shim) gets
-each argument quoted for it; an argument a batch file cannot receive literally —
-a double quote, a percent sign, a line break — fails the check without starting
-anything, rather than starting it with a different argument.
+each argument quoted for it (a double quote inside an argument is doubled, so a JSON
+argument arrives intact); an argument a batch file cannot receive literally — a line
+break, a backslash directly before a double quote, or a `%NAME%` that cmd would
+replace with a variable's value — fails the check without starting anything, rather
+than starting it with a different argument.
 
 ```json
 { "status": "passed" | "failed" | "unsupported" | "needsAuthorization",
