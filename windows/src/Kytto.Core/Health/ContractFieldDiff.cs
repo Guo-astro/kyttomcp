@@ -159,13 +159,26 @@ internal static class ContractFieldDiff
                 !HasDuplicateNames(leftObject) && !HasDuplicateNames(rightObject))
             {
                 var keys = new SortedSet<string>(ScalarOrder.Instance);
-                foreach (var property in leftObject.EnumerateObject()) keys.Add(property.Name);
-                foreach (var property in rightObject.EnumerateObject()) keys.Add(property.Name);
+                // Looked up by name once per object, not scanned per key: a schema is
+                // server input, and a wide object of N properties would otherwise cost N
+                // squared string allocations on the thread that records the check.
+                var leftMembers = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                var rightMembers = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                foreach (var property in leftObject.EnumerateObject())
+                {
+                    keys.Add(property.Name);
+                    leftMembers[property.Name] = property.Value;
+                }
+                foreach (var property in rightObject.EnumerateObject())
+                {
+                    keys.Add(property.Name);
+                    rightMembers[property.Name] = property.Value;
+                }
 
                 foreach (var key in keys)
                 {
-                    var leftValue = Member(leftObject, key);
-                    var rightValue = Member(rightObject, key);
+                    var leftValue = Member(leftMembers, key);
+                    var rightValue = Member(rightMembers, key);
                     // Unchanged members are skipped before anything about them is
                     // measured, so a long key that did not change never shows up.
                     if (SameValue(leftValue, rightValue)) continue;
@@ -307,14 +320,8 @@ internal static class ContractFieldDiff
         return false;
     }
 
-    private static JsonElement? Member(JsonElement element, string name)
-    {
-        foreach (var property in element.EnumerateObject())
-        {
-            if (string.Equals(property.Name, name, StringComparison.Ordinal)) return property.Value;
-        }
-        return null;
-    }
+    private static JsonElement? Member(Dictionary<string, JsonElement> members, string name) =>
+        members.TryGetValue(name, out var value) ? value : null;
 
     /// <summary>Canonical text for a value, cut off early: only its excerpt is ever shown.</summary>
     /// <remarks>Null stays null — absent is not the same as an empty string.</remarks>

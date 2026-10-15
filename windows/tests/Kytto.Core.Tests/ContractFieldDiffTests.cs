@@ -179,6 +179,30 @@ public class ContractFieldDiffTests
     }
 
     [Fact]
+    public void AVeryWideObjectIsComparedInLinearTimeNotSquared()
+    {
+        // A server picks its own schema. One object with twenty thousand properties used
+        // to cost every key a scan of all the others, with a string allocated per step:
+        // over ten seconds on the thread that records the check, and a megabyte-sized
+        // schema would have held it for minutes.
+        static string Schema(string lastType) =>
+            "{\"type\":\"object\",\"properties\":{" +
+            string.Join(",", Enumerable.Range(0, 20_000).Select(index =>
+                $"\"p{index}\":{{\"type\":\"{(index == 19_999 ? lastType : "string")}\"}}")) +
+            "}}";
+        var before = Schema("string");
+        var after = Schema("number");
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var change = Diff(before, after)!;
+        watch.Stop();
+
+        var field = Assert.Single(change.Details!);
+        Assert.Equal("inputSchema/properties/p19999/type", field.Path);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(4), $"took {watch.Elapsed}");
+    }
+
+    [Fact]
     public void OldMetadataDecodesWithoutDetails()
     {
         var options = new JsonSerializerOptions
