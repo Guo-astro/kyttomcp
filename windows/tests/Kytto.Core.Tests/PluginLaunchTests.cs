@@ -185,6 +185,15 @@ public class PluginLaunchTests : IDisposable
             "@scope/pkg",
             "héllo wörld",
             "",
+            // What reached the shim intact before arguments were quoted for cmd at all,
+            // and must still: a JSON argument, a percent sign cmd does not expand, and a
+            // URL-encoded one.
+            "{\"a\":1}",
+            "{\"a\":\"x&y|z<w>^v (1)\"}",
+            "say \"hi\" now",
+            "100%",
+            "50%off",
+            "https://example.test/y?z=%7Bq%7D&r=%20s",
         ];
         Install(root, argv);
         File.WriteAllText(
@@ -202,9 +211,9 @@ public class PluginLaunchTests : IDisposable
     }
 
     [Theory]
-    [InlineData("say \"hi\"")]
+    [InlineData("say \\\"hi\\\"")]
     [InlineData("%PATH%")]
-    [InlineData("100%")]
+    [InlineData("a %pAtH:~0,3% b")]
     [InlineData("first\nsecond")]
     [InlineData("first\rsecond")]
     public void AnArgumentABatchFileCannotReceiveUnchangedIsRefusedWithoutStartingAnything(string argument)
@@ -241,7 +250,7 @@ public class PluginLaunchTests : IDisposable
     }
 
     [Theory]
-    [InlineData("a\"b")]
+    [InlineData("a\\\"b")]
     [InlineData("%TEMP%")]
     [InlineData("a\nb")]
     [InlineData("a\0b")]
@@ -250,6 +259,68 @@ public class PluginLaunchTests : IDisposable
         var error = Assert.Throws<ProcessException>(() =>
             ManagedExecutable.BatchCommandLine(@"C:\t.cmd", [argument]));
         Assert.Equal("unsafeArgument", error.Failure.Reason);
+    }
+
+    [Fact]
+    public void ADoubleQuoteInsideAnArgumentIsDoubledSoCmdAndTheProgramBothReadItLiterally()
+    {
+        Assert.Equal(
+            "/d /s /c \"\"C:\\t.cmd\" \"{\"\"a\"\":1}\" \"say \"\"hi\"\" now\"\"",
+            ManagedExecutable.BatchCommandLine(@"C:\t.cmd", ["{\"a\":1}", "say \"hi\" now"]));
+    }
+
+    [Fact]
+    public void APercentSignIsRefusedOnlyWhereCmdWouldReplaceWhatItEncloses()
+    {
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Path"] = @"C:\x",
+            ["APPDATA"] = @"C:\a",
+        };
+
+        // Nothing named between the signs exists, so cmd leaves them as written.
+        foreach (var literal in new[] { "100%", "50%off", "?q=%7Bx%7D", "%not_a_variable%", "%%", "%" })
+        {
+            Assert.Contains(
+                "\"" + literal + "\"",
+                ManagedExecutable.BatchCommandLine(@"C:\t.cmd", [literal], environment));
+        }
+
+        // Variables the environment holds, however they are spelled, substitutions
+        // included, and cmd's own dynamic ones.
+        foreach (var expands in new[] { "%PATH%", "%path%", "%AppData%", "%PATH:~0,2%", "%PATH:a=b%", "%CD%", "%date%", "%RANDOM%" })
+        {
+            var error = Assert.Throws<ProcessException>(() =>
+                ManagedExecutable.BatchCommandLine(@"C:\t.cmd", [expands], environment));
+            Assert.Equal("unsafeArgument", error.Failure.Reason);
+        }
+
+        // A stray sign before a real reference does not hide it.
+        Assert.Throws<ProcessException>(() =>
+            ManagedExecutable.BatchCommandLine(@"C:\t.cmd", ["%x", "%y", "%Path%"], environment));
+    }
+
+    [Fact]
+    public void TheGatewaysStartInfoJudgesPercentSignsAgainstTheEnvironmentItStartsTheServerWith()
+    {
+        // The proxy starts the real server through `StartInfo`; an upgrade must not
+        // turn a server whose arguments carry JSON or a percent sign into one that no
+        // longer starts.
+        File.WriteAllText(Path.Combine(_directory, "shim.cmd"), "@echo off\r\n");
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PATH"] = _directory,
+            ["PATHEXT"] = ".COM;.EXE;.BAT;.CMD",
+            ["TOKEN_HOME"] = @"C:\t",
+        };
+
+        var start = ManagedExecutable.StartInfo(
+            "shim", ["--config", "{\"a\":\"b\"}", "100%", "?q=%7B"], environment);
+        Assert.Contains("\"{\"\"a\"\":\"\"b\"\"}\" \"100%\" \"?q=%7B\"", start.Arguments, StringComparison.Ordinal);
+
+        var refused = Assert.Throws<ProcessException>(() =>
+            ManagedExecutable.StartInfo("shim", ["%TOKEN_HOME%"], environment));
+        Assert.Equal("unsafeArgument", refused.Failure.Reason);
     }
 
     [Fact]
