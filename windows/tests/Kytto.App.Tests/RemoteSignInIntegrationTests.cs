@@ -74,6 +74,8 @@ public sealed class RemoteSignInIntegrationTests : IDisposable
 
         // The person was told who they were signing in with, from validated metadata.
         Assert.Equal("remote", _ui.ShownServer);
+        // The label is the configuration's own word; the address is what the token is for.
+        Assert.Equal(Url, _ui.ShownResource);
         Assert.Equal("https://auth.example/tenant", _ui.ShownIssuer);
         Assert.Equal(["read"], _ui.ShownScopes);
 
@@ -554,16 +556,17 @@ public sealed class RemoteSignInIntegrationTests : IDisposable
         public string? ClientId { get; set; } = "entered-client";
         public bool CancelWhileWaiting { get; set; }
         public string? ShownServer { get; private set; }
+        public string? ShownResource { get; private set; }
         public string? ShownIssuer { get; private set; }
         public IReadOnlyList<string>? ShownScopes { get; private set; }
         public string? PromptedRedirect { get; private set; }
         public int Prompts { get; private set; }
         public int ClientPrompts { get; private set; }
 
-        public bool ConfirmSignIn(string serverName, string issuer, IReadOnlyList<string> scopes)
+        public bool ConfirmSignIn(string serverName, string resource, string issuer, IReadOnlyList<string> scopes)
         {
             Prompts++;
-            (ShownServer, ShownIssuer, ShownScopes) = (serverName, issuer, scopes);
+            (ShownServer, ShownResource, ShownIssuer, ShownScopes) = (serverName, resource, issuer, scopes);
             return Confirm;
         }
 

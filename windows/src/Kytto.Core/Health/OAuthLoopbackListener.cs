@@ -140,7 +140,17 @@ public sealed class OAuthLoopbackListener : IDisposable
                     await RespondAsync(stream, 409, "This sign-in was already completed.").ConfigureAwait(false);
                     return;
                 }
-                await RespondAsync(stream, status, body).ConfigureAwait(false);
+                try
+                {
+                    await RespondAsync(stream, status, body).ConfigureAwait(false);
+                }
+                catch (Exception error) when (
+                    error is IOException or OperationCanceledException or ObjectDisposedException or SocketException)
+                {
+                    // The browser went away before it could read the page. What reached
+                    // us was still the one valid, single-use callback; dropping it would
+                    // leave the sign-in waiting for one that cannot be sent again.
+                }
                 _result.TrySetResult(callback);
                 // Closing here is what makes the listener short-lived: the sign-in is
                 // spent and nothing else is wanted on this port.

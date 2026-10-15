@@ -772,4 +772,26 @@ public class RemoteOAuthTests
         }
         Assert.StartsWith("HTTP/1.1 400", await Raw(listener.Port, Get(listener.Port, "/oauth/callback?state=nope")), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task AValidCallbackIsKeptWhenTheBrowserResetsTheConnectionBeforeReadingTheReply()
+    {
+        // The request that reached the listener was still the one valid, single-use
+        // callback. Losing it because the reply could not be written would leave the
+        // sign-in waiting for its whole lifetime for a callback that cannot come again.
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            using var listener = OAuthLoopbackListener.Start();
+            var waiting = listener.WaitForCallbackAsync("s", TimeSpan.FromSeconds(10), CancellationToken.None);
+            using (var client = new TcpClient { LingerState = new LingerOption(true, 0) })
+            {
+                await client.ConnectAsync("127.0.0.1", listener.Port);
+                await client.GetStream().WriteAsync(
+                    Encoding.ASCII.GetBytes(Get(listener.Port, "/oauth/callback?state=s&code=kept")));
+            } // a zero linger makes closing send a reset instead of a graceful close
+
+            var callback = await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains("code=kept", callback.Query, StringComparison.Ordinal);
+        }
+    }
 }

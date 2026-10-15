@@ -15,8 +15,11 @@ namespace Kytto.App;
 /// </remarks>
 internal interface IRemoteSignInUi
 {
-    /// <summary>Names the provider and the scopes and asks whether to continue.</summary>
-    bool ConfirmSignIn(string serverName, string issuer, IReadOnlyList<string> scopes);
+    /// <summary>
+    /// Names the server, the address the authorization will be sent to, the provider and
+    /// the scopes, and asks whether to continue.
+    /// </summary>
+    bool ConfirmSignIn(string serverName, string resource, string issuer, IReadOnlyList<string> scopes);
 
     /// <summary>Asks for a public client ID, for a provider that does not register clients itself.</summary>
     string? PromptClientId(string redirectUri);
@@ -308,7 +311,7 @@ internal sealed partial class AppModel
             var client = RemoteOAuthClientOverride ?? new RemoteOAuthClient();
 
             var configuration = await client.DiscoverAsync(url, cancellationToken: cancellationToken).ConfigureAwait(true);
-            if (!ui.ConfirmSignIn(server.Name, configuration.Issuer, configuration.Scopes)) return;
+            if (!ui.ConfirmSignIn(server.Name, configuration.ResourceUrl, configuration.Issuer, configuration.Scopes)) return;
 
             // The listener exists from here until this method ends, however it ends.
             using var listener = OAuthLoopbackListener.Start();
@@ -339,12 +342,14 @@ internal sealed partial class AppModel
             using (var waiting = ui.ShowWaiting(configuration.Issuer))
             using (var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, waiting.Cancelled))
             {
+                // Waiting starts before the browser does, so the listener already knows
+                // the state when a provider that is signed in redirects straight back.
+                var waitingForCallback = listener.WaitForCallbackAsync(
+                    pending.State, RemoteOAuthPendingAuthorization.Lifetime, linked.Token);
                 _authorizationPageLauncher.Open(pending.AuthorizationUrl.AbsoluteUri);
                 try
                 {
-                    callback = await listener
-                        .WaitForCallbackAsync(pending.State, RemoteOAuthPendingAuthorization.Lifetime, linked.Token)
-                        .ConfigureAwait(true);
+                    callback = await waitingForCallback.ConfigureAwait(true);
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {

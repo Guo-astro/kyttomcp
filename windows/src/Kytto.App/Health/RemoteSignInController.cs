@@ -24,13 +24,16 @@ internal sealed class RemoteSignInController : IRemoteSignInUi
 {
     private static Window? Owner => Application.Current?.MainWindow is { IsVisible: true } main ? main : null;
 
-    public bool ConfirmSignIn(string serverName, string issuer, IReadOnlyList<string> scopes)
+    public bool ConfirmSignIn(string serverName, string resource, string issuer, IReadOnlyList<string> scopes)
     {
         var requested = scopes.Count == 0
             ? "No scopes advertised"
             : Display(string.Join(", ", scopes), 400);
         var message =
             $"Server: {Display(serverName, 120)}\n" +
+            // The name is only a label from the configuration; the address is where the
+            // authorization will actually be presented.
+            $"Server address: {Display(resource, 200)}\n" +
             $"Authorization provider: {Display(issuer, 200)}\n" +
             $"Requested scopes: {requested}\n\n" +
             "Kytto will open your browser to sign in, and keep the resulting authorization in " +
