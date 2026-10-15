@@ -29,7 +29,10 @@ internal sealed partial class AppModel
         pathOverrides: Settings.ClientPathOverrides,
         // A file the user attached for reading is theirs, and an export is not allowed
         // to land on it any more than on a live client config.
-        additionalProtectedPaths: Settings.CustomConfigSources.Select(source => source.Path).ToArray());
+        additionalProtectedPaths: Settings.CustomConfigSources.Select(source => source.Path).ToArray(),
+        // What the matrix shows a client under each name, plugins and extensions included:
+        // a config entry beside one of those would shadow it (§4).
+        existingServers: () => _current.Servers);
 
     /// <summary>Writes the setup to a file the native dialog chose.</summary>
     internal PortableSetupSummary ExportPortableSetup(string file, bool includeReviewedContracts) =>

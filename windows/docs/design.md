@@ -844,7 +844,9 @@ use, ten minutes, at most four at a time, discarded by Cancel, Escape and the
 backdrop, and invalidated when the client paths or sources change. Neither the file's
 path nor anything typed crosses to the page. The apply checks the digest of the setup
 file, of every config it would write or read, and of Kytto's own stores again; refuses
-a name or profile that now exists; and writes Kytto's stores first and the configs
+a name or profile that now exists — a name an installed plugin or extension already
+provides to that client included, since a config entry beside it would shadow it; and
+writes Kytto's stores first and the configs
 last, as one §6 transaction with a backup of each. If the config transaction
 refuses, the stores are put back byte for byte, and anything that could not be put
 back is named in the error rather than hidden. **An imported server is always

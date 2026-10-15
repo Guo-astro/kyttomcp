@@ -1098,7 +1098,9 @@ written. `enabled` is always `false` from the application.
 ```
 
 Commits the plan, once. It checks every digest again and refuses with a message
-rather than merge if anything moved; refuses a name or profile that now exists;
+rather than merge if anything moved; refuses a name or profile that now exists, and a
+name an installed plugin or extension already provides to that client (the preview
+refuses it first);
 backs up each existing config; and writes only through the §6 pipeline. Kytto's own
 stores are written first and put back byte for byte if the config transaction
 fails; if anything cannot be put back, the error says which, and is never hidden.

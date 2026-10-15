@@ -508,6 +508,45 @@ public sealed class PortableIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task ANameAnInstalledPluginAlreadyProvidesIsNotImportedBesideIt()
+    {
+        var source = NewProfile("source");
+        var destination = NewProfile("destination");
+        SeedSource(source);
+        source.Model.Reload();
+        var file = await ExportedFrom(source);
+
+        // Codex already serves "memory": a plugin it registered and enabled declares it.
+        const string Config = "# keep\n[plugins.\"demo@example\"]\nenabled = true\n";
+        destination.Write(@".codex\config.toml", Config);
+        destination.Write(
+            @".codex\plugins\cache\example\demo\1\.codex-plugin\plugin.json",
+            """{"name":"demo","version":"1"}""");
+        destination.Write(
+            @".codex\plugins\cache\example\demo\1\.mcp.json",
+            """{"mcpServers":{"memory":{"command":"from-plugin"}}}""");
+        destination.Model.Reload();
+        Assert.Contains(
+            destination.Model.Current().Servers,
+            server => server.Name == "memory" && server.HoldsPluginCopy(ClientId.Codex));
+
+        var prompts = new FakePrompts { ImportFile = file };
+        PortableSetupController.Prompts = prompts;
+        var reply = Data(await destination.Router.InvokeForTests("setup.previewImport"));
+
+        // The window is told, naming the server and the client and nothing typed.
+        Assert.Equal(JsonValueKind.Null, reply.ValueKind);
+        var error = Assert.Single(prompts.Errors);
+        Assert.NotNull(error);
+        Assert.Contains("memory", error, StringComparison.Ordinal);
+        Assert.Contains("installed plugin", error, StringComparison.Ordinal);
+        Assert.DoesNotContain(TypedSecret, error, StringComparison.Ordinal);
+        // Nothing was prepared and nothing was written.
+        Assert.Equal(Config, File.ReadAllText(destination.Path(@".codex\config.toml")));
+        Assert.False(File.Exists(destination.Path(@"KyttoData\parked.json")));
+    }
+
+    [Fact]
     public async Task TheCapabilityIsAdvertisedBecauseTheNativePathExists()
     {
         var profile = NewProfile("local");

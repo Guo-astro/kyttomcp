@@ -396,6 +396,97 @@ public sealed class PortableReviewTests
         Assert.Equal(false, summary.Matching);
     }
 
+    // MARK: - Names installed software already provides
+
+    private static ToggleHarness WithCodexPluginProviding(string name)
+    {
+        var harness = new ToggleHarness();
+        harness.Write("""{"name":"demo","version":"1"}""", @".codex\plugins\cache\example\demo\1\.codex-plugin\plugin.json");
+        harness.Write(
+            "{\"mcpServers\":{\"" + name + "\":{\"command\":\"from-plugin\"}}}",
+            @".codex\plugins\cache\example\demo\1\.mcp.json");
+        harness.Write("# keep\n[plugins.\"demo@example\"]\nenabled = true\n", ".codex/config.toml");
+        return harness;
+    }
+
+    private static PortableSetupService ServiceSeeing(
+        ToggleHarness destination, Func<IReadOnlyList<Kytto.Core.Model.Server>> servers) =>
+        new(
+            destination.Home, new ConfigWriter(destination.Backups), destination.ParkStore, destination.Ledger,
+            destination.Paths, existingServers: servers);
+
+    [Fact]
+    public void AServerNameAPluginAlreadyProvidesIsRefusedAndNothingIsWritten()
+    {
+        using var source = new ToggleHarness();
+        source.Write("""{"mcpServers":{"github":{"command":"node"}}}""", ".cursor/mcp.json");
+        var summary = source.ExportTo();
+        using var destination = WithCodexPluginProviding("github");
+        const string Config = "# keep\n[plugins.\"demo@example\"]\nenabled = true\n";
+        const string Cursor = "{\"mcpServers\":{}}";
+        destination.Write(Cursor, ".cursor/mcp.json");
+        Assert.True(destination.Discover().Servers.Single(server => server.Name == "github").HoldsPluginCopy(ClientId.Codex));
+        var service = ServiceSeeing(destination, () => destination.Discover().Servers);
+
+        foreach (var targets in new[] { new[] { ClientId.Codex }, [ClientId.Cursor, ClientId.Codex] })
+        {
+            var error = Assert.Throws<PortableSetupException>(() =>
+                service.Preview(source.PortableFile(), targets, PortableTestSupport.Inputs(summary)));
+            Assert.Equal(PortableSetupFailure.Conflict, error.Failure);
+            Assert.Contains("github in codex", error.Message, StringComparison.Ordinal);
+            Assert.Contains("installed plugin", error.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("replacement-value", error.Message, StringComparison.Ordinal);
+        }
+        Assert.Equal(0, service.RetainedPlanCount);
+        Assert.Equal(Config, destination.Text(".codex/config.toml"));
+        Assert.Equal(Cursor, destination.Text(".cursor/mcp.json"));
+        Assert.Empty(destination.ParkStore.All());
+
+        // A client that has no such plugin is unaffected.
+        var preview = service.Preview(source.PortableFile(), [ClientId.Cursor], PortableTestSupport.Inputs(summary));
+        service.Apply(preview.Id);
+        Assert.NotNull(destination.ParkStore.Parked(ClientId.Cursor, "github"));
+    }
+
+    [Fact]
+    public void WithoutTheCheckAPluginsNameWouldBeShadowedByAConfigEntry()
+    {
+        // What the check prevents: the entry goes in beside the plugin's, and discovery
+        // then has two sources for the one name.
+        using var source = new ToggleHarness();
+        source.Write("""{"mcpServers":{"github":{"command":"node"}}}""", ".cursor/mcp.json");
+        var summary = source.ExportTo();
+        using var destination = WithCodexPluginProviding("github");
+
+        var service = destination.Portable();
+        service.Apply(service.Preview(
+            source.PortableFile(), [ClientId.Codex], PortableTestSupport.Inputs(summary)).Id);
+
+        Assert.Contains("[mcp_servers.github]", destination.Text(".codex/config.toml"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APluginThatAppearsBetweenThePreviewAndTheApplyStopsTheApply()
+    {
+        using var source = new ToggleHarness();
+        source.Write("""{"mcpServers":{"github":{"command":"node"}}}""", ".cursor/mcp.json");
+        var summary = source.ExportTo();
+        using var destination = new ToggleHarness();
+        using var withPlugin = WithCodexPluginProviding("github");
+        IReadOnlyList<Kytto.Core.Model.Server> seen = [];
+        var service = ServiceSeeing(destination, () => seen);
+
+        var preview = service.Preview(source.PortableFile(), [ClientId.Codex], PortableTestSupport.Inputs(summary));
+        seen = withPlugin.Discover().Servers;
+
+        var error = Assert.Throws<PortableSetupException>(() => service.Apply(preview.Id));
+        Assert.Equal(PortableSetupFailure.Conflict, error.Failure);
+        Assert.Contains("installed plugin", error.Message, StringComparison.Ordinal);
+        Assert.False(destination.Exists(".codex/config.toml"));
+        Assert.Empty(destination.ParkStore.All());
+        Assert.Equal(0, service.RetainedPlanCount);
+    }
+
     // MARK: - The shared gate
 
     [Fact]
