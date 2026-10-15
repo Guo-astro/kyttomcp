@@ -267,6 +267,135 @@ public sealed class PortableReviewTests
         Assert.Contains("typed", written, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ExportToAHardLinkOfALiveConfigLeavesTheLiveConfigAlone()
+    {
+        using var source = ExportedSource();
+        var config = Path.Combine(source.Home, ".cursor", "mcp.json");
+        var before = File.ReadAllBytes(config);
+        var link = Path.Combine(source.Home, "hard.json");
+        using (var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+               {
+                   FileName = "cmd.exe",
+                   Arguments = $"/d /c mklink /H \"{link}\" \"{config}\"",
+                   UseShellExecute = false,
+                   CreateNoWindow = true,
+                   RedirectStandardOutput = true,
+                   RedirectStandardError = true,
+               })!)
+        {
+            process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0 || !File.Exists(link)) return;
+        }
+
+        try
+        {
+            source.Portable().Export(link, source.Discover().Servers);
+        }
+        catch (PortableSetupException)
+        {
+            // Refusing is as good an answer as leaving the live config alone.
+        }
+
+        Assert.Equal(before, File.ReadAllBytes(config));
+    }
+
+    [Fact]
+    public void AMutatedSetupFileIsAcceptedOrRefusedAsASetupNeverCrashesTheReader()
+    {
+        var fixture = Path.Combine(AppContext.BaseDirectory, "Fixtures", "compatibility", "portable-v1-macos-export.json");
+        var original = File.ReadAllBytes(fixture);
+        using var harness = new ToggleHarness();
+        var service = harness.Portable();
+        var random = new Random(20261014);
+        var crashes = new List<string>();
+        for (var round = 0; round < 1200; round++)
+        {
+            var bytes = (byte[])original.Clone();
+            var kind = random.Next(6);
+            switch (kind)
+            {
+                case 0: bytes[random.Next(bytes.Length)] = (byte)random.Next(256); break;
+                case 1: bytes = bytes[..random.Next(bytes.Length)]; break;
+                case 2:
+                    var at = random.Next(bytes.Length);
+                    bytes = [.. bytes[..at], .. bytes[random.Next(bytes.Length)..]];
+                    break;
+                case 3:
+                    var text = System.Text.Encoding.UTF8.GetString(bytes);
+                    var swaps = new[] { ("\"literal\"", "\"requirementID\""), ("true", "null"), ("[", "{"), ("\"kind\": \"path\"", "\"kind\": 1"), ("1", "-1"), (":", ":,") };
+                    var (from, to) = swaps[random.Next(swaps.Length)];
+                    var index = text.IndexOf(from, random.Next(text.Length), StringComparison.Ordinal);
+                    if (index >= 0) text = text[..index] + to + text[(index + from.Length)..];
+                    bytes = System.Text.Encoding.UTF8.GetBytes(text);
+                    break;
+                case 4:
+                    var cut = random.Next(bytes.Length);
+                    bytes = [.. bytes[..cut], .. System.Text.Encoding.UTF8.GetBytes("\\ud800"), .. bytes[cut..]];
+                    break;
+                default:
+                    bytes = [.. new byte[random.Next(4)], .. bytes];
+                    break;
+            }
+
+            var file = Path.Combine(harness.Home, "mutated.json");
+            File.WriteAllBytes(file, bytes);
+            try
+            {
+                service.Inspect(file);
+            }
+            catch (PortableSetupException)
+            {
+            }
+            catch (Exception error)
+            {
+                crashes.Add($"{error.GetType().Name}: {error.Message}");
+            }
+        }
+
+        Assert.True(crashes.Count == 0, string.Join("\n", crashes.Distinct()));
+    }
+
+    [Theory]
+    [InlineData("{\"properties\":{\"a\":{\"description\":\"\\ud800\"}},\"type\":\"object\"}")]
+    [InlineData("{\"properties\":{\"\\udc00\":{\"type\":\"string\"}},\"type\":\"object\"}")]
+    [InlineData("{\"enum\":[\"x\\ud83d\"]}")]
+    public void ASchemaWithALoneSurrogateEscapeFallsBackToItsRawTextInsteadOfThrowing(string schema)
+    {
+        var tool = new ToolSummary("search", "d", schema);
+
+        var digest = ContractDigest.Of(tool);
+
+        Assert.Matches("^[0-9a-f]{64}$", digest);
+        Assert.Equal(digest, ContractDigest.Of(tool));
+        // The raw text decides, so a change to it is still a change.
+        Assert.NotEqual(digest, ContractDigest.Of(tool with { InputSchemaJSON = schema + " " }));
+    }
+
+    [Fact]
+    public void ALoneSurrogateInAPassingCheckCannotMakeTheImportedReferenceSummaryThrow()
+    {
+        using var harness = new ToggleHarness();
+        var imported = Timestamp.Now;
+        var service = harness.Portable(() => imported.AddSeconds(10));
+        var tool = new ToolSummary("search", "d", "{\"description\":\"\\ud800\"}");
+        Directory.CreateDirectory(harness.Paths.Root);
+        File.WriteAllText(
+            Path.Combine(harness.Paths.Root, "pending-contract-imports.json"),
+            "[{\"importedAt\":" + imported.ToUnixTimeMilliseconds() +
+            ",\"reference\":{\"serverID\":\"memory\",\"toolDigests\":{\"search\":\"" + new string('a', 64) + "\"}}}]");
+        new MetadataStore(harness.Paths).Record(
+            "memory",
+            new HealthResult(HealthStatus.Passed, imported.AddSeconds(5), 1, [tool], null, null, 0.1, null, null),
+            null);
+
+        var summary = Assert.Single(service.PendingContractSummary());
+
+        Assert.Equal(false, summary.Matching);
+    }
+
     // MARK: - The shared gate
 
     [Fact]
