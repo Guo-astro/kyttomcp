@@ -268,6 +268,34 @@ public sealed class PortableReviewTests
     }
 
     [Fact]
+    public void ExportCannotReachALiveConfigurationThroughItsShortNameSpelling()
+    {
+        using var source = ExportedSource();
+        var config = Path.Combine(source.Home, ".cursor", "mcp.json");
+        var before = File.ReadAllBytes(config);
+        var spellings = new List<string>();
+        foreach (var directory in new[] { source.Home, Path.Combine(source.Home, ".cursor") })
+        {
+            var buffer = new System.Text.StringBuilder(1024);
+            if (GetShortPathNameW(directory, buffer, (uint)buffer.Capacity) > 0 &&
+                !string.Equals(buffer.ToString(), directory, StringComparison.OrdinalIgnoreCase))
+            {
+                spellings.Add(Path.Combine(buffer.ToString(), directory == source.Home ? @".cursor\mcp.json" : "mcp.json"));
+            }
+        }
+        // Volumes without 8.3 names have no such spelling; there is then nothing to test.
+        foreach (var spelling in spellings)
+        {
+            Assert.Throws<PortableSetupException>(() => source.Portable().Export(spelling, source.Discover().Servers));
+            Assert.Equal(before, File.ReadAllBytes(config));
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport(
+        "kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetShortPathNameW(string path, System.Text.StringBuilder buffer, uint length);
+
+    [Fact]
     public void ExportToAHardLinkOfALiveConfigLeavesTheLiveConfigAlone()
     {
         using var source = ExportedSource();
