@@ -56,8 +56,9 @@ published build is 1.0.7.1 ([release notes](docs/releases/)).
 - **Not a project-config manager.** Kytto manages each client's global
   (user-level) configuration. Claude Code's per-project entries are shown
   read-only; other repository-local configs are not scanned.
-- **Not a remote-server checker (yet).** Health checks start local stdio
-  servers; HTTP and SSE servers are reported as unsupported.
+- **Not a full remote-server client.** A health check starts a local stdio
+  server, or reads a remote Streamable HTTP server's tool list (it never calls a
+  tool). Legacy SSE servers are reported as unsupported.
 
 ## Supported clients
 
@@ -126,11 +127,19 @@ makes these requests, and only these:
   Install.
 - **Package version check.** Only when you click **Check latest** on a server:
   the inferred package name is looked up on `registry.npmjs.org` or `pypi.org`.
+- **Remote server check.** Only when you check a Streamable HTTP server: Kytto
+  contacts the URL in that server's own configuration to list its tools, sending
+  the headers the configuration already defines. It never calls a tool.
+- **Remote sign-in.** Only when you choose **Sign in** on a remote server that asks
+  for it: Kytto contacts that server's authorization issuer (metadata, optional
+  client registration, token exchange and refresh) and opens its sign-in page in
+  your browser. The resulting tokens are kept in Windows Credential Manager, never
+  in a configuration file, and Kytto does not sign in at startup.
 
 Kytto sends no telemetry or analytics.
 
-Links such as an OAuth sign-in page or release notes open in your default
-browser only when you click them. A health check runs the server's own command,
+Links such as an OAuth sign-in page, release notes or the bug-report pages open
+in your default browser only when you click them; nothing is attached to them. A health check runs the server's own command,
 and what that command does on the network (for example `npx` downloading a
 package) is up to the server.
 

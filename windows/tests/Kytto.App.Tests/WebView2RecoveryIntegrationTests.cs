@@ -364,8 +364,27 @@ public sealed class WebView2RecoveryIntegrationTests : IDisposable
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            // WebView2 can hold its profile a moment after the window closed.
+            // The WebView2 environment lives as long as the test host, so its profile
+            // stays locked until the process ends. The next run sweeps it (below).
         }
+    }
+
+    // Profiles a previous run could not delete are removable once its host has exited.
+    // Only folders over an hour old are touched, so a run in progress is never disturbed.
+    static WebView2RecoveryIntegrationTests()
+    {
+        try
+        {
+            var root = Path.Combine(Path.GetTempPath(), "kytto-recovery-tests");
+            if (!Directory.Exists(root)) return;
+            foreach (var stale in new DirectoryInfo(root).EnumerateDirectories()
+                         .Where(folder => DateTime.UtcNow - folder.CreationTimeUtc > TimeSpan.FromHours(1)))
+            {
+                try { stale.Delete(recursive: true); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 }
 #endif

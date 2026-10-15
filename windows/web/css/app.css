@@ -1692,7 +1692,9 @@ th.col-client.idle .app-icon {
 }
 
 .notice-message {
-  flex: 1 1 auto;
+  /* A basis rather than `auto`: with wrapping on (§7.14) an `auto` basis made any
+     message wider than the row push the report link and Dismiss onto a second row. */
+  flex: 1 1 14rem;
   user-select: text;
   -webkit-user-select: text;
 }

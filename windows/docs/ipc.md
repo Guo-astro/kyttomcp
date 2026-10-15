@@ -1369,10 +1369,10 @@ out which events were its own.
 
 ## Not implemented
 
-Health checking remote (HTTP and SSE) servers. Those report `unsupported` with
-the reason rather than a misleading grey dot — there is no process to start, so
-checking one means speaking streamable HTTP, which is a transport this client
-does not have yet.
+Health checking legacy SSE servers. A remote Streamable HTTP server is checked
+over HTTP (capability `health.http`, §7.3) and may be signed in to (`health.oauth`);
+a legacy SSE server reports `unsupported` with the reason rather than a misleading
+grey dot, because that is a different transport this client does not speak.
 
 General project-scoped configs (`.mcp.json`, `.cursor/mcp.json` and similar
 repository-local files) remain out of scope by §4. Claude Code's explicit
