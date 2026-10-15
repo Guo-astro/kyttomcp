@@ -1,4 +1,5 @@
 using Kytto.Core.Clients;
+using Kytto.Core.Health;
 using Kytto.Core.Model;
 using Kytto.Core.Portable;
 using Kytto.Core.Tests.Support;
@@ -227,6 +228,164 @@ public sealed class PortableReviewTests
 
         var found = destination.Discover().Servers.Single(server => server.Name == "new");
         Assert.Equal(typed, found.Env.Single(entry => entry.Key == "K").Value);
+    }
+
+    [Theory]
+    [InlineData("codex")]
+    [InlineData("cursor")]
+    [InlineData("claudeCode")]
+    [InlineData("vsCode")]
+    public void ARemoteServerWithHeadersAndAnAwkwardNameImportsWithTheValuesTheUserTyped(string clientRaw)
+    {
+        using var source = new ToggleHarness();
+        source.Write(
+            """{"mcpServers":{"a.b\"c]d":{"type":"http","url":"https://example.test/mcp","headers":{"Authorization":"Bearer x","X-Api-Key":"k"}}}}""",
+            ".cursor/mcp.json");
+        var summary = source.ExportTo();
+        using var destination = new ToggleHarness();
+        var client = ClientIds.FromRaw(clientRaw)!.Value;
+        var inputs = summary.Requirements.ToDictionary(
+            requirement => requirement.Id,
+            requirement => requirement.Label.EndsWith("remote URL", StringComparison.Ordinal)
+                ? "https://remote.test/mcp?a=1&b=\"2\""
+                : "typed \"value\" with \\ and 'quotes'");
+        var service = destination.Portable();
+
+        var preview = service.Preview(source.PortableFile(), [client], inputs, enableImportedServers: true);
+        service.Apply(preview.Id);
+
+        var found = destination.Discover().Servers.Single(server => server.Name == "a.b\"c]d");
+        Assert.Equal("https://remote.test/mcp?a=1&b=\"2\"", found.Url);
+        Assert.Equal(Enablement.Enabled, found.EnabledIn[client]);
+        var written = destination.Text(client switch
+        {
+            ClientId.Codex => ".codex/config.toml",
+            ClientId.ClaudeCode => ".claude.json",
+            ClientId.VsCode => @"AppData\Roaming\Code\User\mcp.json",
+            _ => ".cursor/mcp.json",
+        });
+        Assert.Contains("typed", written, StringComparison.Ordinal);
+    }
+
+    // MARK: - The shared gate
+
+    [Fact]
+    public async Task ImportsRunningBesideTogglesProfilesMeasurementsAndExportsNeitherDeadlockNorLoseAnything()
+    {
+        using var harness = new ToggleHarness();
+        harness.Write(
+            """{"mcpServers":{"a0":{"command":"node"},"a1":{"command":"node"},"a2":{"command":"node"}}}""",
+            ".cursor/mcp.json");
+        harness.Write("# keep\n[mcp_servers.t0]\ncommand = \"node\"\n", ".codex/config.toml");
+        var service = harness.Portable();
+        var profiles = new Kytto.Core.Profiles.ProfileStore(harness.Paths);
+        var metadata = new MetadataStore(harness.Paths);
+        var succeeded = new System.Collections.Concurrent.ConcurrentBag<int>();
+        var unexpected = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+
+        void Guard(Action work)
+        {
+            try
+            {
+                work();
+            }
+            catch (Exception error) when (
+                error is PortableSetupException or ConfigWriteException or ToggleException or
+                         Kytto.Core.Profiles.ProfileException or ConfigTransactionException)
+            {
+                // A refusal is an answer; a hang or any other failure is the finding.
+            }
+            catch (Exception error)
+            {
+                unexpected.Enqueue(error);
+            }
+        }
+
+        var tasks = new List<Task>
+        {
+            Task.Run(() =>
+            {
+                for (var i = 0; i < 25; i++)
+                {
+                    var index = i;
+                    Guard(() =>
+                    {
+                        var file = Path.Combine(harness.Home, $"setup{index}.json");
+                        File.WriteAllBytes(file, PortableSetupSerializer.Write(new PortableSetup(
+                            PortableSetup.FormatName,
+                            PortableSetup.CurrentVersion,
+                            [new PortableServer(
+                                $"imp{index}", ClientId.Cursor, true, Transport.Stdio,
+                                PortableValue.FromLiteral("node"), [], new Dictionary<string, PortableValue>(),
+                                new Dictionary<string, PortableValue>(), null, null)],
+                            [new PortableProfile($"Prof{index}", [$"imp{index}"], null)],
+                            [], [])));
+                        var preview = service.Preview(file, [ClientId.Codex, ClientId.Cursor, ClientId.ClaudeCode]);
+                        service.Apply(preview.Id);
+                        succeeded.Add(index);
+                    });
+                }
+            }),
+            Task.Run(() =>
+            {
+                for (var i = 0; i < 40; i++)
+                {
+                    Guard(() =>
+                    {
+                        var server = harness.Server("a1");
+                        harness.Toggles.SetEnabled(false, server, ClientId.Cursor);
+                        harness.Toggles.SetEnabled(true, harness.Server("a1"), ClientId.Cursor);
+                    });
+                }
+            }),
+            Task.Run(() =>
+            {
+                for (var i = 0; i < 60; i++)
+                {
+                    var n = i;
+                    Guard(() => profiles.Create($"Side{n}", ["a0"]));
+                    Guard(() => profiles.All());
+                }
+            }),
+            Task.Run(() =>
+            {
+                for (var i = 0; i < 60; i++)
+                {
+                    Guard(() => metadata.Record(
+                        "a0",
+                        new HealthResult(HealthStatus.Passed, Timestamp.Now, 0, [], null, null, 0.1, null, null),
+                        null));
+                    Guard(() => harness.ParkStore.Park(ClientId.VsCode, $"p{i}", "{}"));
+                }
+            }),
+            Task.Run(() =>
+            {
+                for (var i = 0; i < 40; i++)
+                {
+                    Guard(() => service.PendingContractSummary());
+                    Guard(() => service.Export(
+                        Path.Combine(harness.Home, "out", "export.json"), harness.Discover().Servers));
+                }
+            }),
+        };
+
+        var all = Task.WhenAll(tasks);
+        var finished = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(120)));
+        Assert.True(finished == all, "a deadlock: the operations did not finish");
+        await all;
+        Assert.True(unexpected.IsEmpty, string.Join("\n", unexpected.Select(error => error.ToString())));
+
+        // Nothing that was reported as imported went missing, and none arrived switched on.
+        var servers = harness.Discover().Servers;
+        var profileNames = new Kytto.Core.Profiles.ProfileStore(harness.Paths).AllStrict().Select(p => p.Name).ToHashSet();
+        Assert.NotEmpty(succeeded);
+        foreach (var index in succeeded)
+        {
+            var imported = servers.Single(server => server.Name == $"imp{index}");
+            Assert.Equal(Enablement.Disabled, imported.EnabledIn[ClientId.Cursor]);
+            Assert.Equal(Enablement.Disabled, imported.EnabledIn[ClientId.Codex]);
+            Assert.Contains($"Prof{index}", profileNames);
+        }
     }
 
     [Fact]
