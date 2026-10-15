@@ -3,13 +3,14 @@
 
 import { el, button, busyButton, field, input, sheet, formatTokens, clientIcon } from '../dom.js';
 import { contextWindow } from '../state.js';
+import { setupActions } from './portableSetup.js';
 
 export function renderProfiles(state) {
   const panel = el('div', 'profiles-panel');
   panel.dataset.scrollKey = 'profiles';
 
-  const head = el('header', 'panel-head');
-  const copy = el('div');
+  const head = el('header', 'panel-head profiles-heading');
+  const copy = el('div', 'profiles-heading-copy');
   copy.append(el('h2', null, 'Profiles'));
   copy.append(
     el(
@@ -18,7 +19,9 @@ export function renderProfiles(state) {
       'Switch one client to a focused set of MCP servers without editing each configuration by hand.',
     ),
   );
-  head.append(copy, el('span', 'spacer'), button('New profile', 'new-profile', { className: 'button primary' }));
+  const actions = el('div', 'profiles-heading-actions');
+  actions.append(setupActions(state), button('New profile', 'new-profile', { className: 'button primary' }));
+  head.append(copy, actions);
   panel.append(head);
 
   if (state.profiles.length === 0) {

@@ -321,11 +321,13 @@ struct ServerDTO: Encodable {
     let health: HealthDTO?
     let tokenWeight: TokenWeightDTO?
     let provenance: MCPProvenanceDTO
+    let source: ServerSourceDTO
 
     nonisolated init(_ server: Server, provenance: MCPProvenance? = nil) {
         health = server.health.map(HealthDTO.init)
         tokenWeight = server.tokenWeight.map(TokenWeightDTO.init)
         self.provenance = MCPProvenanceDTO(server, provenance: provenance)
+        source = ServerSourceDTO(server.origin.provenance)
         id = server.id
         name = server.name
         transport = server.transport.rawValue
@@ -340,9 +342,24 @@ struct ServerDTO: Encodable {
         originKind = switch server.origin {
         case .configFile: "configFile"
         case .claudeDesktopExtension: "extension"
+        case .plugin: "plugin"
         }
         isBundled = server.isBundled
         hasRelativePath = server.hasRelativePath
+    }
+}
+
+struct ServerSourceDTO: Encodable {
+    let kind: String
+    let displayName: String
+    let version: String?
+    let readOnly: Bool
+
+    nonisolated init(_ source: ServerProvenance) {
+        kind = source.kind
+        displayName = source.displayName
+        version = source.version
+        readOnly = source.readOnly
     }
 }
 
@@ -360,6 +377,7 @@ struct StateDTO: Encodable {
     let gatewayRoutes: [GatewayRouteDTO]
     let doctorReports: [DoctorServerReportDTO]
     let contractAlerts: [ContractAlertDTO]
+    let pendingContractImports: PendingContractImportsDTO
     /// Servers whose clients do not agree on what they run. One entry per server,
     /// only when there is a disagreement.
     let drift: [ServerDriftDTO]
@@ -382,7 +400,19 @@ struct StateDTO: Encodable {
         gatewayRoutes = model.routes().map(GatewayRouteDTO.init)
         doctorReports = model.doctorReports().map(DoctorServerReportDTO.init)
         contractAlerts = model.contractAlerts().map(ContractAlertDTO.init)
+        pendingContractImports = PendingContractImportsDTO(model)
         drift = ServerDrift.detect(in: result.servers).map(ServerDriftDTO.init)
+    }
+}
+
+struct PendingContractImportsDTO: Encodable {
+    let entries: [PortablePendingContractSummary]
+    let error: String?
+
+    @MainActor init(_ model: AppModel) {
+        let pending = model.pendingContractImports()
+        entries = pending.entries
+        error = pending.error
     }
 }
 
@@ -888,12 +918,14 @@ struct ContractChangeDTO: Encodable {
     let severity: String
     let toolName: String
     let summary: String
+    let details: [ContractFieldChange]?
 
     nonisolated init(_ change: ContractChange) {
         kind = change.kind.rawValue
         severity = change.severity.rawValue
         toolName = change.toolName
         summary = change.summary
+        details = change.details
     }
 }
 

@@ -28,6 +28,9 @@ struct MenuCommands: Commands {
             // The project README is the user documentation. Only a domain the
             // project controls belongs here; the updater's host is the other one.
             Link("Kytto Help", destination: URL(string: "https://github.com/heyitsjakub/KyttoMCP#readme")!)
+            Divider()
+            Link("Report a bug…", destination: SupportLinks.bugReport)
+            Link("Report on GitHub…", destination: SupportLinks.githubIssue)
         }
     }
 }

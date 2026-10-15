@@ -221,8 +221,9 @@ No payload. Servers merged across clients: one entry per normalized name.
 | `commandSummary` | Single line for the matrix subtitle |
 | `env` | `[{ key, hasValue }]` — **never a value** |
 | `enabledIn` | Client id → `enabled` \| `disabled` \| `absent` |
-| `originKind` | `configFile` \| `extension` |
-| `isBundled` | Extensions ship their own command and are not editable |
+| `originKind` | `configFile` \| `extension` \| `plugin` |
+| `isBundled` | Extensions/plugins ship their own command and are not editable |
+| `source` | `{ kind, displayName, version, readOnly }`; configuration/plugin provenance for display, with native launch paths and substitutions omitted |
 | `hasRelativePath` | The command or an argument is resolved against a working directory, so copying this definition into another client may write cleanly and still not start. The fact only — no path crosses |
 | `tokenWeight` | `{ estimate, method, isMeasured, measuredAt, percentOfContext, referenceContextWindow }`, or null before a health check |
 | `provenance` | `{ sourceKind, packageName, sourceURL, installedVersion, latestVersion, latestCheckedAt, confidence, maintenanceState }` |
@@ -256,6 +257,9 @@ No payload. Everything the matrix needs in one reply.
 ```json
 { "clients": [...], "servers": [...], "diagnostics": [...],
   "pendingRestarts": { "claudeDesktop": 2 },
+  "pendingContractImports": { "entries": [
+    { "serverID": "memory", "toolCount": 2, "matching": null }
+  ], "error": null },
   "gatewayRoutes": [{ "id": "opaque UUID", "serverID": "github",
     "serverName": "github", "clientID": "cursor", "createdAt": 1785744000 }],
   "drift": [{ "serverID": "github", "serverName": "github",
@@ -271,6 +275,11 @@ No payload. Everything the matrix needs in one reply.
 `pendingRestarts` counts changes a client has not picked up yet. Clients read
 their configuration at launch and only at launch; §7.1 says to state that plainly
 rather than work around it.
+
+`pendingContractImports` contains safe imported-reference summaries. `matching`
+is null until a successful local check made after the local import timestamp;
+then it is a boolean comparison. An unreadable store produces a safe `error`
+and blocks acknowledgement. Imported references never establish local trust.
 
 `gatewayRoutes` contains safe route identity only. Upstream commands, original
 definitions and environment values do not cross IPC.
@@ -347,6 +356,13 @@ transaction. Every affected configuration is backed up and written atomically.
 version the preview showed; it splices that one `args` string in each JSON or
 TOML copy and in any off copy Kytto is holding (`parkedUpdated` /
 `parkedFailures`), and nothing else in the file.
+
+Contract alerts may include optional `changes[].details`, an array of
+`{ path, before, after, explanation }`. Before/after are bounded excerpts (null
+means absent), schema paths use escaped JSON Pointer components, and at most 40
+changed fields plus an omission notice are returned. Confirmation/dry-run fields
+explain possible safeguard changes; annotations are hints, not enforcement.
+Older metadata without details remains valid.
 
 ### `contract.acknowledge` → `StateDTO`
 
@@ -715,8 +731,8 @@ available while the value has to stay in the file.
 { "serverID": "github" }
 ```
 
-Runs the server, does the MCP handshake, calls `tools/list`, and records what
-came back. When the server advertises prompts or resources, the same inspection
+Runs a stdio server or connects to its Streamable HTTP endpoint, does the MCP
+handshake, calls paginated `tools/list`, and records what came back. When the server advertises prompts or resources, the same inspection
 also requests their first page. Takes up to ten seconds; the native side runs it
 off the main thread.
 
@@ -788,9 +804,30 @@ host) before opening. The shell never opens a URL supplied by JavaScript — the
 same stance as `updates.openDownload`. Fails if the server's last result is not
 `needsAuthorization` or recorded no page.
 
+### `health.signInRemote` → `StateDTO`
+
+```json
+{ "serverID": "remote" }
+```
+
+Capability `health.oauth` (macOS). Explicit native protected-resource/issuer
+discovery, provider/scope consent, public client registration (or a native client
+ID prompt), and ASWebAuthenticationSession with S256 PKCE and state/callback/issuer
+validation. Tokens and registration details never cross IPC. Credentials are
+bound to the exact resource and saved in Keychain; an explicit later health check
+may refresh them. The successful sign-in triggers a check. Cancelling provider
+consent returns the unchanged state; system browser cancellation returns an error.
+Kytto sign-in does not alter client configuration or authenticate other clients.
+The first advertised issuer is selected; resource metadata hints are same-origin.
+
+### `health.forgetRemoteAuthorization` → `{}`
+
+Same `{ "serverID": "remote" }` payload. Deletes only Kytto's resource-bound OAuth
+credential from native secure storage. No URL or token is accepted from web.
+
 ### `health.checkAll` → `StateDTO`
 
-No payload. Checks every stdio server, one at a time. Sequential on purpose:
+No payload. Checks every stdio and Streamable HTTP server, one at a time. Legacy SSE is excluded. Sequential on purpose:
 these are arbitrary commands, and starting a dozen node processes at once to save
 a few seconds is not a trade worth making on someone's laptop.
 
@@ -814,6 +851,49 @@ are not called abandoned.
 `staleButResponsive` or `unchecked`. A stale result means the server responded
 successfully while a trusted comparable registry version was newer than the
 installed/server-reported version; it is not an automatic package update.
+
+### `setup.export` → `PortableExportDTO`
+
+No payload. Capability `portable-setup` (macOS). Native confirmation offers an
+unchecked opt-in for reviewed contract fingerprints, then a native save panel.
+The export includes writable definitions/profiles and required inputs in place
+of credentials, URLs, private paths and ambiguous values. No secret-store lookup.
+
+```json
+{ "cancelled": false, "serverCount": 3, "profileCount": 1, "warnings": [] }
+```
+
+### `setup.previewImport` → `PortableImportPreview | null`
+
+No payload. Native file picker, bounded versioned-document validation, writable
+destination selection and native secure/path inputs. Values stay native; no
+configuration writes occur. Cancellation returns null. Validation keeps the form
+open with entered values. The resulting digest-guarded plan expires after ten
+minutes and is retained natively under an opaque id.
+
+```json
+{ "id": "opaque-preview", "serverNames": ["memory"], "profileNames": [],
+  "targetClients": ["cursor"], "pathDisplays": ["~/.cursor/mcp.json"],
+  "pendingContractCount": 0, "warnings": [], "enabled": false }
+```
+
+### `setup.applyImport` → `StateDTO`
+
+```json
+{ "previewID": "opaque-preview" }
+```
+
+Explicitly commits the native preview. Rechecks source/destination/app-state
+digests, refuses collisions, backs up existing client files, and rolls back if a
+later write fails. Imported servers remain disabled. Contract fingerprints remain
+pending and do not replace trusted baselines. Their local import timestamp
+requires a fresh successful check before review. No server is launched. The preview
+is single-use; stale plans must be prepared again.
+
+### `setup.discardImport` → `{}`
+
+Same opaque `previewID` payload. Releases the native plan and its replacement
+inputs when the preview is cancelled, including Escape/backdrop dismissal.
 
 ### `profiles.list` → `ProfileDTO[]`
 
@@ -1159,3 +1239,13 @@ Every `GatewayRouteDTO` carries `exposedTools` — the array, or null when the
 route exposes everything. Tool names are model-facing identifiers rather than
 secrets, so unlike a route's definition and environment they cross this
 boundary.
+
+## Bug-report links (§7.14)
+
+Reporting adds no IPC command or capability. Fixed links to
+`https://kytto.jakubhecht.sk/#report-bug` and
+`https://github.com/heyitsjakub/KyttoMCP/issues/new/choose` open in the system
+browser through the shell's external-navigation policy. No error message,
+configuration, log, version or device information is included in the URL.
+The native interface-failure surface can reload the bundled page and open both
+links even when the content process or bridge is unavailable.

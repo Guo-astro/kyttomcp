@@ -1,7 +1,7 @@
 # Windows release
 
-The current source release is **1.0.8**, prepared but not yet built, signed or
-published; the latest published build is 1.0.7.1. Its notes are in
+The current source release and latest published Windows build are **1.0.8**.
+Its verification results and remaining artifact limits are in
 [`releases/1.0.8.md`](releases/1.0.8.md); earlier notes sit beside it.
 
 Before creating an artifact, the exact release sources must pass:

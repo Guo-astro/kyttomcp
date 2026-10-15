@@ -197,6 +197,9 @@ public enum ConfigSource: Sendable {
     /// client repopulates — so they are read and shown, never written.
     case bundledPackages(root: PlatformPath, manifestName: String, serversKey: String)
 
+    /// Only registered, enabled installations, never a recursive cache scan.
+    case registeredPlugins(PluginRegistrySource)
+
     /// A user-selected JSON/JSONC/TOML document. Discovery identifies a known
     /// top-level adapter and reads it; no write service receives this source.
     case readOnlyAutoServerMap(file: PlatformPath)
@@ -211,6 +214,7 @@ public enum ConfigSource: Sendable {
         case .serverMap(let file, _, _, _): return file
         case .extensionBundles(let directory, _, _): return directory
         case .bundledPackages(let root, _, _): return root
+        case .registeredPlugins(let registry): return registry.registrationFile
         case .readOnlyAutoServerMap(let file): return file
         case .scopedJSONServerMap(let file, _, _): return file
         }
@@ -285,7 +289,7 @@ public struct ClientDescriptor: Sendable {
                 carries its own on/off flag beside the bundle, so switching one \
                 off removes nothing.
                 """)
-            case .bundledPackages:
+            case .bundledPackages, .registeredPlugins:
                 parts.append("""
                 Servers that arrive inside installed plugins are read-only — that \
                 directory is a cache the client rewrites, so Kytto shows them and \

@@ -18,6 +18,7 @@ struct ServerFields {
     var declaredType: String?
     var args: [String] = []
     var env: [EnvEntry] = []
+    var workingDirectory: String?
 
     /// - Parameter sourceText: the definition exactly as it appears in the file
     ///   it came from, which is what gets parked and what gets copied verbatim
@@ -28,7 +29,7 @@ struct ServerFields {
         isBundled: Bool,
         sourceText: String
     ) -> Server {
-        Server(
+        var server = Server(
             id: Server.identity(for: name),
             name: name,
             transport: resolveTransport(),
@@ -42,6 +43,12 @@ struct ServerFields {
             isBundled: isBundled,
             definitionSource: sourceText
         )
+        // Relative cwd needs client context. Plugin discovery resolves it from
+        // its registered root; an ordinary config cannot supply that context.
+        if let workingDirectory, workingDirectory.hasPrefix("/") {
+            server.workingDirectory = URL(filePath: workingDirectory).standardizedFileURL.path
+        }
+        return server
     }
 
     /// `type` when the client states it, otherwise inferred. Clients disagree on
@@ -65,6 +72,7 @@ extension ServerFields {
         command = node["command"]?.stringValue
         url = node["url"]?.stringValue
         declaredType = node["type"]?.stringValue
+        workingDirectory = node["cwd"]?.stringValue
         args = node["args"]?.elements?.compactMap(\.stringValue) ?? []
         env = (node["env"]?.members ?? []).map {
             EnvEntry(key: $0.key, value: $0.value.stringValue)
@@ -82,6 +90,7 @@ extension ServerFields {
         command = table.value("command")?.stringValue
         url = table.value("url")?.stringValue
         declaredType = table.value("type")?.stringValue
+        workingDirectory = table.value("cwd")?.stringValue
         args = table.value("args")?.elements?.compactMap(\.stringValue) ?? []
 
         if let envTable {
@@ -105,6 +114,7 @@ extension ServerFields {
         command = value("command")?.stringValue
         url = value("url")?.stringValue
         declaredType = value("type")?.stringValue
+        workingDirectory = value("cwd")?.stringValue
         args = value("args")?.elements?.compactMap(\.stringValue) ?? []
         env = (value("env")?.inlinePairs ?? []).compactMap { pair in
             guard let key = pair.name else { return nil }

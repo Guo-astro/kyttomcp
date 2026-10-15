@@ -37,6 +37,27 @@ public struct EnvEntry: Equatable, Sendable {
 public enum Origin: Equatable, Sendable {
     case configFile(ClientID)
     case claudeDesktopExtension(bundleID: String)
+    case plugin(clientID: ClientID, pluginID: String, displayName: String, version: String?)
+
+    /// Native display metadata only. Paths and launch substitutions stay out of
+    /// this value so the web layer can identify sources without interpreting them.
+    public var provenance: ServerProvenance {
+        switch self {
+        case .configFile(let client):
+            return ServerProvenance(kind: client.isBuiltIn ? "config" : "custom", displayName: client.isBuiltIn ? "Configuration" : "Custom source", version: nil, readOnly: !client.isBuiltIn)
+        case .claudeDesktopExtension:
+            return ServerProvenance(kind: "extension", displayName: "Claude Desktop extension", version: nil, readOnly: false)
+        case .plugin(_, _, let name, let version):
+            return ServerProvenance(kind: "plugin", displayName: name, version: version, readOnly: true)
+        }
+    }
+}
+
+public struct ServerProvenance: Equatable, Sendable {
+    public let kind: String
+    public let displayName: String
+    public let version: String?
+    public let readOnly: Bool
 }
 
 /// One client's copy of a definition, as that client actually has it.
@@ -61,6 +82,9 @@ public struct ClientDefinition: Equatable, Sendable {
     /// This client's definition verbatim, so unifying moves exact bytes rather
     /// than a re-serialization (§6).
     public let definitionSource: String
+    public var workingDirectory: String? = nil
+    public var placeholders: [String: String] = [:]
+    public var launchEnvironment: [String: String] = [:]
 
     public init(
         transport: Transport,
@@ -95,6 +119,9 @@ public struct ClientDefinition: Equatable, Sendable {
             isBundled: server.isBundled,
             definitionSource: server.definitionSource
         )
+        workingDirectory = server.workingDirectory
+        placeholders = server.placeholders
+        launchEnvironment = server.launchEnvironment
     }
 
     public var fingerprint: String {
@@ -152,6 +179,11 @@ public struct Server: Identifiable, Sendable {
     /// Applied when running, never when displaying: the matrix shows the command
     /// as it is written in the manifest, because that is what is really there.
     public var placeholders: [String: String] = [:]
+    /// Absolute directory established by the owning configuration or a plugin
+    /// registration. Never guessed from Kytto's own launch directory.
+    public var workingDirectory: String? = nil
+    /// Client-provided path variables only, separate from the raw config's env.
+    public var launchEnvironment: [String: String] = [:]
     /// The last health check, if one has ever been run (§7.3).
     ///
     /// Never populated automatically: §6 forbids spawning on launch, so a server
@@ -235,10 +267,29 @@ public struct Server: Identifiable, Sendable {
         (expand(command), args.map { expand($0) ?? $0 })
     }
 
+    public var runnableEnvironment: [EnvEntry] {
+        let configured = env.map { EnvEntry(key: $0.key, value: expand($0.value)) }
+        let keys = Set(configured.map(\.key))
+        return configured + launchEnvironment.keys.sorted().filter { !keys.contains($0) }.map {
+            EnvEntry(key: $0, value: launchEnvironment[$0])
+        }
+    }
+
+    public var runnableURL: String? { expand(url) }
+
+    func expandingKnownPlaceholders(_ text: String) -> String { expand(text) ?? text }
+
     private func expand(_ text: String?) -> String? {
         guard var result = text, !placeholders.isEmpty else { return text }
-        for (token, value) in placeholders {
-            result = result.replacingOccurrences(of: "${\(token)}", with: value)
+        // One pass: a substituted value is data, never another template. This
+        // also makes results independent of dictionary iteration order.
+        let pattern = #"\$\{([^{}]+)\}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
+        let original = result as NSString
+        for match in regex.matches(in: result, range: NSRange(location: 0, length: original.length)).reversed() {
+            let key = original.substring(with: match.range(at: 1))
+            guard let value = placeholders[key] else { continue }
+            if let range = Range(match.range, in: result) { result.replaceSubrange(range, with: value) }
         }
         return result
     }
@@ -282,9 +333,9 @@ public struct Server: Identifiable, Sendable {
 
     private static func isAbsolute(_ text: String) -> Bool {
         // POSIX roots, the shell's home shorthand, a UNC share, and a Windows
-        // drive letter in either slash. Windows is M7 but the registry already
-        // carries its paths, and a rule that only knows one platform is the kind
-        // of thing §3.2 exists to prevent.
+        // drive letter in either slash. The Windows app also consumes the
+        // platform-tagged registry paths; a rule that only knows one platform is
+        // the kind of thing §3.2 exists to prevent.
         if text.hasPrefix("/") || text.hasPrefix("~") || text.hasPrefix(#"\\"#) { return true }
         let afterDrive = text.dropFirst()
         return afterDrive.hasPrefix(#":\"#) || afterDrive.hasPrefix(":/")

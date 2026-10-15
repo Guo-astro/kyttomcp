@@ -169,6 +169,7 @@ struct WebView: NSViewRepresentable {
             didFailProvisionalNavigation navigation: WKNavigation!,
             withError error: any Error
         ) {
+            guard !Self.isCancelledNavigation(error) else { return }
             showStartupFailure(in: webView)
         }
 
@@ -177,21 +178,28 @@ struct WebView: NSViewRepresentable {
             didFail navigation: WKNavigation!,
             withError error: any Error
         ) {
+            guard !Self.isCancelledNavigation(error) else { return }
             showStartupFailure(in: webView)
         }
 
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            showStartupFailure(in: webView)
+        }
+
+        private static func isCancelledNavigation(_ error: any Error) -> Bool {
+            let error = error as NSError
+            return error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled
+        }
+
         private func showStartupFailure(in webView: WKWebView) {
-            let html = """
-            <!doctype html><meta charset="utf-8">
-            <meta name="color-scheme" content="light dark">
-            <title>Kytto could not start</title>
-            <style>body{font:15px system-ui;padding:32px;max-width:42rem}h1{font-size:20px}</style>
-            <h1>Kytto could not load its interface</h1>
-            <p>Quit and reopen Kytto. If the problem continues, reinstall the application.</p>
-            """
-            // about:blank has no trusted bridge origin, so this diagnostic page
-            // cannot invoke native commands even though it is in the same view.
-            webView.loadHTMLString(html, baseURL: nil)
+            // This recovery surface must survive a terminated WebKit process.
+            // It is native and requires neither JavaScript nor the IPC bridge.
+            chrome?.showInterfaceFailure { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.chrome?.hideInterfaceFailure()
+                let url = URL(string: "\(KyttoSchemeHandler.scheme)://\(KyttoSchemeHandler.host)/index.html")!
+                webView.load(URLRequest(url: url))
+            }
         }
 
         private static func isInternalMainFrameNavigation(
@@ -218,6 +226,7 @@ struct WebView: NSViewRepresentable {
 final class ChromeView: NSVisualEffectView {
     private let webView: WKWebView
     var hostedWebView: WKWebView { webView }
+    private var failureView: NSView?
     private let dragView = WindowDragView()
     private var published: (titlebar: CGFloat, trafficLights: CGFloat)?
     private var configuredUITestFrame = false
@@ -249,6 +258,27 @@ final class ChromeView: NSVisualEffectView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("not loaded from a nib")
+    }
+
+    func showInterfaceFailure(retry: @escaping @MainActor () -> Void) {
+        guard failureView == nil else { return }
+        webView.isHidden = true
+        let view = NSHostingView(rootView: InterfaceFailureView(retry: retry))
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view, positioned: .below, relativeTo: dragView)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: trailingAnchor),
+            view.topAnchor.constraint(equalTo: topAnchor, constant: 36),
+            view.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        failureView = view
+    }
+
+    func hideInterfaceFailure() {
+        failureView?.removeFromSuperview()
+        failureView = nil
+        webView.isHidden = false
     }
 
     override func viewDidMoveToWindow() {
@@ -362,6 +392,38 @@ final class ChromeView: NSVisualEffectView {
     /// Enough tint to keep the chrome a surface and read as one colour, little
     /// enough that the material behind it still moves with the desktop.
     private static let chromeAlpha = "58%"
+}
+
+/// Recovery and reporting remain available even if the web interface is down (§7.14).
+private struct InterfaceFailureView: View {
+    let retry: @MainActor () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 32))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("Kytto could not load its interface")
+                .font(.title2.bold())
+            Text("Reload the interface. If the problem continues, quit and reopen Kytto or report a bug.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Button("Reload interface", action: retry)
+                Link("Report a bug…", destination: SupportLinks.bugReport)
+                Link("Report on GitHub…", destination: SupportLinks.githubIssue)
+            }
+            .buttonStyle(.bordered)
+            Text("Reports open in your browser. No logs or configuration are attached automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: 540)
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 }
 
 /// A native, non-interactive titlebar surface above the web view.

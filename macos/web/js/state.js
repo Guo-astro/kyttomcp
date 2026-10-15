@@ -51,11 +51,17 @@ const state = {
   gatewayRoutes: [],
   doctorReports: [],
   contractAlerts: [],
+  pendingContractImports: { entries: [], error: null },
   // Servers whose clients disagree about what they run. One entry per server,
   // and only when there is a disagreement — an empty list is the normal case.
   drift: [],
   activity: null,
   filter: '',
+  scopeFilter: 'all',
+  sourceFilter: 'all',
+  density: 'comfortable',
+  selectedServerId: null,
+  setupBusy: false,
   // Cells with a write in flight, keyed `serverId::clientId`. A toggle writes to
   // disk, so the cell must not accept a second click until the first lands.
   busyCells: new Set(),
@@ -167,6 +173,8 @@ export function setState(changes) {
   const previousNotice = state.notice;
   const previousRestarts = state.pendingRestarts;
   Object.assign(state, changes);
+  if (Object.hasOwn(changes, 'clients') && !['all', 'global'].includes(state.scopeFilter) && !state.clients.some((client) => client.id === state.scopeFilter)) state.scopeFilter = 'all';
+  if (Object.hasOwn(changes, 'servers') && state.selectedServerId && !state.servers.some((server) => server.id === state.selectedServerId)) state.selectedServerId = null;
 
   const exits = [];
   if (Object.hasOwn(changes, 'sheet')) {
@@ -225,9 +233,21 @@ export function setCellBusy(serverId, clientId, busy) {
 
 /** Servers matching the current filter, in display order. */
 export function visibleServers() {
+  const clients = matrixClients();
+  const clientIDs = new Set(clients.map((client) => client.id));
+  const scoped = state.servers.filter((server) => {
+    const configured = clients.filter((client) => (server.enabledIn[client.id] ?? 'absent') !== 'absent');
+    if (state.scopeFilter !== 'all' && configured.length === 0) return false;
+    const kind = server.source?.kind ?? (server.originKind === 'extension' ? 'extension' : 'config');
+    if (state.sourceFilter === 'plugin' && !['plugin', 'extension'].includes(kind)) return false;
+    if (state.sourceFilter === 'config' && (server.isBundled || kind === 'custom')) return false;
+    if (state.sourceFilter === 'custom' && !state.clients.some((client) => clientIDs.has(client.id) && client.isReadOnly && (server.enabledIn[client.id] ?? 'absent') !== 'absent')) return false;
+    if (state.settings?.showsCustomSources === false && state.scopeFilter === 'all' && configured.length === 0) return false;
+    return true;
+  });
   const needle = state.filter.trim().toLowerCase();
-  if (!needle) return state.servers;
-  return state.servers.filter(
+  if (!needle) return scoped;
+  return scoped.filter(
     (server) =>
       server.name.toLowerCase().includes(needle) ||
       server.commandSummary.toLowerCase().includes(needle) ||
@@ -263,10 +283,30 @@ export function matchingTools(server) {
  * a column of switches that can never be switched is what it removes.
  */
 export function matrixClients() {
+  const scope = state.clients.find((client) => client.id === state.scopeFilter);
+  if (scope) {
+    // Native supplies source identity and labels. No path parsing or client-name
+    // guessing: a project and its owning global client share one icon identity.
+    return state.clients.filter((client) => client.id === scope.id || (!client.isReadOnly && client.iconAsset === scope.iconAsset));
+  }
+  if (state.scopeFilter === 'global') {
+    return state.clients.filter((client) => (client.configurationScope ?? 'global') === 'global' && (state.settings?.showsCustomSources !== false || !client.isReadOnly));
+  }
   if (state.settings?.showsCustomSources === false) {
     return state.clients.filter((client) => !client.isReadOnly);
   }
   return state.clients;
+}
+
+export function scopeOptions(from = state) {
+  return [
+    { id: 'all', label: 'All sources' },
+    { id: 'global', label: 'Global configurations' },
+    ...from.clients.filter((client) => client.isReadOnly || (client.configurationScope ?? 'global') !== 'global').map((client) => ({
+      id: client.id,
+      label: `${client.configurationScope === 'workspace' ? 'Workspace' : client.configurationScope === 'profile' ? 'Profile' : 'Custom'} · ${client.displayName}`,
+    })),
+  ];
 }
 
 /// The window every token figure is a share of. Native measures against it and

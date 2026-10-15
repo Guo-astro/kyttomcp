@@ -160,7 +160,7 @@ Out of scope for now. Each one costs months and none of them is what the app is 
 - Team sync, cloud accounts, shared config
 - Marketplace with payments
 - Auto-updating installed servers
-- Project-scoped configs (see §4 — global scope only in v1)
+- Writing project/plugin configuration or changing client scope precedence (read-only scoped discovery is supported; see §4)
 
 ---
 
@@ -170,13 +170,13 @@ Native shell + web UI.
 
 **Web stack: vanilla HTML/CSS/JS, no framework.**. See §3.1 for structure discipline — vanilla is the right call here but needs rules to stay maintainable.
 
-**Platform sequencing: macOS first, Windows after M6.** See §3.2 — this creates a specific risk that must be managed from M0.
+**Platform sequencing: macOS first, Windows after M6.** The Windows port landed at M7; its maintained implementation is in [`../windows/`](../windows/).
 
 ```
 ┌─────────────────────────────────────────┐
 │  Native shell                            │
 │  macOS: Swift + WKWebView    (v1)        │
-│  Windows: C# or Rust + WebView2 (M7)     │
+│  Windows: .NET 10 / WPF + WebView2 (M7) │
 │                                          │
 │  Owns:                                   │
 │   - window, menu bar, menu bar item      │
@@ -223,15 +223,15 @@ If the matrix render becomes a performance problem (unlikely under ~100 servers)
 
 ### 3.2 Mac-first without painting into a corner
 
-Windows lands at M7, but the risk is that macOS assumptions leak into the shared layers between now and then — and Windows stops being a port and becomes a rewrite. Discipline from M0:
+Windows landed at M7; its native shell is in [`../windows/`](../windows/), with platform setup in [`../windows/README.md`](../windows/README.md). The same boundaries still matter: configuration logic and OS paths stay native, IPC describes intent, and web code does not interpret filesystem paths.
 
 - **The IPC contract is platform-agnostic.** Commands describe intent, not implementation. `secrets.store(ref, value)` — not `keychain.addGenericPassword(...)`. `config.listClients()` — not anything that names a macOS path.
 - **The web layer never sees a filesystem path it has to interpret.** It receives display strings and opaque ids. Path construction, separators and env var expansion all live native-side.
 - **No platform names in the web layer.** No `if (mac)` branches in UI code. If behaviour must differ, the native side reports a capability flag and the UI branches on the capability, not the OS.
-- **Client registry is data, not code.** §4's descriptors already carry per-platform path arrays. Fill in the Windows paths as you go even though nothing consumes them yet — it costs minutes now and hours later.
-- **Write one throwaway Windows shell at M0.** Just a window loading the same web UI, nothing else. It proves the web layer is portable and it will never be cheaper to find out than at the start. Then park it until M7.
+- **Client registry is data, not code.** §4's descriptors carry per-platform path arrays, now consumed by both native apps.
+- **Keep the web/native boundary stable.** Each platform has its own web tree; presentation differences must not move configuration logic or filesystem knowledge into JavaScript.
 
-That last one is the highest-value item in this section. Do not skip it.
+The early WebView2 shell was a portability probe; the maintained Windows application is in `../windows/`.
 
 ### 3.3 Direct mode and Gateway mode
 
@@ -281,9 +281,19 @@ disabled server keeps its definition and nothing has to be parked.
 
 Two front ends share one config: the ChatGPT app (bundle id `com.openai.codex` —
 the display name is not the identifier) and the `codex` CLI. Like Claude Desktop
-it has a second, read-only source: plugins under `~/.codex/plugins` can bundle
-their own `.mcp.json`. That tree is a cache the client repopulates, so those
-servers are shown and never written.
+it has a second, read-only source: enabled plugin registrations in the client
+config can refer to packages under `~/.codex/plugins`. Kytto reads their declared
+MCP definitions at the registered version, or the only unambiguous installed
+version. It never crawls the cache for arbitrary `.mcp.json` files. Claude Code
+plugins similarly require installed-plugin registrations and effective enabled
+settings; user/project/local precedence is read without changing it. Plugin
+source name/version is visible, and plugin definitions are never edited,
+portable-copied or toggled by Kytto. Known root placeholders and `cwd` are
+resolved natively only when the user explicitly checks the server. Claude Code
+activation currently covers installed-plugin v2 registrations with user/project/
+local settings; session-only, synced and managed activation are not inferred.
+Codex requires an explicit enabled registration and an identifiable cached
+version; account-managed cache entries alone are not treated as active plugins.
 
 **IMPORTANT:** these paths change between releases. Do not hardcode them inline. Put every path in a single `clients/` registry module with one descriptor per client, so adding or fixing a client is a one-file change. Verify every path against current docs before writing code — training data on this is unreliable.
 
@@ -308,8 +318,11 @@ explicitly attach a named JSON, JSONC or TOML configuration as a **read-only
 custom source** and label it `Global`, `Profile` or `Workspace`. Kytto recognizes
 only tested top-level server maps (`mcpServers`, `servers`, `mcp_servers`), shows
 unknown or ambiguous documents as diagnostics, and never scans projects or
-writes a custom source. Native workspace discovery and scope precedence remain
-deferred until client-specific behavior is verified.
+writes a custom source. Claude Code project scopes are read from explicit
+registered project paths and their declared configuration/settings, without a
+project-directory crawl. The matrix can filter these scopes and plugin/custom
+sources; scope labels are display metadata, not a new configuration precedence.
+The built-in writable clients continue to use their global configuration.
 
 ---
 
@@ -420,6 +433,19 @@ Failures are stored structured (which error, with its parameters) and the
 sentence shown for one is composed at display time, so improved wording
 reaches results already on disk instead of being frozen into them.
 
+Streamable HTTP servers use a bounded, ephemeral URLSession transport for
+`initialize`, `notifications/initialized` and paginated `tools/list`. JSON and
+SSE response bodies, MCP session/protocol headers and original client-config
+headers are supported. A 401 offers native OAuth sign-in; an ordinary 403 is
+access denied. Redirects, oversized responses and repeated cursors are rejected.
+Legacy SSE remains unsupported. No tool is invoked by a check.
+
+OAuth is explicit and native: validated resource/issuer discovery, S256 PKCE,
+state/issuer/callback binding, public registration or a supplied public client
+ID, exact-resource Keychain storage, and refresh only during an explicit check.
+Kytto's sign-in is separate from the clients' credentials. The first advertised
+issuer is used; protected-resource metadata hints must share the resource origin.
+
 ### 7.4 Token weight
 
 Serialize the tool definitions returned by `tools/list` and count the tokens.
@@ -460,6 +486,9 @@ and raw stderr from the copied text because both may contain credentials.
 ### 7.6 Settings
 
 Client paths (with override), backup retention, token warning threshold, theme, launch at login and menu bar item on/off. Kytto sends no telemetry.
+
+General also includes Support links to the private website bug form and public
+GitHub Issues (§7.14).
 
 ### 7.7 Menu bar item
 
@@ -530,7 +559,10 @@ to descriptions, input schemas and safety annotations. Input schemas are compare
 in a canonical form (object keys sorted, insignificant whitespace dropped, array
 order kept), so a server that only re-serializes a schema is not reported. The
 compared contract is model-facing behavior and contains no tool-call arguments or
-results.
+results. Changed fields carry bounded before/after excerpts, including defaults,
+required arguments and annotations. Confirmation/dry-run changes explain the
+possible safeguard impact without claiming that schema or hints enforce safety.
+Old measurements without field details remain readable.
 
 ### 7.11 Tool masking
 
@@ -609,6 +641,45 @@ are counted apart and only a real config write asks anyone to restart.
 
 ---
 
+### 7.13 Portable setup
+
+Versioned portable JSON exports whitelist writable definitions and profiles;
+secret values, URLs, private paths and unrecognized arguments become required
+inputs. Known registry package identifiers can remain literal. Plugin packages
+and custom sources are not copied. Reviewed contracts export only opt-in
+fingerprints; imported references stay pending and never establish trust.
+
+Native save/open panels and native secure text fields keep file paths and input
+values out of IPC. A preview names the selected destinations, affected servers,
+profiles and warnings; applying requires its opaque id. Source/destination and
+app-owned state snapshots are checked again before commit. Imported servers are
+disabled, collisions refuse, every existing config receives a backup, and later
+failures roll back earlier writes. Import never launches a server. Reviewed
+fingerprints exclude token measurements and canonicalize schemas. Each imported
+reference receives a local import timestamp; a successful check after that time
+is required before its comparison can be acknowledged. The imported fingerprint
+never becomes the local trusted baseline, and unreadable pending state blocks
+acknowledgment without discarding it.
+
+### 7.14 Bug reporting and interface recovery
+
+Settings → General → Support and the Help menu offer **Report a bug…** for the
+private, account-free website form (`https://kytto.jakubhecht.sk/#report-bug`)
+and **Report on GitHub…** for a public issue
+(`https://github.com/heyitsjakub/KyttoMCP/issues/new/choose`). Both open in the
+system browser. Error notices offer the private report link; startup and
+unexpected script failure screens offer both destinations alongside retry.
+Settings save failures also offer reporting.
+
+A failed interface navigation or terminated WebKit content process displays a
+native recovery surface with Reload interface and both report links, so reporting
+does not depend on the failed page or IPC. Cancelled navigations are ignored.
+Reload loads only the bundled application origin and never retries a mutation.
+The OS handles crashes of the entire native app; Kytto does not intercept those
+or detect prior crashes on launch. No reports, logs, error text, configuration,
+credentials or device metadata are sent or attached automatically. The user
+writes and submits their report in the browser. No new IPC commands are needed.
+
 ## 8. Milestones
 
 The order the app was built in, kept as a record. Each milestone ended with
@@ -640,9 +711,8 @@ Menu bar item, settings, empty states, error states, onboarding on first run (de
 Native shell in C# or Rust + WebView2. Implement the same IPC command set against Windows APIs: Credential Manager for secrets, `ReadDirectoryChangesW` for watching, `%APPDATA%` paths in the client registry, native tray item. The web layer should need zero changes — if it needs more than trivial ones, §3.2 was violated somewhere and that is worth finding rather than patching.
 
 M2 was the milestone that took longest, and it is still where most of the risk
-lives. M7 is the open one: the Windows shell is not in this repository yet, and
-contributions are welcome — see `docs/FUTURE_MCP_ROADMAP.md` §15 for what it has
-to cover.
+lives. M7 delivered the Windows shell, now maintained in `../windows/`; see its
+[README](../windows/README.md) and [release notes](../windows/docs/releases/1.0.8.md).
 
 ### Advanced control-plane track
 
@@ -680,8 +750,9 @@ actual arguments make decisions. Replay defaults to unavailable for mutating or
 unknown tools.
 
 **G4 — Remote transports and teams**
-Streamable HTTP, OAuth, shared policies, audit export, device sync and emergency
-revocation only after the local stdio design has real usage evidence.
+Streamable HTTP checks and explicit OAuth for Remote Doctor are implemented
+(§7.3). Remote gateway routing, shared policies, audit export, device sync and
+emergency revocation remain deferred until the local gateway has usage evidence.
 
 Deferred candidates G3 and beyond are described in
 `docs/FUTURE_MCP_ROADMAP.md` with scope and dependencies.
@@ -705,10 +776,22 @@ This is an instrument panel, not a consumer app. Reference: Proxyman, TablePlus.
 
 - Dense table, thin hairlines, generous information per screen
 - Monospace for paths, commands, numbers
-- Status dots, not text labels
+- Status dots and concise text distinguish enablement, health and read-only provenance
 - Dark mode is the default
 - No illustrations, no onboarding carousels, no shadowed cards
 - Color only where it carries meaning: green running, red failed, gray unchecked, amber consuming context, blue waiting for your sign-in. Nowhere else.
+
+The matrix remains the main surface, with a persistent selected-server inspector
+alongside on wide windows and below on smaller ones. Navigation groups Overview,
+Manage and Discover. Workspace/source filters reduce unrelated columns. Selection,
+focus and scroll survive state renders. Small feedback transitions take about
+110–220 ms, and Reduce Motion removes movement. Scope, Source and Rows retain
+native select accessibility with a styled 36 px control, leading icon, single
+chevron, active accent and visible keyboard focus. Remove the platform's default
+bevel with both standard and WebKit `appearance: none`. Profiles keeps portable
+setup actions and New profile in one aligned group inside its padded header;
+when space is limited, the group wraps with the header instead of floating at
+the panel edge.
 
 A developer wants maximum state on one screen and wants to read it in two seconds.
 

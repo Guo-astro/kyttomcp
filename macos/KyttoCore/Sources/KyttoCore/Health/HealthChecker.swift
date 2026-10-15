@@ -9,20 +9,25 @@ public struct HealthChecker: Sendable {
 
     private let client: MCPStdioClient
     private let shell: ShellEnvironment
+    private let httpClient: MCPHTTPClient
     private let timeout: TimeInterval
 
     public init(
         shell: ShellEnvironment = .current,
         timeout: TimeInterval = HealthChecker.defaultTimeout,
-        client: MCPStdioClient = MCPStdioClient()
+        client: MCPStdioClient = MCPStdioClient(),
+        httpClient: MCPHTTPClient = MCPHTTPClient()
     ) {
         self.shell = shell
         self.timeout = timeout
         self.client = client
+        self.httpClient = httpClient
     }
 
-    public func check(_ server: Server) -> (health: HealthResult, tokenWeight: TokenWeight?) {
+    public func check(_ server: Server, httpHeaders: [String: String]? = nil) -> (health: HealthResult, tokenWeight: TokenWeight?) {
         let started = Date.timestamp()
+
+        if server.transport == .http { return checkRemote(server, headers: httpHeaders, started: started) }
 
         guard server.transport == .stdio else {
             // Remote servers are not spawned, so there is nothing to run. Saying
@@ -49,7 +54,7 @@ public struct HealthChecker: Sendable {
 
         let environment = shell.environment(
             adding: Dictionary(
-                server.env.compactMap { entry in entry.value.map { (entry.key, $0) } },
+                server.runnableEnvironment.compactMap { entry in entry.value.map { (entry.key, $0) } },
                 uniquingKeysWith: { first, _ in first }
             )
         )
@@ -59,7 +64,8 @@ public struct HealthChecker: Sendable {
                 command: command,
                 arguments: resolvedArgs,
                 environment: environment,
-                timeout: timeout
+                timeout: timeout,
+                workingDirectory: server.workingDirectory
             )
             let weight = TokenWeight.measuring(listing.rawToolsJSON)
             return (
@@ -97,6 +103,50 @@ public struct HealthChecker: Sendable {
             )
         } catch {
             return (outcome(for: error, stderr: nil, started: started), nil)
+        }
+    }
+
+    private func checkRemote(_ server: Server, headers: [String: String]?, started: Date) -> (health: HealthResult, tokenWeight: TokenWeight?) {
+        do {
+            guard let url = server.runnableURL else { throw RemoteHTTPError.invalidEndpoint }
+            var resolvedHeaders = try RemoteHTTPHeaders.resolve(
+                definitionSource: server.definitionSource,
+                environment: shell.environment(adding: Dictionary(
+                    server.runnableEnvironment.compactMap { entry in entry.value.map { (entry.key, $0) } },
+                    uniquingKeysWith: { first, _ in first }
+                )),
+                omittingAuthorization: headers?.keys.contains { $0.lowercased() == "authorization" } == true
+            )
+            for (key, value) in headers ?? [:] {
+                resolvedHeaders = resolvedHeaders.filter { $0.key.lowercased() != key.lowercased() }
+                resolvedHeaders[key] = value
+            }
+            let deadline = started.addingTimeInterval(min(max(timeout, 0.05), 60))
+            let listing = try httpClient.listTools(url: url, headers: resolvedHeaders, timeout: max(0.05, deadline.timeIntervalSinceNow))
+            let weight = try TokenWeight.measuring(listing.rawToolsJSON, deadline: deadline)
+            return (HealthResult(
+                status: .passed, checkedAt: started, toolCount: listing.tools.count,
+                tools: listing.tools, message: nil, stderr: nil,
+                durationSeconds: Date().timeIntervalSince(started), serverName: listing.serverName,
+                serverVersion: listing.serverVersion, protocolVersion: listing.negotiatedProtocolVersion,
+                capabilityNames: listing.capabilityNames, promptCount: listing.promptCount,
+                resourceCount: listing.resourceCount, inspectionNotes: listing.inspectionNotes,
+                environmentSource: "Streamable HTTP"
+            ), weight)
+        } catch {
+            let remote = error as? RemoteHTTPError
+            let status: HealthResult.Status
+            if case .authorizationRequired = remote { status = .needsAuthorization }
+            else { status = .failed }
+            // Never retain response bodies, WWW-Authenticate values or URLSession's
+            // descriptions: any can contain a token, signed URL or echoed header (§6).
+            let message = remote?.errorDescription ?? "The remote check could not be completed."
+            return (HealthResult(
+                status: status, checkedAt: started, toolCount: nil, tools: [],
+                message: message, stderr: nil, durationSeconds: Date().timeIntervalSince(started),
+                serverName: nil, serverVersion: nil, environmentSource: "Streamable HTTP",
+                failure: .other(message: message)
+            ), nil)
         }
     }
 

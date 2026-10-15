@@ -167,9 +167,9 @@ Check those in the app.
 
 ## Platform
 
-macOS 15+, Swift 6. Windows lands at M7 and the discipline that keeps it a port
-rather than a rewrite is §3.2 — platform-agnostic IPC, per-platform paths already
-filled into the registry, no `if (mac)` anywhere in `web/`.
+macOS 15+, Swift 6. The Windows app lives in `../windows/`; §3.2 documents the
+platform boundaries that keep both native shells aligned: intent-based IPC,
+per-platform registry paths and no OS path handling in web code.
 
 Not shipping via the Mac App Store: the sandbox forbids reading and writing other
 applications' config files, which is the entire product.

@@ -47,6 +47,18 @@ public struct TokenWeight: Codable, Equatable, Sendable {
         )
     }
 
+    /// Remote inspection shares its deadline with token measurement (§7.3, §7.4).
+    public static func measuring(_ text: String, deadline: Date, at date: Date = .timestamp()) throws -> TokenWeight {
+        guard Date() < deadline else { throw RemoteHTTPError.timedOut }
+        if let tokenizer = BPETokenizer.cl100kBase {
+            return TokenWeight(estimate: try tokenizer.countTokens(text, deadline: deadline),
+                               method: BPETokenizer.cl100kMethod, measuredAt: date)
+        }
+        let fallback = estimating(text, at: date)
+        guard Date() < deadline else { throw RemoteHTTPError.timedOut }
+        return fallback
+    }
+
     /// Characters divided by four — the pre-vocabulary heuristic.
     ///
     /// Kept only as the fallback for a build whose rank table is missing. It
@@ -94,7 +106,7 @@ public enum HealthFailureReason: Codable, Equatable, Sendable {
         case .noCommand:
             return "This server has no command to run."
         case .remoteTransport(let transport):
-            return "Kytto cannot check remote servers yet — this one is reached over \(transport)."
+            return "Kytto checks Streamable HTTP; the legacy \(transport) transport is not supported."
         case .commandNotFound(let command, let searchedPath, let searchedLoginShellPATH):
             // The single most likely failure, and the one where a bare
             // "command not found" would send the user looking in the wrong place.

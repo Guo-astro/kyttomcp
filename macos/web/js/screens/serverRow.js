@@ -46,7 +46,10 @@ export function toggle(state, server, client, value, flipped) {
 
   // An extension is an installed bundle, not a definition that can be copied.
   const portable = !(server.isBundled && value === 'absent');
-  if (client.isReadOnly) {
+  if (server.originKind === 'plugin' || server.source?.kind === 'plugin' || (server.isBundled && server.source?.readOnly)) {
+    button.disabled = true;
+    button.title = value === 'absent' ? 'Plugin servers belong to their client installation and cannot be copied.' : 'Read-only plugin. Manage its enablement in the owning client.';
+  } else if (client.isReadOnly) {
     button.disabled = true;
     button.title = `${client.displayName} is a read-only custom source. Kytto never changes this file.`;
   } else if (client.state === 'notInstalled') {
@@ -54,7 +57,7 @@ export function toggle(state, server, client, value, flipped) {
     button.title = `${client.displayName} was not detected. Set its configuration path in Settings if it is installed somewhere unusual.`;
   } else if (!portable) {
     button.disabled = true;
-    button.title = 'Claude Desktop extensions cannot be copied into another client.';
+    button.title = 'Installed extensions and plugins cannot be copied into another client.';
   } else if (value === 'absent' && server.hasRelativePath) {
     // Copyable, and probably not worth copying. Nothing stops the click — the
     // file is written correctly either way and the user may know something Kytto
@@ -109,7 +112,7 @@ const DOT_STATE = {
 const DOT_LABEL = {
   passed: 'Health check passed',
   failed: 'Health check failed',
-  unsupported: 'Not checked — remote server',
+  unsupported: 'Check unsupported — open details for the reason',
   needsAuthorization: 'Waiting for you to authorize it — open the server for the sign-in link',
 };
 
@@ -121,6 +124,7 @@ export function serverOpener(state, server, settled) {
   const opener = el('button', 'server-opener');
   opener.dataset.action = 'open-server';
   opener.dataset.serverId = server.id;
+  if (state.panel === null) opener.setAttribute('aria-pressed', String(state.selectedServerId === server.id));
 
   const busy = state.checking.has(server.id);
   const status = server.health?.status;
@@ -152,12 +156,7 @@ export function serverOpener(state, server, settled) {
     title.append(badge);
   }
   // Titled because a narrow row can cut a badge down to a stub.
-  if (server.isBundled) {
-    const badge = el('span', 'badge', 'extension');
-    badge.title = 'Installed Claude Desktop extension';
-    title.append(badge);
-  }
-  if (server.transport !== 'stdio') {
+  if (server.transport !== 'stdio' && !server.isBundled) {
     const badge = el('span', 'badge', server.transport);
     badge.title = `Remote server over ${server.transport}`;
     title.append(badge);
@@ -167,6 +166,13 @@ export function serverOpener(state, server, settled) {
     title.append(el('span', 'tool-count', `${count} ${count === 1 ? 'tool' : 'tools'}`));
   }
   opener.append(title);
+
+  const source = server.source ?? { kind: server.isBundled ? 'extension' : 'config' };
+  const statusText = busy ? 'Checking…' : status === 'passed' ? 'Check passed' : status === 'failed' ? 'Check failed' : status === 'needsAuthorization' ? 'Sign-in required' : status === 'unsupported' ? 'Check unavailable' : 'Not checked';
+  const sourceText = source.kind === 'plugin' ? `Plugin · ${source.displayName}${source.version ? ` ${source.version}` : ''}` : source.kind === 'extension' ? 'Extension' : source.kind === 'custom' ? 'Custom source' : 'Configuration';
+  const meta = el('div', 'server-meta');
+  meta.append(el('span', `server-health-label ${DOT_STATE[status] ?? 'unchecked'}`, statusText), el('span', 'server-source-label', `${source.readOnly ? 'Read-only · ' : ''}${sourceText}`));
+  opener.append(meta);
 
   // A failed check replaces the command with the reason it failed — that is what
   // the user needs at a glance, and the command is one click away in the detail.

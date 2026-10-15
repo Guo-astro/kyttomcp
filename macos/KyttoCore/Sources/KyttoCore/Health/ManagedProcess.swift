@@ -10,6 +10,7 @@ public enum ProcessError: Error, LocalizedError, Equatable {
     /// there without the executable bit.
     case executableMissing(String, resolvedPath: String)
     case notExecutable(String)
+    case invalidWorkingDirectory(String)
     case spawnFailed(String, code: Int32)
     case writeFailed
     case timedOut(after: TimeInterval)
@@ -33,6 +34,8 @@ public enum ProcessError: Error, LocalizedError, Equatable {
             return "\(command) was not found at \(resolvedPath)."
         case .notExecutable(let path):
             return "\(path) exists but is not executable. Add the executable bit with chmod +x."
+        case .invalidWorkingDirectory:
+            return "The server's configured working directory is missing or is not an absolute directory. Kytto did not start it."
         case .spawnFailed(let command, let code):
             return "Could not start \(command) (error \(code))."
         case .writeFailed:
@@ -78,8 +81,15 @@ final class ManagedProcess {
         return String(decoding: stderrData, as: UTF8.self)
     }
 
-    init(executable: String, arguments: [String], environment: [String: String]) throws {
-        let resolved = try ManagedExecutable.resolve(executable, path: environment["PATH"] ?? "")
+    init(executable: String, arguments: [String], environment: [String: String], workingDirectory: String? = nil) throws {
+        if let workingDirectory {
+            var isDirectory: ObjCBool = false
+            guard workingDirectory.hasPrefix("/"),
+                  FileManager.default.fileExists(atPath: workingDirectory, isDirectory: &isDirectory),
+                  isDirectory.boolValue
+            else { throw ProcessError.invalidWorkingDirectory(workingDirectory) }
+        }
+        let resolved = try ManagedExecutable.resolve(executable, path: environment["PATH"] ?? "", workingDirectory: workingDirectory)
         resolvedExecutable = resolved
 
         var inPipe: [Int32] = [0, 0]
@@ -98,6 +108,13 @@ final class ManagedProcess {
         posix_spawn_file_actions_addclose(&actions, inPipe[1])
         posix_spawn_file_actions_addclose(&actions, outPipe[0])
         posix_spawn_file_actions_addclose(&actions, errPipe[0])
+        if let workingDirectory {
+            let result = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
+            guard result == 0 else {
+                for fd in inPipe + outPipe + errPipe { close(fd) }
+                throw ProcessError.spawnFailed(executable, code: result)
+            }
+        }
 
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)

@@ -10,7 +10,38 @@ const CLIENT_STATE_LABEL = {
 };
 
 export function renderServerDetail(state) {
-  const server = state.servers.find((entry) => entry.id === state.sheet.serverId);
+  const parts = serverDetailParts(state, state.sheet.serverId);
+  return parts ? sheet(parts.server.name, parts.body, parts.footer) : null;
+}
+
+export function renderServerInspector(state, serverId) {
+  const inspector = el('aside', 'server-inspector');
+  inspector.setAttribute('aria-label', 'Server details');
+  const parts = serverDetailParts(state, serverId);
+  if (!parts) {
+    const empty = el('div', 'inspector-empty');
+    empty.append(el('span', 'eyebrow', 'Server details'), el('h2', null, 'Select a server'), el('p', 'muted', 'Choose a row to inspect its source, health and tool contract alongside the matrix.'));
+    inspector.append(empty);
+    return inspector;
+  }
+  const header = el('header', 'inspector-header');
+  const identity = el('div');
+  identity.append(el('span', 'eyebrow', 'Server details'), el('h2', null, parts.server.name));
+  header.append(identity, button('Expand', 'open-server-modal', { className: 'button subtle', dataset: { serverId } }), button('Close', 'close-inspector', { className: 'button subtle' }));
+  const body = el('div', 'inspector-body');
+  body.dataset.scrollKey = `inspector:${serverId}`;
+  body.append(...parts.body);
+  inspector.append(header, body);
+  if (parts.footer?.length) {
+    const footer = el('footer', 'inspector-footer');
+    footer.append(...parts.footer);
+    inspector.append(footer);
+  }
+  return inspector;
+}
+
+function serverDetailParts(state, serverId) {
+  const server = state.servers.find((entry) => entry.id === serverId);
   if (!server) return null;
 
   const body = [];
@@ -21,7 +52,7 @@ export function renderServerDetail(state) {
       server.transport === 'stdio'
         ? ['Command', server.commandSummary, 'mono selectable']
         : ['URL', server.url ?? '', 'mono selectable'],
-      ['Source', server.originKind === 'extension' ? 'Claude Desktop extension' : 'Config file'],
+      ['Source', [server.source?.displayName ?? (server.originKind === 'extension' ? 'Claude Desktop extension' : 'Config file'), server.source?.version].filter(Boolean).join(' · ')],
     ]),
   );
 
@@ -66,7 +97,9 @@ export function renderServerDetail(state) {
       el(
         'p',
         'muted',
-        'This server came from an installed Claude Desktop extension. Its command is part of the bundle, so it can be switched on and off here but not edited or deleted.',
+        server.source?.readOnly
+          ? 'This server belongs to a registered plugin. Manage its installation and enablement in the client; Kytto reads its definition without editing it.'
+          : 'This server came from an installed extension. Its command is part of the bundle, so it can be switched on and off here but not edited or deleted.',
       ),
     );
   }
@@ -99,7 +132,7 @@ export function renderServerDetail(state) {
     footer.push(button('Edit', 'edit-server', { dataset: { serverId: server.id } }));
   }
 
-  return sheet(server.name, body, footer.length ? footer : null);
+  return { server, body, footer: footer.length ? footer : null };
 }
 
 function provenanceSection(state, server) {
@@ -273,15 +306,35 @@ function listPhrase(items) {
 
 function contractSection(state, server) {
   const alert = (state.contractAlerts ?? []).find((entry) => entry.serverID === server.id);
-  if (!alert) return null;
+  const pending = state.pendingContractImports?.entries?.find((entry) => entry.serverID === server.id);
+  const importError = state.pendingContractImports?.error;
+  if (!alert && !pending && !importError) return null;
   const section = el('section', 'detail-section contract-alert');
   section.append(el('h3', null, 'Contract Guard'));
-  section.append(el('p', 'muted', `Changed during the health check on ${new Date(alert.changedAt * 1000).toLocaleString()}.`));
+  if (importError) section.append(el('p', 'failure-message', importError));
+  if (pending) {
+    const status = pending.matching === true ? 'The fresh check matches the imported fingerprints.' : pending.matching === false ? 'The fresh check differs from the imported fingerprints.' : 'Run a fresh health check to compare this server with the imported fingerprints.';
+    section.append(el('p', 'muted', `${pending.toolCount} imported tool fingerprint${pending.toolCount === 1 ? '' : 's'} await local review. ${status}`), el('p', 'field-hint', 'Imported contracts are reference material. Mark the current, locally checked contract as reviewed only after inspecting its tools.'));
+  }
+  if (alert) section.append(el('p', 'muted', `Changed during the health check on ${new Date(alert.changedAt * 1000).toLocaleString()}.`));
   const list = el('ul', 'contract-change-list');
-  for (const change of alert.changes) {
+  for (const change of alert?.changes ?? []) {
     const item = el('li', `contract-change ${change.severity}`);
     item.append(el('strong', 'mono', change.toolName));
     item.append(el('span', null, change.summary));
+    for (const field of change.details ?? []) {
+      const detail = el('div', 'contract-field');
+      detail.append(el('code', 'contract-path', field.path));
+      const values = el('div', 'contract-values');
+      const before = el('div', 'contract-before');
+      before.append(el('span', 'contract-value-label', 'Before'), el('pre', 'selectable', field.before ?? 'Not present'));
+      const after = el('div', 'contract-after');
+      after.append(el('span', 'contract-value-label', 'After'), el('pre', 'selectable', field.after ?? 'Not present'));
+      values.append(before, after);
+      detail.append(values);
+      if (field.explanation) detail.append(el('p', 'field-hint', field.explanation));
+      item.append(detail);
+    }
     list.append(item);
   }
   section.append(list);
@@ -289,12 +342,17 @@ function contractSection(state, server) {
   // Without this the alert has no way to end: it is rewritten only by the next
   // check that finds something *different*, so a change you have read and
   // accepted keeps being reported. Accepting makes this contract the baseline.
-  section.append(
-    busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
+  if (alert || pending) {
+    const review = busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
       className: 'button subtle',
       dataset: { serverId: server.id },
-    }),
-  );
+    });
+    if (importError || (pending && (pending.matching == null || server.health?.status !== 'passed'))) {
+      review.disabled = true;
+      review.title = 'Complete a fresh passing health check before reviewing this imported contract.';
+    }
+    section.append(review);
+  }
   return section;
 }
 
@@ -321,6 +379,14 @@ function healthSection(state, server) {
   );
   section.append(heading);
 
+  if (server.transport === 'http' && state.app?.capabilities?.includes('health.oauth')) {
+    const auth = el('div', 'auth-actions');
+    auth.append(button(busy ? 'Waiting…' : 'Sign in…', busy ? 'noop' : 'sign-in-remote', { dataset: { serverId: server.id } }));
+    auth.append(button('Forget Kytto sign-in', busy ? 'noop' : 'forget-remote-sign-in', { className: 'button subtle', dataset: { serverId: server.id } }));
+    section.append(auth);
+    section.append(el('p', 'field-hint', 'OAuth stays in the native credential store and authorizes Kytto checks. Configured client credentials remain separate.'));
+  }
+
   const health = server.health;
   if (!health) {
     section.append(
@@ -329,7 +395,9 @@ function healthSection(state, server) {
         'muted',
         server.transport === 'stdio'
           ? 'Not checked yet. Checking runs the command below, so Kytto only does it when you ask.'
-          : 'Kytto cannot check remote servers yet.',
+          : server.transport === 'http'
+            ? 'Not checked yet. Check now connects to this endpoint and reads its MCP tool list. It does not call tools.'
+            : 'Legacy SSE is not supported by Remote Doctor. Use a Streamable HTTP endpoint.',
       ),
     );
     return section;

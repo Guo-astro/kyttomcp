@@ -75,7 +75,7 @@ public struct ClientPathResolver: Sendable {
             case .extensionBundles(_, let settingsDirectory, _):
                 let known = resolve(settingsDirectory).appending(path: candidate.lastPathComponent)
                 if candidate.pathExtension == "json", matches(known) { return known }
-            case .bundledPackages, .readOnlyAutoServerMap, .scopedJSONServerMap:
+            case .bundledPackages, .registeredPlugins, .readOnlyAutoServerMap, .scopedJSONServerMap:
                 continue
             }
         }

@@ -23,6 +23,12 @@ const PANELS = [
   { id: 'skills', label: 'Skills', paths: GLYPH.skills },
 ];
 
+const PANEL_GROUPS = [
+  { label: 'Overview', ids: [null, 'doctor', 'activity'] },
+  { label: 'Manage', ids: ['profiles', 'secrets', 'backups'] },
+  { label: 'Discover', ids: ['library', 'skills'] },
+];
+
 /// A client that is installed and configured says how many servers it holds.
 /// The other three states are more useful as words than as a zero.
 const CLIENT_NOTE = {
@@ -38,23 +44,37 @@ export function renderSidebar(state, selectionChanged = false) {
   sidebar.setAttribute('aria-label', 'Sections');
 
   sidebar.append(brand());
-  sidebar.append(el('div', 'side-heading', 'Workspace'));
-  for (const panel of PANELS) {
-    sidebar.append(panelItem(state, panel, selectionChanged));
+  for (const group of PANEL_GROUPS) {
+    sidebar.append(el('div', 'side-heading', group.label));
+    for (const panel of PANELS.filter((entry) => group.ids.includes(entry.id))) {
+      sidebar.append(panelItem(state, panel, selectionChanged));
+    }
   }
 
   if (state.clients.length > 0) {
     const builtIn = state.clients.filter((client) => !client.isReadOnly);
     const custom = state.clients.filter((client) => client.isReadOnly);
-    sidebar.append(el('div', 'side-heading', `${builtIn.length} built-in clients`));
+    sidebar.append(el('div', 'side-heading', 'Clients & sources'));
+    const shown = state.settings?.showsCustomSources !== false;
+    const grouped = new Set();
     for (const client of builtIn) {
       sidebar.append(clientItem(state, client, selectionChanged));
+      const children = custom.filter((source) => source.iconAsset === client.iconAsset);
+      if (shown) {
+        for (const child of children) {
+          const item = clientItem(state, child, selectionChanged);
+          item.classList.add('side-child');
+          sidebar.append(item);
+          grouped.add(child.id);
+        }
+      } else {
+        children.forEach((child) => grouped.add(child.id));
+      }
     }
     if (custom.length > 0) {
-      const shown = state.settings?.showsCustomSources !== false;
       sidebar.append(customHeading(custom.length, shown));
       if (shown) {
-        for (const client of custom) sidebar.append(clientItem(state, client, selectionChanged));
+        for (const client of custom.filter((entry) => !grouped.has(entry.id))) sidebar.append(clientItem(state, client, selectionChanged));
       }
     }
   }
@@ -210,6 +230,12 @@ function clientItem(state, client, selectionChanged) {
   // spends its width on the part that differs — the path's leaf — rather than
   // on repeating "Claude Code · " until the ellipsis eats the difference.
   item.append(el('span', 'side-label', client.shortName ?? client.displayName));
+  if (client.isReadOnly) {
+    const lock = glyph(['M5 7V5a3 3 0 0 1 6 0v2', 'M3.5 7h9v7h-9z']);
+    lock.classList.add('source-lock');
+    lock.setAttribute('aria-label', 'Read-only');
+    item.append(lock);
+  }
   item.append(el('span', 'side-count', client.serverCount > 0 ? String(client.serverCount) : '—'));
   return item;
 }

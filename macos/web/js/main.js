@@ -9,6 +9,7 @@ import {
   setCellBusy,
   emptyDraft,
   draftFromServer,
+  visibleServers,
 } from './state.js';
 import { render as renderMatrix } from './screens/matrix.js';
 import { diagnosticReport } from './screens/serverDetail.js';
@@ -20,7 +21,28 @@ const root = document.getElementById('app');
 
 setRenderer(() => renderMatrix(root));
 
+// Keep unexpected script failures actionable without placing exception text,
+// config values or process output into a report URL (§7.14).
+let interfaceFailed = false;
+function handleInterfaceFailure() {
+  if (interfaceFailed) return;
+  interfaceFailed = true;
+  setState({
+    phase: 'error',
+    error: {
+      code: 'interfaceFailure',
+      message: 'Try again. If the problem continues, quit and reopen Kytto or report a bug.',
+    },
+    sheet: null,
+  });
+}
+window.addEventListener('error', (event) => {
+  if (event instanceof ErrorEvent) handleInterfaceFailure();
+});
+window.addEventListener('unhandledrejection', handleInterfaceFailure);
+
 async function load() {
+  interfaceFailed = false;
   setState({ phase: 'loading', error: null });
   try {
     const [app, settings, state, backups, catalog, profiles] = await Promise.all([
@@ -203,6 +225,60 @@ function withRefreshWarning(notice, warning) {
     kind: notice.kind === 'error' ? 'error' : 'warning',
     message: `${notice.message} ${warning}`,
   };
+}
+
+// Portable setup prompts and secret inputs stay native. The page only sees a
+// display-only preview and its opaque, short-lived id.
+async function exportSetup() {
+  if (getState().setupBusy) return;
+  setState({ setupBusy: true });
+  try {
+    const result = await invoke('setup.export');
+    if (!result?.cancelled) setState({ notice: {
+      kind: result.warnings?.length ? 'warning' : 'info',
+      message: `Exported ${result.serverCount} server${result.serverCount === 1 ? '' : 's'} and ${result.profileCount} profile${result.profileCount === 1 ? '' : 's'}. ${(result.warnings ?? []).join(' ')}`.trim(),
+    } });
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ setupBusy: false });
+  }
+}
+
+async function previewSetupImport() {
+  if (getState().setupBusy) return;
+  setState({ setupBusy: true });
+  try {
+    const preview = await invoke('setup.previewImport');
+    if (preview?.id) setState({ sheet: { kind: 'portableImport', preview, busy: false, error: null } });
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ setupBusy: false });
+  }
+}
+
+async function applySetupImport() {
+  const current = getState().sheet;
+  if (current?.kind !== 'portableImport' || current.busy) return;
+  const request = beginSheetRequest();
+  try {
+    applyState(await invoke('setup.applyImport', { previewID: current.preview.id }));
+    setState({ sheet: null });
+    const warning = await refreshAfterMutation({ backups: true, profiles: true });
+    setState({ notice: withRefreshWarning({ kind: 'info', message: 'Setup imported. New server definitions are disabled; review each server before enabling it.' }, warning) });
+  } catch (error) {
+    failSheetRequest(request, error);
+  }
+}
+
+function closeCurrentSheet() {
+  const current = getState().sheet;
+  if (current?.busy) return;
+  setState({ sheet: null });
+  if (current?.kind === 'portableImport') {
+    void invoke('setup.discardImport', { previewID: current.preview.id }).catch(reportFailure);
+  }
 }
 
 // MARK: - Local MCP library and agent import
@@ -1167,6 +1243,36 @@ async function checkAll() {
   }
 }
 
+async function checkVisible() {
+  if (getState().healthProgress || getState().checking.size) return;
+  const servers = [...visibleServers()];
+  if (!servers.length) return;
+  const alertsBefore = contractAlertKeys();
+  const failed = [];
+  const waiting = [];
+  setState({ healthProgress: { serverName: '', index: 0, total: servers.length }, notice: null });
+  try {
+    for (const [index, server] of servers.entries()) {
+      setState({ healthProgress: { serverName: server.name, index: index + 1, total: servers.length } });
+      const result = await invoke('health.check', { serverID: server.id });
+      applyState(result.state);
+      if (result.health.status === 'failed') failed.push(server.name);
+      if (result.health.status === 'needsAuthorization') waiting.push(server.name);
+    }
+    const warning = await refreshAfterMutation({ profiles: true });
+    const contract = contractNotice(newContractAlerts(alertsBefore));
+    const messages = [`Checked ${servers.length} visible server${servers.length === 1 ? '' : 's'}.`];
+    if (failed.length) messages.push(`${failed.length} failed; open their details for the reason.`);
+    if (waiting.length) messages.push(`${waiting.length} require sign-in.`);
+    if (contract) messages.push(contract.message);
+    setState({ notice: withRefreshWarning({ kind: failed.length || waiting.length || contract ? 'warning' : 'info', message: messages.join(' ') }, warning) });
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ healthProgress: null });
+  }
+}
+
 async function checkProvenanceLatest(serverId) {
   setState({ provenanceBusyServerID: serverId, notice: null });
   try {
@@ -1520,7 +1626,26 @@ root.addEventListener('click', async (event) => {
     }
 
     case 'open-server':
-      setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId }, openTools: new Set() });
+      if (state.panel === null) setState({ selectedServerId: target.dataset.serverId });
+      else setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId }, selectedServerId: target.dataset.serverId });
+      break;
+    case 'open-server-modal':
+      setState({ sheet: { kind: 'detail', serverId: target.dataset.serverId } });
+      break;
+    case 'close-inspector':
+      setState({ selectedServerId: null });
+      break;
+    case 'reset-matrix-filters':
+      setState({ filter: '', scopeFilter: 'all', sourceFilter: 'all' });
+      break;
+    case 'export-setup':
+      await exportSetup();
+      break;
+    case 'preview-setup-import':
+      await previewSetupImport();
+      break;
+    case 'apply-setup-import':
+      await applySetupImport();
       break;
     case 'close-sheet':
       // Only the backdrop itself closes; clicks inside the panel bubble up here
@@ -1529,11 +1654,33 @@ root.addEventListener('click', async (event) => {
       // A sheet with a write in flight stays until the reply lands, so its
       // outcome has somewhere to go.
       if (sheet?.busy) break;
-      setState({ sheet: null });
+      closeCurrentSheet();
       break;
 
     case 'check-server':
       await checkServer(target.dataset.serverId);
+      break;
+    case 'sign-in-remote': {
+      const serverID = target.dataset.serverId;
+      if (state.checking.has(serverID) || state.healthProgress) break;
+      setChecking(serverID, true);
+      try {
+        applyState(await invoke('health.signInRemote', { serverID }));
+        setState({ notice: { kind: 'info', message: 'Sign-in dialog closed. The server detail shows the latest check.' } });
+      } catch (error) {
+        reportFailure(error);
+      } finally {
+        setChecking(serverID, false);
+      }
+      break;
+    }
+    case 'forget-remote-sign-in':
+      try {
+        await invoke('health.forgetRemoteAuthorization', { serverID: target.dataset.serverId });
+        setState({ notice: { kind: 'info', message: 'Kytto’s saved authorization was removed from the credential store.' } });
+      } catch (error) {
+        reportFailure(error);
+      }
       break;
     // Only the server id crosses; the native side validates and opens the URL
     // the last check recorded from the server's own output.
@@ -1552,6 +1699,9 @@ root.addEventListener('click', async (event) => {
       break;
     case 'check-all':
       await checkAll();
+      break;
+    case 'check-visible':
+      await checkVisible();
       break;
     case 'check-provenance-latest':
       await checkProvenanceLatest(target.dataset.serverId);
@@ -1671,11 +1821,6 @@ root.addEventListener('input', (event) => {
   switch (action) {
     case 'filter': {
       setState({ filter: value });
-      const search = root.querySelector('[data-action="filter"]');
-      if (search) {
-        search.focus();
-        search.setSelectionRange(search.value.length, search.value.length);
-      }
       break;
     }
     case 'import-json': {
@@ -1742,7 +1887,13 @@ root.addEventListener('input', (event) => {
 root.addEventListener('change', (event) => {
   const action = event.target.dataset.action;
   const sheet = getState().sheet;
-  if (action === 'library-target') {
+  if (action === 'scope-filter') {
+    setState({ scopeFilter: event.target.value });
+  } else if (action === 'source-filter') {
+    setState({ sourceFilter: event.target.value });
+  } else if (action === 'row-density') {
+    setState({ density: event.target.value });
+  } else if (action === 'library-target') {
     const state = getState();
     const candidateID = event.target.dataset.subject;
     const current = state.libraryTargets?.[candidateID] ?? defaultImportTargets(state);
@@ -1813,7 +1964,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && getState().sheet) {
     event.preventDefault();
     // Same rule as the Close button: not while the sheet is waiting on a write.
-    if (!getState().sheet.busy) setState({ sheet: null });
+    if (!getState().sheet.busy) closeCurrentSheet();
     return;
   }
 

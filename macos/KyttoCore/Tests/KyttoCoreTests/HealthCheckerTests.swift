@@ -29,7 +29,7 @@ private func remoteServer() -> Server {
     Server(
         id: "remote",
         name: "remote",
-        transport: .http,
+        transport: .sse,
         command: nil,
         args: [],
         env: [],
@@ -377,14 +377,14 @@ struct HealthCheckerTests {
         #expect(legacy.currentMessage == "old wording")
     }
 
-    @Test("a remote server is reported as unchecked, with the reason")
+    @Test("legacy SSE is reported as unsupported without making a network request")
     func remoteUnsupported() throws {
         let checker = HealthChecker(shell: testShell, timeout: 10)
         let (health, weight) = checker.check(remoteServer())
 
         #expect(health.status == .unsupported)
         #expect(weight == nil)
-        #expect(try #require(health.message).contains("remote"))
+        #expect(try #require(health.message).contains("legacy"))
     }
 
     @Test("environment variables reach the server")

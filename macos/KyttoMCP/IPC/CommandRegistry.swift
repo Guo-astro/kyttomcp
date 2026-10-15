@@ -85,6 +85,21 @@ enum CommandRegistry {
 
         router.register("state.get") { StateDTO(model) }
 
+        router.register("setup.export") { () -> PortableExportDTO in
+            try PortableSetupController.export(model: model)
+        }
+        router.register("setup.previewImport") { () -> PortableImportPreview? in
+            try PortableSetupController.preview(model: model)
+        }
+        router.register("setup.applyImport") { (payload: PortableApplyPayload) -> StateDTO in
+            try model.applyPortableSetup(previewID: payload.previewID)
+            return StateDTO(model)
+        }
+        router.register("setup.discardImport") { (payload: PortableApplyPayload) -> EmptyResponse in
+            model.discardPortableSetup(previewID: payload.previewID)
+            return EmptyResponse()
+        }
+
         // MARK: - Gateway (§3.3)
 
         router.register("gateway.preview") { (payload: GatewayTargetPayload) -> GatewayMigrationPreviewDTO in
@@ -472,6 +487,16 @@ enum CommandRegistry {
             return EmptyResponse()
         }
 
+        let remoteSignIn = RemoteSignInController()
+        router.register("health.signInRemote") { (payload: HealthCheckPayload) -> StateDTO in
+            try await remoteSignIn.signIn(serverID: payload.serverID, model: model)
+            return StateDTO(model)
+        }
+        router.register("health.forgetRemoteAuthorization") { (payload: HealthCheckPayload) -> EmptyResponse in
+            try model.forgetRemoteAuthorization(serverID: payload.serverID)
+            return EmptyResponse()
+        }
+
         // MARK: - Backups, the visible half of the trust story (§6.5)
 
         router.register("backups.list") { (payload: BackupsListPayload) -> [BackupDTO] in
@@ -506,7 +531,7 @@ enum CommandRegistry {
             build: info?["CFBundleVersion"] as? String ?? "0",
             // The UI enables features by asking for a capability, never by
             // guessing from the platform (§3.2). M4 adds `secrets`, M5 `health`.
-            capabilities: ["config.read", "config.write", "backups", "authoring", "catalog", "health", "provenance", "secrets", "profiles", "inspector", "clipboard", "gateway.stdio", "gateway.masking", "doctor", "activity", "contract-guard", "context-optimizer", "drift", "updates", "library", "agent-import", "skills"],
+            capabilities: ["config.read", "config.write", "backups", "authoring", "catalog", "health", "health.http", "health.oauth", "portable-setup", "provenance", "secrets", "profiles", "inspector", "clipboard", "gateway.stdio", "gateway.masking", "doctor", "activity", "contract-guard", "context-optimizer", "drift", "updates", "library", "agent-import", "skills"],
             platformDisplayName: "macOS",
             secretStoreDisplayName: "Keychain"
         )
@@ -772,4 +797,8 @@ private func openSettingsWindow() {
     }
 
     for selector in known where NSApp.sendAction(selector, to: nil, from: nil) { return }
+}
+
+struct PortableApplyPayload: Decodable {
+    let previewID: String
 }

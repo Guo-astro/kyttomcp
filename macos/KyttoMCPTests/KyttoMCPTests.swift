@@ -8,9 +8,46 @@
 import Foundation
 import KyttoCore
 import Testing
+import WebKit
 @testable import KyttoMCP
 
 struct KyttoMCPTests {
+
+    @Test("interface recovery survives content-process termination without a working page")
+    @MainActor
+    func terminatedWebContentShowsNativeRecovery() {
+        let webView = WKWebView()
+        let chrome = ChromeView(webView: webView)
+        let coordinator = WebView.Coordinator()
+        coordinator.chrome = chrome
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        #expect(webView.isHidden)
+        let recoverySubviewCount = chrome.subviews.count
+        #expect(recoverySubviewCount == 3)
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        #expect(chrome.subviews.count == recoverySubviewCount)
+
+        chrome.hideInterfaceFailure()
+        #expect(!webView.isHidden)
+        #expect(chrome.subviews.count == 2)
+    }
+
+    @Test("cancelled navigation leaves the interface usable, real load errors show recovery")
+    @MainActor
+    func cancelledNavigationDoesNotReplaceTheInterface() {
+        let webView = WKWebView()
+        let chrome = ChromeView(webView: webView)
+        let coordinator = WebView.Coordinator()
+        coordinator.chrome = chrome
+
+        coordinator.webView(webView, didFailProvisionalNavigation: nil,
+                            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+        #expect(!webView.isHidden)
+        coordinator.webView(webView, didFail: nil,
+                            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist))
+        #expect(webView.isHidden)
+    }
 
     @Test("the native bridge accepts only the internal main frame")
     @MainActor

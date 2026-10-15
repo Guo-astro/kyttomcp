@@ -14,6 +14,7 @@ import {
   contextWindow,
   toolBudgetFigure,
   toolBudgetStrained,
+  scopeOptions,
 } from '../state.js';
 import { el, button, formatTokens, sheet, glyph, GLYPH, clientIcon, definitionList } from '../dom.js';
 import { addedIn, appeared, began, changed, changedIn, stagger } from '../anim.js';
@@ -30,6 +31,7 @@ import {
 import { renderSecrets, renderRotateSheet } from './secrets.js';
 import {
   renderServerDetail,
+  renderServerInspector,
   renderDeleteConfirm,
   renderRemoveConfirm,
   renderGatewayPreview,
@@ -43,6 +45,8 @@ import { renderDoctor, renderDoctorFix } from './doctor.js';
 import { renderActivity } from './activity.js';
 import { renderLibrary } from './library.js';
 import { renderSkills } from './skills.js';
+import { setupActions, renderPortableImport } from './portableSetup.js';
+import { bugReportLink } from '../support.js';
 
 let renderedSheetSubject = '';
 let returnFocus = null;
@@ -155,12 +159,8 @@ export function render(root) {
     screen = renderSecrets(state);
   } else if (state.panel === 'client') {
     screen = renderClient(state);
-  } else if (state.servers.length === 0) {
-    screen = emptyState(clients);
-  } else if (servers.length === 0) {
-    screen = el('div', 'placeholder', `Nothing matches “${state.filter}”.`);
   } else {
-    screen = table(state, clients, servers);
+    screen = matrixWorkspace(state, clients, servers);
   }
   if (panelChanged) screen.classList.add('panel-entering', `panel-${panelDirection}`);
   content.append(screen);
@@ -321,6 +321,8 @@ function sheetBody(state) {
       return renderProfileDelete(state);
     case 'doctorFix':
       return renderDoctorFix(state);
+    case 'portableImport':
+      return renderPortableImport(state);
     default:
       return null;
   }
@@ -396,8 +398,8 @@ function chromeBand(state) {
     actions.append(
       button('Add server', 'add-server', { className: 'button primary' }),
       button(
-        checking ? `Checking ${checking.index}/${checking.total}…` : 'Check all',
-        checking ? 'noop' : 'check-all',
+        checking ? `Checking ${checking.index}/${checking.total}…` : 'Check visible',
+        checking ? 'noop' : 'check-visible',
         { className: checking ? 'button busy' : 'button' },
       ),
     );
@@ -476,6 +478,70 @@ function progressLine({ index, total }) {
 
 // MARK: - Table
 
+function matrixWorkspace(state, clients, servers) {
+  const workspace = el('section', `matrix-workspace density-${state.density}`);
+  const header = el('header', 'matrix-heading');
+  const identity = el('div');
+  const scope = scopeOptions(state).find((entry) => entry.id === state.scopeFilter);
+  identity.append(el('span', 'eyebrow', scope?.label ?? 'All sources'), el('h1', null, 'Server matrix'), el('p', 'muted', `${servers.length} of ${state.servers.length} servers · ${clients.length} configuration sources`));
+  header.append(identity, setupActions(state));
+  workspace.append(header);
+
+  const filters = el('div', 'matrix-filters');
+  filters.append(
+    filterSelect('Scope', 'scope-filter', state.scopeFilter, scopeOptions(state), GLYPH.matrix),
+    filterSelect('Source', 'source-filter', state.sourceFilter, [
+      { id: 'all', label: 'All source types' },
+      { id: 'config', label: 'Configurations' },
+      { id: 'plugin', label: 'Plugins & extensions' },
+      { id: 'custom', label: 'Custom & workspace sources' },
+    ], GLYPH.library),
+    filterSelect('Rows', 'row-density', state.density, [
+      { id: 'comfortable', label: 'Comfortable' },
+      { id: 'compact', label: 'Compact' },
+    ], ['M3 4h10', 'M3 8h10', 'M3 12h10']),
+  );
+  if (state.scopeFilter !== 'all' || state.sourceFilter !== 'all' || state.filter) filters.append(button('Reset filters', 'reset-matrix-filters', { className: 'button subtle' }));
+  workspace.append(filters);
+
+  const split = el('div', 'matrix-split');
+  const list = el('section', 'matrix-list');
+  list.setAttribute('aria-label', 'Servers and client configuration');
+  if (state.servers.length === 0) list.append(emptyState(clients));
+  else if (servers.length === 0) {
+    const empty = el('div', 'placeholder');
+    empty.append(el('p', null, 'No servers match these filters.'), button('Show all sources', 'reset-matrix-filters'));
+    list.append(empty);
+  } else list.append(table(state, clients, servers));
+  const selected = servers.find((server) => server.id === state.selectedServerId);
+  const inspector = renderServerInspector(state, selected?.id);
+  if (changed('inspector-subject', selected?.id ?? '', 180)) inspector.classList.add('inspector-entering');
+  split.append(list, inspector);
+  workspace.append(split);
+  return workspace;
+}
+
+function filterSelect(label, action, selected, options, icon) {
+  const field = el('label', 'matrix-filter');
+  if (selected !== options[0]?.id) field.classList.add('is-active');
+  const control = el('span', 'filter-control');
+  const leading = glyph(icon);
+  leading.classList.add('filter-icon');
+  const select = el('select', 'scope-select');
+  select.dataset.action = action;
+  for (const item of options) {
+    const option = el('option', null, item.label);
+    option.value = item.id;
+    option.selected = item.id === selected;
+    select.append(option);
+  }
+  const chevron = glyph(GLYPH.disclosure);
+  chevron.classList.add('filter-chevron');
+  control.append(leading, select, chevron);
+  field.append(el('span', 'matrix-filter-label', label), control);
+  return field;
+}
+
 function table(state, clients, servers) {
   // What moved since the last render. Collected before anything is built, so
   // each cell and each dot can be told whether it is the thing that changed —
@@ -485,8 +551,8 @@ function table(state, clients, servers) {
   // The list itself is a different question: it animates when the set of rows
   // changes — first load, a refresh, a filter — and never when a value inside
   // one of them does.
-  const added = addedIn('matrix-rows', servers.map((server) => server.id), 320);
-  const filtering = changed('matrix-filter', state.filter, 180);
+  const added = addedIn('matrix-rows', servers.map((server) => server.id), 180);
+  const filtering = changed('matrix-filter', `${state.filter}:${state.scopeFilter}:${state.sourceFilter}`, 180);
 
   // The table lives inside a scroll container rather than being a flex child
   // itself. As a flex item it would stretch to fill the window and hand the
@@ -543,7 +609,7 @@ function table(state, clients, servers) {
     const tr = row(state, server, clients, flipped, settled.has(server.id));
     if (added.has(server.id)) {
       tr.classList.add('row-entering');
-      tr.style.animationDelay = stagger(index);
+      tr.style.animationDelay = stagger(index, 8, 40);
     }
     body.append(tr);
   });
@@ -556,6 +622,7 @@ function table(state, clients, servers) {
 function row(state, server, clients, flipped, settled) {
   const tr = el('tr');
   tr.dataset.serverId = server.id;
+  if (state.selectedServerId === server.id) tr.classList.add('selected-server');
 
   const heavy =
     (server.tokenWeight?.estimate ?? 0) >= (state.settings?.tokenWarningThreshold ?? 20000) &&
@@ -649,6 +716,7 @@ function notice(current, leaving = false) {
     if (current.action.backupId) action.dataset.backupId = current.action.backupId;
     bar.append(action);
   }
+  if (current.kind === 'error') bar.append(bugReportLink());
   const dismiss = el('button', 'button subtle', 'Dismiss');
   dismiss.dataset.action = 'dismiss-notice';
   bar.append(dismiss);
@@ -780,11 +848,16 @@ function loadingState() {
 
 function errorState(error) {
   const box = el('div', 'placeholder error');
-  box.append(el('p', null, 'Could not read your configurations.'));
+  box.append(el('p', null, error?.code === 'interfaceFailure'
+    ? 'Kytto’s interface encountered a problem.'
+    : 'Could not read your configurations.'));
   box.append(el('p', 'muted', error?.message ?? 'Unknown error.'));
   const retry = el('button', 'button', 'Try again');
   retry.dataset.action = 'retry-load';
-  box.append(retry);
+  const actions = el('div', 'support-actions');
+  actions.append(retry, bugReportLink(), bugReportLink({ github: true }));
+  box.append(actions);
+  box.append(el('p', 'muted', 'Reports open in your browser. No logs or configuration are attached automatically.'));
   return box;
 }
 

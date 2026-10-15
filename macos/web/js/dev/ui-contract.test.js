@@ -99,7 +99,7 @@ test('the matrix keeps every supported client visible but absent clients read-on
   // read-only sources away is the one thing that is.
   assert.match(
     state,
-    /export function matrixClients\(\)\s*{\s*if \(state\.settings\?\.showsCustomSources === false\)[\s\S]*?client\.isReadOnly[\s\S]*?return state\.clients;/s,
+    /export function matrixClients\(\)[\s\S]*?if \(state\.settings\?\.showsCustomSources === false\)[\s\S]*?client\.isReadOnly[\s\S]*?return state\.clients;/s,
   );
   assert.match(row, /client\.state === 'notInstalled'[\s\S]*?button\.disabled = true/);
 });

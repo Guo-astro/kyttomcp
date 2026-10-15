@@ -173,11 +173,12 @@ They are listed here only so the section numbers above stay stable.
 
 ## 15. Windows port
 
-A Windows shell (C# or Rust + WebView2, README §8 M7) is planned but not yet in
-this repository; contributions are welcome. Its discipline is README §3.2: it reimplements the command set in
-[`ipc.md`](ipc.md) against Windows APIs and loads the shared `web/` directory
-unchanged. If a feature needs a Windows-specific change in `web/`, that is a
-§3.2 violation to find, not a branch to add.
+The Windows implementation now lives in [`../../windows/`](../../windows/) as a
+.NET 10, WPF and WebView2 app. Its platform-specific setup is described in
+[`../../windows/README.md`](../../windows/README.md). It reimplements the IPC
+command set in [`ipc.md`](ipc.md) against Windows APIs; the two web layers have
+since diverged where native behavior requires it, while preserving the
+platform-neutral contract in README §3.2.
 
 Parity work that any Windows implementation has to cover, beyond the IPC
 contract itself:

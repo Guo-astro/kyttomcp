@@ -97,6 +97,15 @@ public struct Discovery: Sendable {
                     // schedule; watching the root is enough to notice a plugin
                     // arriving or leaving.
                     result.insert(root.resolve(home: home))
+                case .registeredPlugins(let registry):
+                    result.insert(registry.registrationFile.resolve(home: home).deletingLastPathComponent())
+                    switch registry {
+                    case .claudeCode(_, let settings, let project):
+                        result.insert(settings.resolve(home: home).deletingLastPathComponent())
+                        if let project { result.insert(URL(filePath: project).appending(path: ".claude")) }
+                    case .codex(_, let cache):
+                        result.insert(cache.resolve(home: home))
+                    }
                 case .readOnlyAutoServerMap(let file):
                     result.insert(resolver.resolve(file).deletingLastPathComponent())
                 case .scopedJSONServerMap(let file, _, _):
@@ -138,6 +147,13 @@ public struct Discovery: Sendable {
                     let key = Server.identity(for: found.name)
 
                     if var existing = merged[key] {
+                        // One cell cannot faithfully describe two competing
+                        // sources. Keep the first (explicit config precedes
+                        // packages) rather than replacing runnable evidence.
+                        if existing.definitionsByClient[descriptor.id] != nil {
+                            diagnostics.append(Diagnostic(severity: .warning, clientID: descriptor.id, pathDisplay: descriptor.displayName, message: "Multiple sources define \"\(found.name)\" in this client. Kytto kept the first definition and did not change either source."))
+                            continue
+                        }
                         // The disagreement itself is not reported here any more.
                         // Every client's copy is kept, so `ServerDrift` can say
                         // which clients differ and in what — a diagnostic in the
@@ -330,6 +346,8 @@ public struct Discovery: Sendable {
             return readBundledPackages(
                 root: root, manifestName: manifestName, serversKey: serversKey, descriptor: descriptor
             )
+        case .registeredPlugins(let registry):
+            return readRegisteredPlugins(registry, descriptor: descriptor)
         case .readOnlyAutoServerMap(let file):
             return readAutoServerMap(file: file, descriptor: descriptor)
         case .scopedJSONServerMap(let file, let scopePath, let serversKey):
@@ -340,6 +358,94 @@ public struct Discovery: Sendable {
                 descriptor: descriptor
             )
         }
+    }
+
+    private func readRegisteredPlugins(_ registry: PluginRegistrySource, descriptor: ClientDescriptor) -> SourceOutcome {
+        var outcome = SourceOutcome()
+        let registrationURL: URL
+        if case .codex(let config, _) = registry {
+            registrationURL = resolver.resolveServerMap(config, for: .codex)
+        } else {
+            registrationURL = registry.registrationFile.resolve(home: home)
+        }
+        outcome.sourceExists = FileManager.default.fileExists(atPath: registrationURL.path)
+        let installations = PluginInstallations.read(registry, home: home, codexConfig: registrationURL, text: readTracked)
+        func warn(_ message: String) {
+            outcome.diagnostics.append(Diagnostic(severity: .warning, clientID: descriptor.id, pathDisplay: registry.registrationFile.displayString(), message: message))
+        }
+        installations.warnings.forEach(warn)
+
+        for installation in installations.packages {
+            var definitions: [String: (fields: ServerFields, source: String)] = [:]
+            func readMap(_ node: JSONNode, document: JSONDocument) {
+                for member in node.members ?? [] where member.value.members != nil {
+                    definitions[member.key] = (ServerFields(node: member.value), document.slice(member.value.span))
+                }
+            }
+            func readFile(_ url: URL) {
+                guard let source = readTracked(url) else { return }
+                guard let document = try? JSONDocument.parse(source) else {
+                    warn("An active plugin's declared MCP configuration could not be parsed and was skipped.")
+                    return
+                }
+                readMap(document.root["mcpServers"] ?? document.root, document: document)
+            }
+            // Root .mcp.json plus explicitly declared paths/maps only. Nested
+            // fixtures, payloads and other versions are never inspected.
+            if let file = PluginInstallations.containedFile("./.mcp.json", root: installation.root) { readFile(file) }
+            if let manifest = installation.manifest, let components = manifest.root["mcpServers"] {
+                let shapes = components.elements ?? [components]
+                for shape in shapes {
+                    if let path = shape.stringValue {
+                        guard let url = PluginInstallations.containedFile(path, root: installation.root) else {
+                            warn("A plugin declares an unsupported or external MCP component. Kytto reads only JSON files contained in the registered plugin directory.")
+                            continue
+                        }
+                        readFile(url)
+                    } else if shape.members != nil {
+                        readMap(shape["mcpServers"] ?? shape, document: manifest)
+                    }
+                }
+            }
+
+            for key in definitions.keys.sorted() {
+                guard let definition = definitions[key] else { continue }
+                let name = installation.clientID == .claudeCode ? "plugin:\(installation.name):\(key)" : key
+                var server = definition.fields.makeServer(name: name, origin: .plugin(clientID: installation.clientID, pluginID: installation.pluginID, displayName: installation.displayName, version: installation.version), isBundled: true, sourceText: definition.source)
+                let root = installation.root.path(percentEncoded: false)
+                let rootVariable = installation.clientID == .claudeCode ? "CLAUDE_PLUGIN_ROOT" : "CODEX_PLUGIN_ROOT"
+                server.placeholders[rootVariable] = root
+                server.launchEnvironment[rootVariable] = root
+                if installation.clientID == .claudeCode {
+                    let dataID = installation.pluginID.map { character in
+                        character.isASCII && (character.isLetter || character.isNumber || character == "_" || character == "-") ? character : "-"
+                    }
+                    let dataPath = home.appending(path: ".claude/plugins/data").appending(path: String(dataID)).path
+                    server.placeholders["CLAUDE_PLUGIN_DATA"] = dataPath
+                    server.launchEnvironment["CLAUDE_PLUGIN_DATA"] = dataPath
+                    if let project = installation.projectPath { server.placeholders["CLAUDE_PROJECT_DIR"] = project }
+                }
+                // A registered plugin root supplies the missing relative launch
+                // context. A cwd inside that root is kept native and never copied.
+                let cwd = server.expandingKnownPlaceholders(definition.fields.workingDirectory ?? ".")
+                if cwd.hasPrefix("/") {
+                    server.workingDirectory = URL(filePath: cwd).standardizedFileURL.path
+                } else if !cwd.contains("${"), !cwd.contains("\\") {
+                    let resolved = installation.root.appending(path: cwd).standardizedFileURL
+                    if resolved.resolvingSymlinksInPath().path == installation.root.resolvingSymlinksInPath().path || resolved.resolvingSymlinksInPath().path.hasPrefix(installation.root.resolvingSymlinksInPath().path + "/") {
+                        server.workingDirectory = resolved.path
+                    } else {
+                        warn("A plugin's relative working directory escapes its installation. Kytto skipped that server.")
+                        continue
+                    }
+                } else {
+                    warn("A plugin's working directory needs a substitution Kytto cannot establish. Kytto skipped that server.")
+                    continue
+                }
+                outcome.servers.append(FoundServer(name: name, server: server, enablement: .enabled))
+            }
+        }
+        return outcome
     }
 
     /// Recognizes the small set of configuration adapters Kytto has actually

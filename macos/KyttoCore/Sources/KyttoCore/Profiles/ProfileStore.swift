@@ -109,6 +109,27 @@ public struct ProfileStore: Sendable {
         }
     }
 
+    /// Adds portable profiles as one mutation. Imported ids are intentionally
+    /// local: a file cannot replace a profile by supplying its saved id.
+    @discardableResult
+    public func importProfiles(_ incoming: [PortableProfile]) throws -> [ServerProfile] {
+        try MutationCoordinator.sync {
+            var profiles = try loadForMutation()
+            var imported: [ServerProfile] = []
+            for item in incoming {
+                let name = try validatedName(item.name, excluding: nil, in: profiles)
+                let profile = ServerProfile(
+                    id: UUID().uuidString.lowercased(), name: name,
+                    serverIDs: normalized(item.serverIDs), tokenBudget: normalizedBudget(item.tokenBudget)
+                )
+                profiles.append(profile)
+                imported.append(profile)
+            }
+            if !imported.isEmpty { try save(profiles) }
+            return imported
+        }
+    }
+
     /// Keeps profile membership attached to a server when the user renames it.
     public func replaceServerID(_ oldID: String, with newID: String) throws {
         let old = Server.identity(for: oldID)

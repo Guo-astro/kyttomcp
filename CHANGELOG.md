@@ -9,6 +9,24 @@ without a backup.
 
 ## [Unreleased]
 
+## [1.0.8] — 2026-10-15
+
+### Added (macOS)
+
+- Workspace and source filters, grouped navigation, and a matrix with a persistent server inspector. Selection, scrolling and keyboard focus survive updates; motion respects Reduce Motion.
+- Read-only discovery of registered, enabled Claude Code and Codex MCP plugins, with their source and version. Supported plugin-root placeholders and working directories are resolved only for explicit checks; stale caches and nested test fixtures are not treated as active servers.
+- Readable Contract Guard changes with bounded before/after descriptions, schema fields, defaults, required arguments and annotations. Changes to confirmation and dry-run fields include a safeguard review explanation.
+- Remote Doctor for Streamable HTTP: MCP initialization, JSON/SSE responses, paginated tool discovery, token measurements and structured authorization/HTTP/protocol errors. Checks are bounded and never call tools. Legacy SSE transport remains unsupported.
+- Explicit native OAuth sign-in for Remote Doctor, using discovered issuer metadata, S256 PKCE, callback validation, resource-bound Keychain credentials and refresh. Supports public client registration where offered, or a pre-registered public client ID.
+- Portable JSON setup export/import for writable server definitions and profiles, with native inputs, explicit preview, disabled imports, guarded writes/backups and optional pending contract fingerprints requiring a fresh local check.
+
+### Fixed (macOS)
+
+- A health check finishing after its server definition changes no longer records its result against the replacement definition.
+- An in-flight authorization refresh cannot restore credentials the user has forgotten or superseded; unreadable pending-contract state cannot partially acknowledge an alert.
+- Scope, Source and Rows controls now use styled, keyboard-accessible controls; Profiles keeps export, import and New profile actions aligned across window sizes.
+- Added private-site/GitHub bug reporting and a native recovery screen after WebKit interface failures, without attaching logs or configuration.
+
 ### Added (Windows)
 
 - Report a bug from Settings, the tray menu's Help submenu, error notices and interface failure screens, using the private website form or public GitHub Issues. The links open in your browser and attach nothing. If the interface fails to load, or its WebView2 browser process ends, a native recovery panel keeps Reload and the report links available.
@@ -30,6 +48,16 @@ without a backup.
 
 - A health check that finishes after its server definition changes no longer records its result against the replacement definition.
 - Scope, Source and Rows pickers use styled controls with icons, a single chevron, consistent height and keyboard focus.
+
+### Downloads
+
+| Platform | Artifact | Size | SHA-256 |
+|---|---|---:|---|
+| macOS (universal) | `KyttoMCP-1.0.8.dmg` | 5.5 MB | `177f92d8772981bf96ca108f9813ae47d9e31e2f6fe67c3abef417b41358d235` |
+| Windows x64 | `Kytto-Setup-win-x64-1.0.8.exe` | 78.6 MB | `0b51ecd7099809da767b904d4f349b6075b362a69410619df63d4bb422f382cd` |
+
+The Windows installer is unsigned; see the Windows release notes for the remaining artifact verification limits.
+
 <!-- Working area for the next release. Add entries here as you build, under
      whichever of these headings apply, then move the whole block down into a new
      version section when you ship:
@@ -950,7 +978,8 @@ First public beta, for macOS and Windows.
 - MCP Doctor findings with previewed fixes
 - Optional Gateway mode with metadata-only Live Activity
 
-[Unreleased]: https://github.com/heyitsjakub/KyttoMCP/compare/v1.0.7.1...HEAD
+[Unreleased]: https://github.com/heyitsjakub/KyttoMCP/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.8
 [1.0.7.1]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.7.1
 [1.0.7]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.7
 [1.0.6.3]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.6.3

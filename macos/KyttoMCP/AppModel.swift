@@ -31,6 +31,9 @@ final class AppModel {
     private let gatewayActivity: GatewayActivityStore
     private let gatewaySecretStore: any SecretStoring
     private let gatewayHelperURL: URL
+    private var portableSetup: PortableSetupService?
+    private let remoteOAuthCredentials = RemoteOAuthCredentials(store: KeychainSecretStore(service: "app.kytto.remote-oauth"))
+    private var remoteAuthorizationGenerations: [String: Int] = [:]
 
     // Rebuilt only when retention or path overrides change, because those values
     // are baked into the write services at construction.
@@ -195,6 +198,7 @@ final class AppModel {
     }
 
     private func rebuildServices(with settings: KyttoSettings, forgetLedger: Bool) {
+        portableSetup = nil
         backups = BackupStore(paths: paths, retentionPerClient: settings.backupRetention)
         let writer = ConfigWriter(backups: backups)
         toggles = ToggleService(
@@ -280,6 +284,51 @@ final class AppModel {
             metadata: metadata.all(),
             pathOverrides: settings.clientPathOverrides
         )
+    }
+
+    // MARK: - Portable setup (native file selection and secret inputs)
+
+    private func makePortableSetup() -> PortableSetupService {
+        PortableSetupService(
+            home: home, writer: ConfigWriter(backups: backups), parkStore: parkStore, ledger: ledger,
+            pathOverrides: settings.clientPathOverrides
+        )
+    }
+
+    func exportPortableSetup(to file: URL, includeReviewedContracts: Bool) throws -> PortableSetupSummary {
+        try makePortableSetup().export(to: file, servers: current().servers, includeReviewedContracts: includeReviewedContracts)
+    }
+
+    func inspectPortableSetup(file: URL) throws -> PortableSetupSummary {
+        let service = makePortableSetup()
+        let summary = try service.inspect(file: file)
+        portableSetup = service
+        return summary
+    }
+
+    func previewPortableSetup(file: URL, targetClients: [ClientID], values: [String: String]) throws -> PortableImportPreview {
+        guard let service = portableSetup else { throw PortableSetupError.stalePreview }
+        return try service.preview(file: file, targetClients: targetClients, values: values)
+    }
+
+    func applyPortableSetup(previewID: String) throws {
+        guard let service = portableSetup else { throw PortableSetupError.stalePreview }
+        _ = try service.apply(previewID: previewID)
+        portableSetup = nil
+        reload()
+    }
+
+    func discardPortableSetup(previewID: String) {
+        portableSetup?.discard(previewID: previewID)
+        portableSetup = nil
+    }
+
+    func pendingContractImports() -> (entries: [PortablePendingContractSummary], error: String?) {
+        do {
+            return (try makePortableSetup().pendingContractSummary(), nil)
+        } catch {
+            return ([], "Imported contract fingerprints could not be read. The local trusted baseline was left unchanged.")
+        }
     }
 
     // MARK: - MCP provenance
@@ -694,14 +743,51 @@ final class AppModel {
 
     private func recordHealth(for server: Server) async throws -> HealthResult {
         let checker = self.checker
+        var httpHeaders: [String: String]?
+        let resource = server.transport == .http ? server.runnableURL.flatMap { try? RemoteOAuthClient.canonicalResource($0) } : nil
+        let authorizationGeneration = resource.map { remoteAuthorizationGenerations[$0, default: 0] }
+        if let resource {
+            do {
+                if var credential = try remoteOAuthCredentials.load(resourceURL: resource) {
+                    if credential.requiresRefresh {
+                        let saved = credential
+                        credential = try await Task.detached(priority: .userInitiated) {
+                            try RemoteOAuthClient().refresh(saved)
+                        }.value
+                        guard remoteAuthorizationGenerations[resource, default: 0] == authorizationGeneration else {
+                            throw AppError.authorizationChanged
+                        }
+                        try remoteOAuthCredentials.store(credential)
+                    }
+                    httpHeaders = credential.authorizationHeaders
+                }
+            } catch {
+                if remoteAuthorizationGenerations[resource, default: 0] != authorizationGeneration {
+                    throw AppError.authorizationChanged
+                }
+                let health = HealthResult(
+                    status: .needsAuthorization, checkedAt: .timestamp(), toolCount: nil, tools: [],
+                    message: "Kytto's saved authorization could not be refreshed or read. Sign in again.",
+                    stderr: nil, durationSeconds: 0, serverName: nil, serverVersion: nil
+                )
+                if let latest = current().servers.first(where: { $0.id == server.id }),
+                   ClientDefinition(from: latest) == ClientDefinition(from: server) {
+                    try metadata.record(health: health, tokenWeight: nil, for: server.id)
+                }
+                return health
+            }
+        }
+        let headers = httpHeaders
         let outcome = await Task.detached(priority: .userInitiated) {
-            checker.check(server)
+            checker.check(server, httpHeaders: headers)
         }.value
 
         // The check can take ten seconds and the window stays usable meanwhile.
         // A server deleted (or renamed) in that time must not get its metadata
         // back from a result nobody is waiting for any more.
-        guard current().servers.contains(where: { $0.id == server.id }) else {
+        guard let latest = current().servers.first(where: { $0.id == server.id }),
+              ClientDefinition(from: latest) == ClientDefinition(from: server),
+              resource.map({ remoteAuthorizationGenerations[$0, default: 0] == authorizationGeneration }) ?? true else {
             return outcome.health
         }
         try metadata.record(health: outcome.health, tokenWeight: outcome.tokenWeight, for: server.id)
@@ -716,7 +802,7 @@ final class AppModel {
     func checkAllHealth(
         onProgress: @MainActor (String, Int, Int) async -> Void
     ) async throws {
-        let servers = current().servers.filter { $0.transport == .stdio }
+        let servers = current().servers.filter { $0.transport != .sse }
         var persistenceFailures = 0
         for (index, server) in servers.enumerated() {
             await onProgress(server.name, index + 1, servers.count)
@@ -730,6 +816,25 @@ final class AppModel {
         if persistenceFailures > 0 {
             throw AppError.healthResultsCouldNotBeSaved(persistenceFailures)
         }
+    }
+
+    func remoteServerURL(serverID: String) throws -> String {
+        guard let server = current().servers.first(where: { $0.id == serverID }), server.transport == .http,
+              let url = server.runnableURL else { throw AppError.unknownServer(serverID) }
+        return url
+    }
+
+    func saveRemoteAuthorization(_ credential: RemoteOAuthCredential, serverID: String) throws {
+        let currentURL = try RemoteOAuthClient.canonicalResource(remoteServerURL(serverID: serverID))
+        guard currentURL == credential.configuration.resourceURL else { throw RemoteOAuthError.resourceMismatch }
+        remoteAuthorizationGenerations[currentURL, default: 0] += 1
+        try remoteOAuthCredentials.store(credential)
+    }
+
+    func forgetRemoteAuthorization(serverID: String) throws {
+        let resource = try RemoteOAuthClient.canonicalResource(remoteServerURL(serverID: serverID))
+        remoteAuthorizationGenerations[resource, default: 0] += 1
+        try remoteOAuthCredentials.delete(resourceURL: resource)
     }
 
     // MARK: - Doctor, contract guard and activity
@@ -761,7 +866,13 @@ final class AppModel {
         guard current().servers.contains(where: { $0.id == serverID }) else {
             throw AppError.unknownServer(serverID)
         }
+        let portable = makePortableSetup()
+        let pending = try portable.pendingContractSummary().first { $0.serverID == serverID }
+        if let pending, pending.matching == nil { throw PortableSetupError.localContractNotChecked }
         try metadata.acknowledgeContract(for: serverID)
+        if pending != nil {
+            try portable.reviewPendingContract(serverID: serverID)
+        }
         reload()
     }
 
@@ -1311,6 +1422,7 @@ final class AppModel {
         case gatewayManaged(String)
         case noVerifiedExecutable(String)
         case healthResultsCouldNotBeSaved(Int)
+        case authorizationChanged
         case noDrift(String)
         case launchAtLoginRollbackFailed(original: String, rollback: String)
         case noUnpinnedPackage(String)
@@ -1322,6 +1434,7 @@ final class AppModel {
             switch self {
             case .unknownServer(let id): "No server with id \(id)."
             case .unknownBackup(let id): "No backup with id \(id)."
+            case .authorizationChanged: "Authorization changed while the check was running. Check the server again."
             case .invalidLibraryDirectory:
                 "Choose an existing directory for the local MCP library."
             case .unknownLibraryCandidate:

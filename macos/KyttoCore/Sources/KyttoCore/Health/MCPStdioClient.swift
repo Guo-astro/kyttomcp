@@ -104,12 +104,14 @@ public struct MCPStdioClient: Sendable {
         command: String,
         arguments: [String],
         environment: [String: String],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        workingDirectory: String? = nil
     ) throws -> (listing: ToolListing, stderr: String) {
         let process = try ManagedProcess(
             executable: command,
             arguments: arguments,
-            environment: environment
+            environment: environment,
+            workingDirectory: workingDirectory
         )
         // §6: every spawn is killed, and its group with it. No exception, no
         // early return that skips this.

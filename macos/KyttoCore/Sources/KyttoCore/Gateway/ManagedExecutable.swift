@@ -3,7 +3,7 @@ import Foundation
 /// Resolves an executable against the user's login-shell PATH without invoking
 /// a shell for the real command. Shared by health checks and the gateway shim.
 public enum ManagedExecutable {
-    public static func resolve(_ command: String, path: String) throws -> String {
+    public static func resolve(_ command: String, path: String, workingDirectory: String? = nil) throws -> String {
         guard command.contains("/") else {
             for directory in path.split(separator: ":") {
                 let candidate = "\(directory)/\(command)"
@@ -14,7 +14,10 @@ public enum ManagedExecutable {
             throw ProcessError.commandNotFound(command, searchedPath: path)
         }
 
-        let expanded = (command as NSString).expandingTildeInPath
+        var expanded = (command as NSString).expandingTildeInPath
+        if !expanded.hasPrefix("/"), let workingDirectory, workingDirectory.hasPrefix("/") {
+            expanded = URL(filePath: workingDirectory).appending(path: expanded).standardizedFileURL.path
+        }
         // A relative command is resolved by the launching client against its own
         // working directory (§4, `Server.hasRelativePath`). Kytto is not that
         // directory, so checking the path from here answers a different question

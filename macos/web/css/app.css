@@ -214,7 +214,7 @@ img {
 /* Navigation swaps the content tree wholesale. Give the new subject one quiet
    arrival rather than replaying motion on every data refresh inside it. */
 .panel-entering {
-  animation: panel-in-forward 320ms var(--ease-out) both;
+  animation: panel-in-forward 200ms var(--ease-out) both;
   will-change: transform;
 }
 
@@ -224,10 +224,7 @@ img {
 
 @keyframes panel-in-forward {
   from {
-    transform: translateX(18px);
-  }
-  68% {
-    transform: translateX(-2px);
+    transform: translateX(4px);
   }
   to {
     transform: translateX(0);
@@ -236,10 +233,7 @@ img {
 
 @keyframes panel-in-back {
   from {
-    transform: translateX(-18px);
-  }
-  68% {
-    transform: translateX(2px);
+    transform: translateX(-4px);
   }
   to {
     transform: translateX(0);
@@ -984,20 +978,9 @@ img {
   vertical-align: middle;
 }
 
-/* Only rows that entered the set move. Filtering the existing set gets a short
-   collective settle instead of replaying a stagger down the entire matrix. */
+/* Only rows entering the visible set move; retained rows stay still. */
 .matrix tbody tr.row-entering {
-  animation: row-in 260ms var(--ease-out) backwards;
-}
-
-.matrix.is-filtering {
-  animation: filter-settle 170ms var(--ease-out);
-}
-
-@keyframes filter-settle {
-  from {
-    opacity: 0.55;
-  }
+  animation: row-in 180ms var(--ease-out) backwards;
 }
 
 /* The starting frame is dim rather than invisible, everywhere content is
@@ -1656,13 +1639,13 @@ th.col-client.idle .app-icon {
 /* The click landed and the file on disk now says something different. The mark
    is rebuilt rather than transitioned, so the confirmation is a keyframe. */
 .cell-mark.flipped {
-  animation: mark-flip 320ms var(--ease-out);
+  animation: mark-flip 150ms var(--ease-out);
 }
 
 /* Turning one on draws its mark rather than fading it: the stroke arriving is
    the write finishing. */
 .cell-mark.enabled.flipped .cell-check {
-  animation: check-draw 260ms var(--ease-out) 70ms both;
+  animation: check-draw 150ms var(--ease-out) both;
 }
 
 @keyframes mark-flip {
@@ -1710,8 +1693,30 @@ th.col-client.idle .app-icon {
 
 .notice-message {
   flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
   user-select: text;
   -webkit-user-select: text;
+}
+
+.notice {
+  flex-wrap: wrap;
+}
+
+.support-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.support-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 8px 0;
 }
 
 /* A banner appearing under the toolbar moves the matrix down; sliding in from
@@ -1913,7 +1918,7 @@ th.col-client.idle .app-icon {
 }
 
 .sheet-backdrop.is-entering .sheet {
-  animation: sheet-in 280ms var(--ease-out);
+  animation: sheet-in 200ms var(--ease-out);
 }
 
 .sheet-backdrop.is-leaving {
@@ -4058,4 +4063,206 @@ body[data-stubbed='true'] .statusbar::after {
   .doctor-fix-comparison {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+/* Readable model contract changes. Long schemas stay inside their column. */
+.contract-change { flex-wrap: wrap; }
+.contract-field { flex-basis: 100%; min-width: 0; margin-top: 10px; }
+.contract-path { display: block; overflow-wrap: anywhere; font-size: 11px; }
+.contract-values { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 6px; }
+.contract-before, .contract-after { min-width: 0; padding: 8px; border: 1px solid var(--hairline); border-radius: 6px; }
+.contract-value-label { font-size: 10px; text-transform: uppercase; color: var(--text-muted); }
+.contract-values pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; margin: 5px 0 0; max-height: 180px; overflow: auto; }
+@media (max-width: 600px) { .contract-values { grid-template-columns: minmax(0, 1fr); } }
+
+/* Workspace sources and the persistent server inspector ------------------ */
+.matrix-workspace {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  min-width: 0;
+  --row-height: 68px;
+}
+
+.matrix-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 20px 18px 12px;
+}
+
+.eyebrow {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.matrix-heading h1 {
+  margin: 3px 0 2px;
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.matrix-heading p { margin: 0; font-size: 11px; }
+.setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.setup-actions:empty { display: none; }
+.setup-actions .button { white-space: nowrap; }
+.profiles-heading { flex-wrap: wrap; }
+.profiles-heading-copy { flex: 1 1 340px; min-width: 0; }
+.profiles-heading-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-inline-start: auto;
+}
+.profiles-heading-actions .button { min-height: 32px; white-space: nowrap; }
+
+.matrix-filters {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+
+.matrix-filter { display: grid; gap: 6px; min-width: 0; }
+.matrix-filter-label { color: var(--text-muted); font-size: 10px; font-weight: 550; padding-inline-start: 2px; }
+.matrix-filter:first-child { flex: 1 1 220px; max-width: 430px; }
+.matrix-filter:nth-child(2) { flex: 1 1 210px; max-width: 320px; }
+.matrix-filter:nth-child(3) { flex: 0 1 158px; min-width: 128px; }
+.filter-control { position: relative; display: block; min-width: 0; }
+.scope-select {
+  /* WebKit otherwise retains the small native bevel and double arrow, ignoring
+     much of the control styling. Keep the accessible select and its keyboard
+     behaviour, while drawing the closed control consistently on both shells. */
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  border: 1px solid var(--control-edge);
+  border-radius: 11px;
+  padding: 0 34px 0 35px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 96%, var(--text) 4%), var(--bg-elevated));
+  box-shadow: inset 0 1px 0 light-dark(rgb(255 255 255 / 85%), rgb(255 255 255 / 4%)), 0 1px 2px light-dark(rgb(0 0 0 / 4%), rgb(0 0 0 / 14%));
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color var(--fast), box-shadow var(--fast), background-color var(--fast);
+}
+.scope-select:hover { border-color: var(--hairline-strong); box-shadow: inset 0 1px 0 var(--hairline), 0 2px 5px light-dark(rgb(0 0 0 / 6%), rgb(0 0 0 / 20%)); }
+.scope-select:focus-visible { outline: 2px solid AccentColor; outline-offset: 2px; }
+.filter-control > .glyph {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.filter-control > .filter-icon { left: 12px; }
+.filter-control > .filter-chevron { right: 11px; width: 12px; height: 12px; }
+.matrix-filter.is-active .scope-select { border-color: color-mix(in srgb, AccentColor 40%, var(--control-edge)); background: color-mix(in srgb, AccentColor 5%, var(--bg-elevated)); }
+.matrix-filter.is-active .filter-icon { color: AccentColor; }
+.filter-control:focus-within > .glyph { color: AccentColor; }
+.matrix-filters > .button { min-height: 36px; }
+
+.matrix-split {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
+  gap: 14px;
+  min-height: 250px;
+  margin: 0 14px 16px;
+}
+.matrix-list { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.matrix-list .table-scroll { margin: 0; }
+.matrix-list .placeholder { flex: 1 1 auto; }
+.server-inspector {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.inspector-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+.inspector-header > div { min-width: 0; flex: 1 1 auto; }
+.inspector-header h2 {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  font-weight: 600;
+}
+.inspector-header .button { padding: 5px 7px; font-size: 10px; }
+.inspector-body { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; min-height: 0; padding: 14px; }
+.inspector-body .detail-section { margin-top: 18px; }
+.inspector-body .detail-section h3 { font-size: 12px; }
+.inspector-body .detail-health-heading { flex-wrap: wrap; }
+.inspector-body .contract-values { grid-template-columns: minmax(0, 1fr); }
+.inspector-body :is(code, pre, dd, li) { overflow-wrap: anywhere; }
+.inspector-body pre { white-space: pre-wrap; }
+.inspector-body .clients-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+.inspector-body .clients-table td { display: block; width: auto; min-width: 0; padding: 2px 0; border: 0; }
+.inspector-body .clients-table td:nth-child(3),
+.inspector-body .clients-table .client-action { grid-column: 1 / -1; white-space: normal; }
+.inspector-body .clients-table .client-action { display: flex; flex-wrap: wrap; gap: 5px; }
+.inspector-body .clients-table .client-state { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.auth-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.inspector-footer { display: flex; align-items: center; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--hairline); background: var(--bg-raised); }
+.inspector-empty { margin: auto; padding: 32px 24px; max-width: 330px; }
+.inspector-empty h2 { font-size: 17px; margin: 6px 0; }
+.inspector-empty p { font-size: 12px; line-height: 1.6; }
+.inspector-entering { animation: inspector-in 180ms var(--ease-out); }
+@keyframes inspector-in { from { opacity: 0.65; transform: translateX(4px); } }
+
+.matrix tbody tr.selected-server > td { background-color: color-mix(in srgb, AccentColor 7%, var(--bg-elevated)); }
+.matrix tbody tr.selected-server .col-server { box-shadow: inset 3px 0 AccentColor; }
+.server-meta { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 3px; font-size: 10px; color: var(--text-muted); }
+.server-source-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.server-health-label.ok { color: var(--ok); }
+.server-health-label.fail { color: var(--fail); }
+.server-health-label.auth { color: var(--auth); }
+.density-compact { --row-height: 52px; }
+.density-compact .server-meta { margin-top: 1px; }
+.density-compact .server-source-label { display: none; }
+.density-compact .server-command:not(.failure):not(.authwait) { display: none; }
+.side-child { padding-left: 26px; font-size: 11px; }
+.side-child .app-icon { width: 15px; height: 15px; opacity: 0.7; }
+.source-lock { flex: 0 0 auto; width: 11px; height: 11px; color: var(--text-faint); }
+
+@media (max-width: 1100px) {
+  .matrix-split { display: flex; flex-direction: column; min-height: 0; }
+  .matrix-list { flex: 1 0 230px; }
+  .server-inspector { flex: 0 0 auto; max-height: 420px; }
+  .server-inspector:has(.inspector-empty) { min-height: 145px; }
+  .inspector-body { max-height: 320px; }
+  .inspector-empty { padding: 20px; max-width: none; margin: 0; }
+  .matrix-heading { padding-top: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inspector-entering { animation: none; }
 }

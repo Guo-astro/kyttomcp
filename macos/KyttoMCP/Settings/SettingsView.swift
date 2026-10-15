@@ -45,6 +45,7 @@ struct SettingsView: View {
         .onDisappear { flush() }
         .alert("Could not save", isPresented: .constant(error != nil)) {
             Button("OK") { error = nil }
+            Button("Report a bug…") { NSWorkspace.shared.open(SupportLinks.bugReport) }
         } message: {
             Text(error ?? "")
         }
@@ -78,6 +79,33 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Open Kytto at login", isOn: $settings.launchAtLogin)
+            }
+
+            Section {
+                Link(destination: SupportLinks.bugReport) {
+                    HStack {
+                        Label("Report a bug…", systemImage: "ladybug")
+                        Spacer()
+                        Text("Private · No account")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Link(destination: SupportLinks.githubIssue) {
+                    HStack {
+                        Label("Report on GitHub…", systemImage: "arrow.up.right.square")
+                        Spacer()
+                        Text("Public · GitHub account")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Support")
+            } footer: {
+                Text("Opens in your browser. No logs or configuration are attached automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

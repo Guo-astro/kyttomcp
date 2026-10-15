@@ -91,6 +91,10 @@ public struct ToggleService: Sendable {
         server: Server,
         in clientID: ClientID
     ) throws -> ToggleResult {
+        if case .plugin(let owner, _, _, _) = server.origin {
+            if clientID == owner { throw ToggleError.bundledServerNotToggleable(server.name) }
+            throw ToggleError.bundledServerNotPortable(server.name)
+        }
         guard let descriptor = descriptors.first(where: { $0.id == clientID }) else {
             throw ToggleError.noSourceForClient(clientID)
         }

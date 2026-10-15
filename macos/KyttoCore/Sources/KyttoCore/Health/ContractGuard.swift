@@ -14,22 +14,41 @@ public enum ContractChangeSeverity: String, Codable, Sendable {
     case breaking
 }
 
+/// Bounded excerpts of the model-visible fields that changed. These explain a
+/// review; they do not certify that a server implements its stated safeguards.
+public struct ContractFieldChange: Codable, Equatable, Sendable {
+    public let path: String
+    public let before: String?
+    public let after: String?
+    public let explanation: String?
+
+    public init(path: String, before: String?, after: String?, explanation: String? = nil) {
+        self.path = path
+        self.before = before
+        self.after = after
+        self.explanation = explanation
+    }
+}
+
 public struct ContractChange: Codable, Equatable, Sendable {
     public let kind: ContractChangeKind
     public let severity: ContractChangeSeverity
     public let toolName: String
     public let summary: String
+    public let details: [ContractFieldChange]?
 
     public init(
         kind: ContractChangeKind,
         severity: ContractChangeSeverity,
         toolName: String,
-        summary: String
+        summary: String,
+        details: [ContractFieldChange]? = nil
     ) {
         self.kind = kind
         self.severity = severity
         self.toolName = toolName
         self.summary = summary
+        self.details = details
     }
 }
 
@@ -70,7 +89,8 @@ public enum ContractGuard {
                     kind: .descriptionChanged,
                     severity: .warning,
                     toolName: name,
-                    summary: "Model-facing description changed"
+                    summary: "Model-facing description changed",
+                    details: [ContractFieldChange(path: "description", before: excerpt(lhs.description), after: excerpt(rhs.description))]
                 ))
             }
             if !sameSchema(lhs.inputSchemaJSON, rhs.inputSchemaJSON) {
@@ -78,7 +98,8 @@ public enum ContractGuard {
                     kind: .inputSchemaChanged,
                     severity: .breaking,
                     toolName: name,
-                    summary: "Input schema changed"
+                    summary: "Input schema changed — review compatibility and safeguards",
+                    details: schemaDetails(lhs.inputSchemaJSON, rhs.inputSchemaJSON)
                 ))
             }
             if lhs.annotations != rhs.annotations {
@@ -86,9 +107,98 @@ public enum ContractGuard {
                     kind: .annotationsChanged,
                     severity: .warning,
                     toolName: name,
-                    summary: "Safety annotations changed"
+                    summary: "Safety annotations changed",
+                    details: annotationDetails(lhs.annotations, rhs.annotations)
                 ))
             }
+        }
+        return result
+    }
+
+    private static func excerpt(_ value: String?) -> String? {
+        value.map {
+            let scalars = $0.unicodeScalars.prefix(801)
+            return scalars.count > 800
+                ? String(String.UnicodeScalarView(scalars.prefix(800))) + "… [truncated]"
+                : $0
+        }
+    }
+
+    private static func display(_ value: Any?) -> String? {
+        guard let value else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes]),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return excerpt(text)
+    }
+
+    private static func annotationDetails(_ before: ToolAnnotations?, _ after: ToolAnnotations?) -> [ContractFieldChange] {
+        let fields: [(String, Bool?, Bool?)] = [
+            ("readOnlyHint", before?.readOnlyHint, after?.readOnlyHint),
+            ("destructiveHint", before?.destructiveHint, after?.destructiveHint),
+            ("idempotentHint", before?.idempotentHint, after?.idempotentHint),
+            ("openWorldHint", before?.openWorldHint, after?.openWorldHint),
+        ]
+        var result = fields.compactMap { name, lhs, rhs -> ContractFieldChange? in
+            guard lhs != rhs else { return nil }
+            return ContractFieldChange(path: "annotations." + name, before: lhs.map(String.init), after: rhs.map(String.init), explanation: "An annotation is a hint to the client, not an enforced permission.")
+        }
+        if result.isEmpty {
+            result.append(ContractFieldChange(path: "annotations", before: before == nil ? nil : "{}", after: after == nil ? nil : "{}"))
+        }
+        return result
+    }
+
+    private static func schemaDetails(_ before: String?, _ after: String?) -> [ContractFieldChange] {
+        // Parsing is bounded independently of rendering. Large or malformed
+        // contracts remain changes, with a raw excerpt instead of a deep walk.
+        guard let before, let after, before.utf8.count <= 1_000_000, after.utf8.count <= 1_000_000,
+              let lhs = try? JSONSerialization.jsonObject(with: Data(before.utf8), options: [.fragmentsAllowed]),
+              let rhs = try? JSONSerialization.jsonObject(with: Data(after.utf8), options: [.fragmentsAllowed]) else {
+            return [ContractFieldChange(path: "inputSchema", before: excerpt(before), after: excerpt(after), explanation: "Inspect the original schema; a structured comparison is unavailable.")]
+        }
+        var result: [ContractFieldChange] = []
+        var omitted = false
+        var visited = 0
+        func visit(_ lhs: Any?, _ rhs: Any?, _ path: String, _ depth: Int) {
+            visited += 1
+            if result.count >= 40 || visited > 500 { omitted = true; return }
+            let leftBytes = lhs.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed]) }
+            let rightBytes = rhs.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed]) }
+            guard leftBytes != rightBytes else { return }
+            if depth < 12, let left = lhs as? [String: Any], let right = rhs as? [String: Any] {
+                for key in Set(left.keys).union(right.keys).sorted() {
+                    if key.utf8.count > 256 || path.utf8.count > 1_024 {
+                        let oldField = left[key].flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed]) }
+                        let newField = right[key].flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed]) }
+                        if oldField == newField { continue }
+                        if result.count >= 40 { omitted = true; break }
+                        result.append(ContractFieldChange(
+                            path: "inputSchema/[long field path]", before: display(left[key]), after: display(right[key]),
+                            explanation: "The schema field name or path is too long to display. Inspect the complete schema."
+                        ))
+                        continue
+                    }
+                    // JSON Pointer escaping makes names containing '/' or '~'
+                    // unambiguous. Arrays remain whole so their order is visible.
+                    let escaped = key.replacingOccurrences(of: "~", with: "~0").replacingOccurrences(of: "/", with: "~1")
+                    visit(left[key], right[key], path + "/" + escaped, depth + 1)
+                }
+                return
+            }
+            let lower = path.lowercased()
+            let guardRelated = ["dry_run", "dryrun", "confirm", "approval"].contains { lower.contains($0) }
+                || (lower.hasSuffix("/required") && ((display(lhs) ?? "") + (display(rhs) ?? "")).lowercased().contains("confirm"))
+            let explanation = guardRelated
+                ? "A confirmation or dry-run field changed. This may alter how the model requests a guarded action; verify the server's actual enforcement."
+                : (path.hasSuffix("/required") ? "Required arguments changed; existing calls may need different inputs." : nil)
+            result.append(ContractFieldChange(path: path, before: display(lhs), after: display(rhs), explanation: explanation))
+        }
+        visit(lhs, rhs, "inputSchema", 0)
+        if omitted {
+            result.append(ContractFieldChange(path: "inputSchema", before: nil, after: nil, explanation: "Additional changes omitted. Inspect the complete schema before acknowledging."))
+        }
+        if result.isEmpty {
+            result.append(ContractFieldChange(path: "inputSchema", before: excerpt(before), after: excerpt(after)))
         }
         return result
     }
@@ -111,7 +221,8 @@ public enum ContractGuard {
         return left == right
     }
 
-    private static func canonical(_ json: String) -> Data? {
+    static func canonical(_ json: String) -> Data? {
+        guard json.utf8.count <= 1_000_000 else { return nil }
         guard let object = try? JSONSerialization.jsonObject(
             with: Data(json.utf8),
             options: [.fragmentsAllowed]

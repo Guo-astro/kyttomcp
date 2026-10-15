@@ -48,6 +48,9 @@ struct CodexTests {
     func pluginServers() throws {
         let harness = try makeHarness()
         defer { harness.cleanUp() }
+        let config = try harness.text(".codex/config.toml")
+        try harness.home.write(config + "\n[plugins.\"build-ios-apps@openai-curated\"]\nenabled = true\n", to: ".codex/config.toml")
+        try harness.home.write(#"{"name":"build-ios-apps","version":"abc123"}"#, to: ".codex/plugins/cache/openai-curated/build-ios-apps/abc123/.codex-plugin/plugin.json")
 
         try harness.home.write(
             """

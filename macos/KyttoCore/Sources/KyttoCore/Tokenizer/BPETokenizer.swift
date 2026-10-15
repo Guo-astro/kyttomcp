@@ -102,6 +102,32 @@ public final class BPETokenizer: @unchecked Sendable {
         return total
     }
 
+    /// The same measurement with a shared inspection deadline. Remote contracts
+    /// are untrusted input; a completed HTTP request does not bound CPU work (§7.3).
+    public func countTokens(_ text: String, deadline: Date) throws -> Int {
+        guard Date() < deadline else { throw RemoteHTTPError.timedOut }
+        var total = 0
+        var expired = false
+        let scalars = text as NSString
+        let whole = NSRange(location: 0, length: scalars.length)
+        pattern.enumerateMatches(in: text, options: [.reportProgress], range: whole) { match, _, stop in
+            guard Date() < deadline else { expired = true; stop.pointee = true; return }
+            guard let match, match.range.length > 0 else { return }
+            let bytes = Array(scalars.substring(with: match.range).utf8)
+            if ranks[bytes] != nil { total += 1; return }
+            var start = 0
+            while start < bytes.count {
+                guard Date() < deadline else { expired = true; stop.pointee = true; return }
+                let end = min(start + Self.maxExactPiece, bytes.count)
+                let slice = Array(bytes[start..<end])
+                total += ranks[slice] != nil ? 1 : mergeBoundaries(slice).count - 1
+                start = end
+            }
+        }
+        guard !expired, Date() < deadline else { throw RemoteHTTPError.timedOut }
+        return total
+    }
+
     static let maxExactPiece = 256
 
     /// The token ids for `text`. Only the count is used in the app; this exists

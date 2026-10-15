@@ -111,15 +111,15 @@ If the matrix render becomes a performance problem (unlikely under ~100 servers)
 
 ### 3.2 Mac-first without painting into a corner
 
-Windows lands at M7, but the risk is that macOS assumptions leak into the shared layers between now and then — and Windows stops being a port and becomes a rewrite. Discipline from M0:
+Windows landed at M7; its native shell is in `../`. The same boundaries still matter: configuration logic and OS paths stay native, IPC describes intent, and web code does not interpret filesystem paths.
 
 - **The IPC contract is platform-agnostic.** Commands describe intent, not implementation. `secrets.store(ref, value)` — not `keychain.addGenericPassword(...)`. `config.listClients()` — not anything that names a macOS path.
 - **The web layer never sees a filesystem path it has to interpret.** It receives display strings and opaque ids. Path construction, separators and env var expansion all live native-side.
 - **No platform names in the web layer.** No `if (mac)` branches in UI code. If behaviour must differ, the native side reports a capability flag and the UI branches on the capability, not the OS.
-- **Client registry is data, not code.** §4's descriptors already carry per-platform path arrays. Fill in the Windows paths as you go even though nothing consumes them yet — it costs minutes now and hours later.
-- **Write one throwaway Windows shell at M0.** Just a window loading the same web UI, nothing else. It proves the web layer is portable and it will never be cheaper to find out than at the start. Then park it until M7.
+- **Client registry is data, not code.** §4's descriptors carry per-platform path arrays, now consumed by both native apps.
+- **Keep the web/native boundary stable.** Each platform has its own web tree; presentation differences must not move configuration logic or filesystem knowledge into JavaScript.
 
-That last one is the highest-value item in this section. Do not skip it.
+The early WebView2 shell was a portability probe; the maintained Windows application is in `../`.
 
 ### 3.3 Direct mode and Gateway mode
 

@@ -11,8 +11,8 @@ merges it into one matrix: a row per server, a column per client, a switch per
 cell. It is a Windows port of the Kytto macOS app. Free and open source under the
 MIT License.
 
-Status: beta. The current source release is 1.0.8, not yet published; the latest
-published build is 1.0.7.1 ([release notes](docs/releases/)).
+Status: beta. The current source release and latest published build are 1.0.8
+([release notes](docs/releases/)).
 
 ## What it does
 

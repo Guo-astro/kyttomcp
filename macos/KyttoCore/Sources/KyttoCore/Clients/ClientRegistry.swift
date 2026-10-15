@@ -60,22 +60,32 @@ public enum ClientRegistry {
         } else {
             URL(filePath: path)
         }
-        guard let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let root = object as? [String: Any],
-              let projects = root["projects"] as? [String: Any]
-        else { return all }
+        let data = try? Data(contentsOf: url)
+        let root = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        let projects = root?["projects"] as? [String: Any] ?? [:]
 
         // Claude Code writes an empty `mcpServers: {}` into every directory it has
         // ever been run in, so the key's presence says nothing — a long-used
         // machine carries dozens of them. A scope earns a place in the matrix by
         // actually configuring a server; the rest is the client's bookkeeping.
-        let projectPaths = projects.keys.sorted().filter { key in
+        let configuredProjectPaths = projects.keys.sorted().filter { key in
             guard let project = projects[key] as? [String: Any],
                   let servers = project["mcpServers"] as? [String: Any]
             else { return false }
             return !servers.isEmpty
         }
+        // Explicit registrations are the boundary: no project directory crawl.
+        let installedURL = PluginRegistrySource.claudeCode().registrationFile.resolve(home: home)
+        let installedData = try? Data(contentsOf: installedURL)
+        let installed = installedData.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        let plugins = installed?["plugins"] as? [String: Any] ?? [:]
+        let pluginProjectPaths = plugins.values.flatMap { $0 as? [[String: Any]] ?? [] }.compactMap { entry -> String? in
+            guard ["project", "local"].contains(entry["scope"] as? String ?? ""),
+                  let path = entry["projectPath"] as? String, path.hasPrefix("/")
+            else { return nil }
+            return path
+        }
+        let projectPaths = Set(configuredProjectPaths + pluginProjectPaths).sorted()
 
         let leaves = compactProjectLeaves(for: projectPaths)
         let projectDescriptors = projectPaths.map { projectPath in
@@ -149,7 +159,8 @@ public enum ClientRegistry {
                     ),
                     scopePath: projectPath,
                     serversKey: "mcpServers"
-                )
+                ),
+                .registeredPlugins(.claudeCode(projectPath: projectPath)),
             ],
             schemaQuirks: "Claude Code project/workspace scope. Kytto reads this project entry from the shared Claude Code file and never writes it.",
             isReadOnly: true,
@@ -227,13 +238,15 @@ public enum ClientRegistry {
                     key: "deniedMcpServers",
                     nameField: "serverName"
                 )
-            )
+            ),
+            .registeredPlugins(.claudeCode()),
         ],
         schemaQuirks: """
         `~/.claude.json` is not a small config file — it also holds per-project \
-        history and routinely runs to hundreds of kilobytes. Only the top-level \
-        `mcpServers` is in scope; `projects.<path>.mcpServers` is project scope and \
-        is deferred (§4), so it must be skipped without erroring. Enablement lives \
+        history and routinely runs to hundreds of kilobytes. Top-level \
+        `mcpServers` is writable; registered `projects.<path>.mcpServers` entries \
+        and installed, enabled plugin MCP definitions are separate read-only \
+        workspace sources. Enablement for global configured servers lives \
         in a different file entirely: `~/.claude/settings.json` → `deniedMcpServers`, \
         an array of objects with a `serverName` field. A denied server stays in the \
         config and must still be listed, shown as off.
@@ -337,14 +350,10 @@ public enum ClientRegistry {
                 serversKey: "mcp_servers",
                 enablement: .inlineFlag(key: "enabled")
             ),
-            .bundledPackages(
-                root: PlatformPath(
-                    darwin: "~/.codex/plugins",
-                    windows: #"%USERPROFILE%\.codex\plugins"#
-                ),
-                manifestName: ".mcp.json",
-                serversKey: "mcpServers"
-            ),
+            .registeredPlugins(.codex(
+                config: PlatformPath(darwin: "~/.codex/config.toml", windows: #"%USERPROFILE%\.codex\config.toml"#),
+                cache: PlatformPath(darwin: "~/.codex/plugins/cache", windows: #"%USERPROFILE%\.codex\plugins\cache"#)
+            )),
         ],
         schemaQuirks: """
         The only TOML client, and the only one whose off switch is genuinely \
@@ -355,10 +364,10 @@ public enum ClientRegistry {
         file is not small — a real one carries dozens of `[projects."…"]` tables \
         recording per-directory history — and none of that may move when a server \
         is added. Two front ends share one config: the ChatGPT app (bundle id \
-        `com.openai.codex`) and the `codex` CLI. Plugins under `~/.codex/plugins` \
-        can bundle their own `.mcp.json` in the ordinary `mcpServers` shape; those \
-        are installed packages in a cache directory the client repopulates, so \
-        they are read and shown but never written.
+        `com.openai.codex`) and the `codex` CLI. Explicitly enabled plugin \
+        registrations can bundle `.mcp.json` in the ordinary `mcpServers` shape. \
+        Kytto reads the registered or unambiguous installed version, skips \
+        ambiguous caches with a diagnostic, and never writes plugin packages.
         """
         // No tool limit: none is documented, and MCP tools are deferred behind
         // tool search where the model supports it

@@ -3,6 +3,10 @@ import CryptoKit
 import Testing
 @testable import KyttoMCP
 
+// These async tests share URLProtocol response fixtures. MainActor can re-enter
+// across awaits, so serialize the suite to keep each download's bytes/manifest
+// paired throughout its lifetime.
+@Suite(.serialized)
 @MainActor
 struct UpdateServiceTests {
     @Test("a newer verified macOS release is offered")

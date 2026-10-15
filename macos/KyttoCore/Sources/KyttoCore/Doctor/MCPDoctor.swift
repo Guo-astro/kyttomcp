@@ -137,13 +137,41 @@ public enum MCPDoctor {
         var findings: [DoctorFinding] = []
 
         if server.transport != .stdio {
-            findings.append(DoctorFinding(
-                code: "remote-check-unavailable",
-                severity: .info,
-                title: "Remote health checks are not available yet",
-                detail: "Kytto can preserve this remote definition, but the current checker only starts local stdio servers.",
-                remediation: "Verify the endpoint in its client. Remote HTTP and OAuth diagnostics remain on the roadmap."
-            ))
+            if server.transport == .sse {
+                findings.append(DoctorFinding(
+                    code: "remote-check-unavailable", severity: .info,
+                    title: "Legacy SSE inspection is not supported",
+                    detail: "Remote Doctor supports Streamable HTTP endpoints.",
+                    remediation: "Use the server's Streamable HTTP endpoint if available; otherwise verify the legacy endpoint in its client."
+                ))
+            } else if let health = server.health {
+                if health.status == .needsAuthorization {
+                    findings.append(DoctorFinding(
+                        code: "needs-authorization", severity: .info,
+                        title: "Remote authorization is required",
+                        detail: "The remote endpoint requires a sign-in or additional permissions.",
+                        remediation: "Sign in from the server detail or review its configured credentials, then check again.",
+                        action: .runHealthCheck
+                    ))
+                } else if health.status == .failed {
+                    findings.append(DoctorFinding(
+                        code: "remote-check-failed", severity: .error,
+                        title: "Remote MCP inspection did not complete",
+                        detail: health.currentMessage ?? "The endpoint did not complete the MCP handshake and tools listing.",
+                        remediation: "Review the endpoint, HTTP status, TLS connection and configured credentials in server detail.",
+                        action: .runHealthCheck
+                    ))
+                }
+            } else {
+                findings.append(DoctorFinding(
+                    code: "not-checked", severity: .info,
+                    title: "This remote server has not been checked",
+                    detail: "Its MCP handshake and tool contract have not been verified by Kytto.",
+                    remediation: "Run Remote Doctor to inspect the endpoint on request.",
+                    action: .runHealthCheck
+                ))
+            }
+            findings.append(contentsOf: ToolSafetyScanner.scan(server.knownTools).map(finding(for:)))
             return DoctorServerReport(serverID: server.id, serverName: server.name, findings: findings)
         }
 
