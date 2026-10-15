@@ -382,6 +382,14 @@ public sealed partial class PortableSetupService
             throw PortableSetupException.ProtectedLocation("a file name with a colon addresses a stream of some other file");
         }
 
+        // `\\localhost\C$\…` is a local file under a name no resolution turns back into
+        // its drive path, so any share of this computer is refused outright.
+        if (FinalPath.IsShareOnThisComputer(file))
+        {
+            throw PortableSetupException.ProtectedLocation(
+                "a share on this computer can name a live config under another spelling — choose a folder by its own path");
+        }
+
         var guarded = new List<string> { _paths.Root };
         foreach (var descriptor in _descriptors)
         {

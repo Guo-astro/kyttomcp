@@ -40,6 +40,75 @@ internal static class FinalPath
                candidate.StartsWith(guarded + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Whether the path names a share served by this very computer —
+    /// <c>\\localhost\C$\…</c>, <c>\\127.0.0.1\C$\…</c>, <c>\\THIS-PC\Users\…</c>.
+    /// </summary>
+    /// <remarks>
+    /// Such a path reaches a local folder through the file-sharing stack, and the kernel
+    /// answers with the share's own name rather than the drive path, so comparing the
+    /// resolved strings cannot tell it from the file it aliases. A share of another
+    /// computer cannot alias anything here and is left alone. Only this computer's own
+    /// names and addresses are recognised: a DNS alias is not looked up, because a path
+    /// check must not go to the network.
+    /// </remarks>
+    public static bool IsShareOnThisComputer(string path)
+    {
+        var resolved = Resolve(path);
+        foreach (var prefix in (string[])[@"\\?\UNC\", @"\\.\UNC\"])
+        {
+            if (resolved.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                resolved = @"\\" + resolved[prefix.Length..];
+                break;
+            }
+        }
+        if (!resolved.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+
+        var rest = resolved[2..];
+        var end = rest.IndexOfAny(['\\', '/']);
+        var host = (end < 0 ? rest : rest[..end]).Trim('[', ']');
+        return host.Length > 0 && IsThisComputer(host);
+    }
+
+    private static bool IsThisComputer(string host)
+    {
+        // `fe80--1.ipv6-literal.net` is how a UNC path spells an IPv6 address.
+        if (host.EndsWith(".ipv6-literal.net", StringComparison.OrdinalIgnoreCase))
+        {
+            host = host[..^".ipv6-literal.net".Length].Replace('-', ':').Replace('s', '%');
+        }
+        if (host == "." || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+        if (System.Net.IPAddress.TryParse(host, out var address))
+        {
+            if (System.Net.IPAddress.IsLoopback(address)) return true;
+            try
+            {
+                return System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                    .SelectMany(adapter => adapter.GetIPProperties().UnicastAddresses)
+                    .Any(unicast => unicast.Address.Equals(address));
+            }
+            catch (Exception error) when (error is System.Net.NetworkInformation.NetworkInformationException)
+            {
+                return false;
+            }
+        }
+
+        var names = new List<string> { Environment.MachineName };
+        try
+        {
+            names.Add(System.Net.Dns.GetHostName());
+            var properties = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties();
+            if (properties.DomainName.Length > 0) names.Add($"{properties.HostName}.{properties.DomainName}");
+        }
+        catch (Exception error) when (
+            error is System.Net.Sockets.SocketException or System.Net.NetworkInformation.NetworkInformationException)
+        {
+            // The machine name above still counts.
+        }
+        return names.Any(name => name.Equals(host, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string Trimmed(string path) =>
         path.Length > 3 ? path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) : path;
 
