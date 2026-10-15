@@ -1058,7 +1058,8 @@ private path and argument Kytto cannot prove public. Installed plugins and
 extension bundles, custom sources and everything else are not copied, and nothing
 is read from the credential store. A destination that is, or aliases, a live client
 configuration or one of Kytto's own stores is refused — a symbolic link, a junction
-or a mount point on the way does not change that.
+or a mount point on the way does not change that, and neither does reaching it through
+a share of this computer, which is refused whatever it points at.
 
 ```json
 { "cancelled": false, "serverCount": 3, "profileCount": 1, "warnings": [] }

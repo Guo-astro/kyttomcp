@@ -832,7 +832,10 @@ applies. A literal outside the whitelist is refused, so an unknown command or
 argument cannot ride in as "public" text. A byte-order mark is skipped.
 An export refuses to land on a live client config or one of Kytto's own stores —
 by what each path finally names, with symbolic links, junctions, mount points, short
-names and letter case followed through.
+names and letter case followed through. A share of this very computer
+(`\\localhost\C$\…`, its own name or address) is refused outright: the file-sharing
+stack names the file by the share, never by its drive path, so the comparison above
+cannot see through it.
 
 **Import is a preview and an apply.** The preview reads everything, collects the
 inputs in a native window (masked for secrets, URLs and plain values; file and
