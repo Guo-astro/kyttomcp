@@ -20,6 +20,12 @@ public enum ToggleError: Error, LocalizedError, Equatable {
     case bundledServerNotToggleable(String)
     case noParkedDefinition(String)
     case rollbackFailed(original: String, rollback: String)
+    /// The definition has settings the target client's format cannot be given
+    /// from Kytto's model — headers, a working directory — and copying it
+    /// without them would write a server that cannot start or authenticate.
+    case definitionNotPortable(String, fields: [String])
+    /// The definition is Kytto's Gateway helper bound to one client's route.
+    case gatewayDefinitionNotPortable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +43,17 @@ public enum ToggleError: Error, LocalizedError, Equatable {
             "Kytto has no stored definition for \"\(name)\" to put back."
         case .rollbackFailed(let original, let rollback):
             "The toggle failed (\(original)), and Kytto could not completely roll it back: \(rollback)"
+        case .definitionNotPortable(let name, let fields):
+            """
+            "\(name)" uses \(fields.joined(separator: ", ")), which Kytto cannot carry into this \
+            client's configuration format. Add it to this client by hand so nothing it needs to \
+            start or sign in is lost.
+            """
+        case .gatewayDefinitionNotPortable(let name):
+            """
+            "\(name)" runs through Kytto Gateway for one client. Restore its direct definition \
+            there first, then add it to this client.
+            """
         }
     }
 }
@@ -171,7 +188,18 @@ public struct ToggleService: Sendable {
             // can be copied into another client's config.
             throw ToggleError.bundledServerNotPortable(server.name)
         }
-        if !server.definitionSource.isEmpty, format(of: server.origin) == .json {
+        // A Gateway definition points at one client's route: copied, a second
+        // client would run (and be logged and masked as) the first one.
+        if server.args.contains("--route"),
+           let command = server.command, URL(filePath: command).lastPathComponent == "kytto-mcp-proxy" {
+            throw ToggleError.gatewayDefinitionNotPortable(server.name)
+        }
+        let targetFormat = descriptors.first { $0.id == clientID }?.editableServerMap?.format
+        if let sourceFormat = format(of: server.origin), sourceFormat != targetFormat {
+            let lost = Self.unportableFields(in: server.definitionSource, format: sourceFormat)
+            if !lost.isEmpty { throw ToggleError.definitionNotPortable(server.name, fields: lost) }
+        }
+        if !server.definitionSource.isEmpty, format(of: server.origin) == .json, targetFormat == .json {
             // A copy from another JSON client. Those agree on the per-server
             // shape, so the source text carries over as it stands.
             return .verbatim(server.definitionSource)
@@ -191,6 +219,24 @@ public struct ToggleService: Sendable {
         switch arriving {
         case .verbatim(let text): text
         case .fromModel: jsonLiteral(for: server, serversKey: serversKey, in: document)
+        }
+    }
+
+    /// Launch and authentication settings a definition has that rendering it
+    /// from the model (command, args, env, url) would drop.
+    static func unportableFields(in source: String, format: ConfigFormat) -> [String] {
+        switch format {
+        case .json:
+            let keys = (try? JSONDocument.parse(source))?.root.keys ?? []
+            return ["headers", "cwd", "envFile"].filter(keys.contains)
+        case .toml:
+            guard let document = try? TOMLDocument.parse(source) else { return [] }
+            let names = Set(document.tables.flatMap { table in
+                // Sub-tables (`[mcp_servers.x.http_headers]`) count by name; the
+                // server's own header names the server, not a setting.
+                table.pairs.compactMap(\.key.first) + (table.path.count > 2 ? Array(table.path.suffix(1)) : [])
+            })
+            return ["http_headers", "env_http_headers", "bearer_token_env_var", "cwd", "env_vars"].filter(names.contains)
         }
     }
 
@@ -247,10 +293,11 @@ public struct ToggleService: Sendable {
         serversKey: String,
         flagKey: String
     ) throws -> ToggleResult {
-        if server.isBundled, format(of: server.origin) != .toml {
-            throw ToggleError.bundledServerNotPortable(server.name)
-        }
-
+        // No up-front refusal for a bundled row: discovery merges rows by
+        // identity and takes `isBundled` from whichever source it read first, so
+        // a Codex table can sit in a row that came from a Claude Desktop
+        // extension. Codex's own table is toggled like any other; only an
+        // arrival needs a portable definition, and that is checked below.
         let url = resolver.resolveServerMap(configFile, for: clientID)
         let display = resolver.displayServerMap(configFile, for: clientID)
 
@@ -263,10 +310,15 @@ public struct ToggleService: Sendable {
         ) { document in
             // The name in this file, which need not match the row's name
             // character for character — the matrix merges rows by identity.
-            let name = document.serverNames(under: serversKey)
-                .first { Server.identity(for: $0) == server.id }
+            // Two tables differing only in case are both valid TOML, and Codex
+            // runs both; toggling one of them would report a success it did not
+            // have, so an ambiguous name is refused.
+            let name = try document.serverName(for: server.id, under: serversKey)
 
             guard let name else {
+                if server.isBundled, format(of: server.origin) != .toml {
+                    throw ToggleError.bundledServerNotPortable(server.name)
+                }
                 // Nothing in the config file answers to this name. Either it is
                 // genuinely not here, or it is here by another route — a plugin —
                 // and that route is not one Kytto writes to. Saying so beats a
@@ -375,9 +427,14 @@ public struct ToggleService: Sendable {
                             return name.map { Server.identity(for: $0) == server.id } ?? false
                         } ?? false
                         if alreadyDenied { return document.sourceText }
+                        // The spelling the config file uses, not the row's: the row
+                        // takes its name from whichever client listed it first, and
+                        // the client matches its deny list against its own key.
+                        let spelling = (try? JSONDocument.parse(contentsOf: resolver.resolveServerMap(configFile, for: clientID)))
+                            .flatMap { try? $0.serverKey(for: server.id, under: serversKey) } ?? server.name
                         return try document.appendingElement(
                             document.objectLiteral(
-                                [(nameField, JSONText.string(server.name))],
+                                [(nameField, JSONText.string(spelling))],
                                 matchingStyleOfArrayAt: [key]
                             ),
                             toArrayAt: [key]

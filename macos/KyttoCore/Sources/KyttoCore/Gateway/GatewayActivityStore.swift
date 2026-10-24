@@ -30,17 +30,33 @@ public struct GatewayActivityStore: Sendable {
         url = paths.gatewayEvents
     }
 
+    /// How much of the journal's end is read. The panel shows the last few
+    /// hundred events; reading a journal of any size whole, on the main actor,
+    /// on every refresh is how a long-lived install grows a stutter.
+    static let tailBytes = 2 * 1024 * 1024
+
     public func summary(limit: Int = 500) -> GatewayActivitySummary {
-        guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8)
-        else { return GatewayActivitySummary(events: []) }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return GatewayActivitySummary(events: []) }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > UInt64(Self.tailBytes) ? size - UInt64(Self.tailBytes) : 0
+        guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else {
+            return GatewayActivitySummary(events: [])
+        }
+        // Decoded line by line and lossily: one line cut by a short write must
+        // cost that line, not every event in the file.
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        if start > 0, !lines.isEmpty { lines.removeFirst() } // began mid-line
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let events = text.split(separator: "\n", omittingEmptySubsequences: true)
-            .suffix(max(1, limit))
-            .compactMap { try? decoder.decode(GatewayEvent.self, from: Data($0.utf8)) }
-            .sorted { $0.timestamp > $1.timestamp }
+        let events = lines.suffix(max(1, limit))
+            .compactMap { try? decoder.decode(GatewayEvent.self, from: Data($0)) }
+            .enumerated()
+            // Timestamps have whole seconds; within one, the journal's own order
+            // keeps "started" before "completed".
+            .sorted { ($0.element.timestamp, $0.offset) > ($1.element.timestamp, $1.offset) }
+            .map(\.element)
         return GatewayActivitySummary(events: events)
     }
 }

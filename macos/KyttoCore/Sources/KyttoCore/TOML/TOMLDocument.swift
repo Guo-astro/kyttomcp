@@ -196,6 +196,10 @@ public struct TOMLParseError: Error, Equatable, Sendable {
         case unterminatedArray
         case unterminatedInlineTable
         case unterminatedTableHeader
+        /// A table defined twice — by two headers, or by a header after dotted
+        /// keys already defined it. Codex refuses such a file.
+        case duplicateTable
+        case duplicateKey
     }
 
     public let kind: Kind
@@ -218,6 +222,8 @@ extension TOMLParseError: CustomStringConvertible {
         case .unterminatedArray: what = "unterminated array"
         case .unterminatedInlineTable: what = "unterminated inline table"
         case .unterminatedTableHeader: what = "unterminated table header"
+        case .duplicateTable: what = "a table is defined more than once"
+        case .duplicateKey: what = "a key is defined more than once"
         }
         return "\(what) at line \(line), column \(column)"
     }
@@ -249,6 +255,12 @@ struct TOMLParser {
         var isArrayElement = false
         var pairs: [TOMLPair] = []
         var contentEnd = 0
+        // TOML forbids defining a table twice. Kytto's editor checks its own
+        // output by parsing it again, so a parser that tolerated this would
+        // wave through a file Codex then cannot load.
+        var definedTables: Set<[String]> = [[]]
+        var arrayTables: [[String]] = []
+        var keysInTable: Set<[String]> = []
 
         func closeTable() {
             // A root table with nothing above the first header is not a table
@@ -295,15 +307,35 @@ struct TOMLParser {
                     index += 1
                 }
 
+                if double {
+                    arrayTables.append(key)
+                } else if !arrayTables.contains(where: { key.starts(with: $0) }) {
+                    guard definedTables.insert(key).inserted else {
+                        index = start
+                        throw error(.duplicateTable)
+                    }
+                }
                 path = key
                 headerSpan = TOMLSpan(start: start, end: index)
                 isArrayElement = double
                 pairs = []
+                keysInTable = []
                 contentEnd = index
                 continue
             }
 
+            let pairStart = index
             let pair = try parsePair()
+            guard keysInTable.insert(pair.key).inserted else {
+                index = pairStart
+                throw error(.duplicateKey)
+            }
+            // `a.b = 1` defines table `a` here; a later `[…a]` header is a redefinition.
+            if pair.key.count > 1, !isArrayElement, !arrayTables.contains(where: { path.starts(with: $0) }) {
+                for depth in 1..<pair.key.count {
+                    definedTables.insert(path + pair.key[..<depth])
+                }
+            }
             pairs.append(pair)
             contentEnd = pair.span.end
         }
@@ -564,11 +596,14 @@ struct TOMLParser {
 
         while index < bytes.count {
             if bytes[index] == quote, hasClosingDelimiter(quote) {
-                appendChunk(&scalars, from: literalStart, to: index)
-                index += 3
-                // TOML allows more than three closing quotes; the extras belong
-                // to the value, but for our purposes stopping at three is right
-                // because the span, not the decoded text, is what gets spliced.
+                // A value may end in one or two quotes right before the
+                // delimiter (`"""a""""`): the delimiter is the *last* three of
+                // a run of up to five. Stopping at the first three would leave
+                // a stray quote that fails as a key and calls a valid file broken.
+                var run = 0
+                while index + run < bytes.count, bytes[index + run] == quote, run < 5 { run += 1 }
+                appendChunk(&scalars, from: literalStart, to: index + run - 3)
+                index += run
                 return String(scalars)
             }
             if escaped, bytes[index] == UInt8(ascii: "\\") {

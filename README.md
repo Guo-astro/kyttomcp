@@ -5,12 +5,12 @@
 Free and **open source** under the MIT License — the full source of both the macOS
 and the Windows app lives in this repository. Read it, build it, or send a pull request.
 
-[![Version](https://img.shields.io/badge/beta-1.0.8-blue)](https://github.com/heyitsjakub/KyttoMCP/releases)
+[![Version](https://img.shields.io/badge/beta-macOS%201.0.9%20%C2%B7%20Windows%201.0.8-blue)](https://github.com/heyitsjakub/KyttoMCP/releases)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://kytto.jakubhecht.sk/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 [![Open source](https://img.shields.io/badge/open%20source-yes-brightgreen)](#source-code)
 
-[**Download Beta 1.0.8**](https://kytto.jakubhecht.sk/) · [Website](https://kytto.jakubhecht.sk/) · [Source code](#source-code) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://kytto.jakubhecht.sk/#report-bug)
+[**Download Beta 1.0.9**](https://kytto.jakubhecht.sk/) · [Website](https://kytto.jakubhecht.sk/) · [Source code](#source-code) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://kytto.jakubhecht.sk/#report-bug)
 
 ---
 
@@ -91,7 +91,7 @@ Custom sources are read-only and are not an additional writable client. Want ano
 
 ## Install
 
-Download Beta 1.0.8 from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from the [v1.0.8 Release](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.8).
+Download from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from GitHub Releases: Beta 1.0.9 for macOS ([v1.0.9](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9)) and Beta 1.0.8 for Windows ([v1.0.8](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.8)), whose port of the 1.0.9 fixes follows.
 
 ### macOS
 
@@ -109,8 +109,8 @@ Run the setup file. Microsoft Defender SmartScreen will appear for the same reas
 
 ```sh
 # macOS
-shasum -a 256 KyttoMCP-1.0.8.dmg
-# 177f92d8772981bf96ca108f9813ae47d9e31e2f6fe67c3abef417b41358d235
+shasum -a 256 KyttoMCP-1.0.9.dmg
+# 2cb955c50c2df94af27fe4445fc6929f17cb4664089f383b9c0d49cdd8837846
 
 # Windows (PowerShell)
 Get-FileHash Kytto-Setup-win-x64-1.0.8.exe -Algorithm SHA256

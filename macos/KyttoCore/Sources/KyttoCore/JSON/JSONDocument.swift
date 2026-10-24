@@ -85,6 +85,7 @@ public struct JSONParseError: Error, Equatable, Sendable {
         case unterminatedComment
         case expectedColon
         case expectedKey
+        case nestingTooDeep
     }
 
     public let kind: Kind
@@ -109,6 +110,7 @@ extension JSONParseError: CustomStringConvertible {
         case .unterminatedComment: what = "unterminated block comment"
         case .expectedColon: what = "expected ':'"
         case .expectedKey: what = "expected a quoted key"
+        case .nestingTooDeep: what = "values nested too deeply"
         }
         return "\(what) at line \(line), column \(column)"
     }
@@ -123,8 +125,15 @@ extension JSONParseError: CustomStringConvertible {
 /// as trivia, which means they are never part of a value's span and therefore
 /// survive any splice.
 struct JSONParser {
+    /// Recursion bound. Health checks parse JSON from servers Kytto does not
+    /// trust, on a detached task's small stack; a reply nested a thousand
+    /// levels deep must be a parse error, not a crash. No config or tool
+    /// schema comes near this.
+    static let maximumDepth = 128
+
     private let bytes: [UInt8]
     private var index: Int = 0
+    private var depth = 0
 
     init(bytes: [UInt8]) {
         self.bytes = bytes
@@ -189,6 +198,9 @@ struct JSONParser {
 
     private mutating func parseValue() throws -> JSONNode {
         guard index < bytes.count else { throw error(.unexpectedEndOfInput) }
+        guard depth < Self.maximumDepth else { throw error(.nestingTooDeep) }
+        depth += 1
+        defer { depth -= 1 }
         switch bytes[index] {
         case UInt8(ascii: "{"): return try parseObject()
         case UInt8(ascii: "["): return try parseArray()

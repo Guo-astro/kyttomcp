@@ -12,6 +12,9 @@ public struct ServerDraft: Equatable, Sendable {
     public var args: [String]
     public var env: [EnvEntry]
     public var url: String
+    /// Values the existing server already has, used only for a key a target
+    /// file does not have yet. See `mergingSecrets(from:)`.
+    public var inheritedEnv: [String: String] = [:]
 
     public init(
         name: String = "",
@@ -43,22 +46,20 @@ public struct ServerDraft: Equatable, Sendable {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Fills in environment values the editor was never given.
+    /// Attaches the environment values the editor was never given.
     ///
     /// The UI only ever sees `{ key, hasValue }` — an API token does not cross
     /// the IPC boundary just because someone opened the edit form (§6). So a
-    /// value of `nil` coming back means "leave this one as it was", and the real
-    /// value is looked up here, natively, at the last moment.
+    /// value of `nil` coming back means "leave this one as it was", and that is
+    /// decided per file when splicing: each client keeps its own value, which
+    /// may differ from the row's. The row's values are only a fallback for a
+    /// file that does not have the key yet.
     public func mergingSecrets(from server: Server) -> ServerDraft {
-        let existing = Dictionary(
-            server.env.map { ($0.key, $0.value) },
+        var merged = self
+        merged.inheritedEnv = Dictionary(
+            server.env.compactMap { entry in entry.value.map { (entry.key, $0) } },
             uniquingKeysWith: { first, _ in first }
         )
-        var merged = self
-        merged.env = env.map { entry in
-            guard entry.value == nil else { return entry }
-            return EnvEntry(key: entry.key, value: existing[entry.key] ?? nil)
-        }
         return merged
     }
 
@@ -180,10 +181,10 @@ public struct ServerDraft: Equatable, Sendable {
             fields.append(.init("url", .string(url.trimmingCharacters(in: .whitespaces))))
         }
 
-        let realEnv = env.filter { !$0.key.trimmingCharacters(in: .whitespaces).isEmpty }
+        let realEnv = realEnvironment
         if !realEnv.isEmpty {
             fields.append(
-                .init("env", .object(realEnv.map { .init($0.key, .string($0.value ?? "")) }))
+                .init("env", .object(realEnv.map { .init($0.key, .string(valueForNewKey($0))) }))
             )
         }
 
@@ -207,7 +208,7 @@ public struct ServerDraft: Equatable, Sendable {
             command: isRemote ? nil : command.trimmingCharacters(in: .whitespaces),
             args: args,
             url: isRemote ? url.trimmingCharacters(in: .whitespaces) : nil,
-            env: env,
+            env: realEnvironment.map { EnvEntry(key: $0.key, value: valueForNewKey($0)) },
             enabled: enabled
         )
     }
@@ -301,6 +302,10 @@ extension ServerDraft {
         // it at all — including values that are not strings.
         let wanted = realEnvironment
         let envNode = try definition().node["env"]
+        let fileValues = Dictionary(
+            (envNode?.members ?? []).compactMap { member in member.value.stringValue.map { (member.key, $0) } },
+            uniquingKeysWith: { _, last in last }
+        )
         if let envMembers = envNode?.members {
             if wanted.isEmpty {
                 if !envMembers.isEmpty { try remove("env") }
@@ -318,12 +323,12 @@ extension ServerDraft {
                         guard let value = entry.value, present.value.stringValue != value else { continue }
                         try set(entry.key, JSONText.string(value), under: ["env"])
                     } else {
-                        try set(entry.key, JSONText.string(entry.value ?? ""), under: ["env"])
+                        try set(entry.key, JSONText.string(valueForNewKey(entry, fileValues: fileValues)), under: ["env"])
                     }
                 }
             }
         } else if !wanted.isEmpty {
-            try set("env", render(.object(wanted.map { .init($0.key, .string($0.value ?? "")) })))
+            try set("env", render(.object(wanted.map { .init($0.key, .string(valueForNewKey($0))) })))
         }
 
         return text
@@ -393,6 +398,10 @@ extension ServerDraft {
         }
 
         let wanted = realEnvironment
+        let tableValues = Dictionary(
+            (envTable?.pairs ?? []).compactMap { pair in pair.name.flatMap { name in pair.value.stringValue.map { (name, $0) } } },
+            uniquingKeysWith: { _, last in last }
+        )
         if let envTable {
             if wanted.isEmpty {
                 if !envTable.pairs.isEmpty { text = try TOMLDocument.parse(text).removingTable(at: envPath) }
@@ -410,7 +419,7 @@ extension ServerDraft {
                         guard let value = entry.value, pair.value.stringValue != value else { continue }
                         try set(entry.key, TOMLText.string(value), in: envPath)
                     } else {
-                        try set(entry.key, TOMLText.string(entry.value ?? ""), in: envPath)
+                        try set(entry.key, TOMLText.string(valueForNewKey(entry, fileValues: tableValues)), in: envPath)
                     }
                 }
             }
@@ -433,13 +442,17 @@ extension ServerDraft {
                     return pairs.last { $0.name == entry.key }?.value.stringValue == value
                 }
                 if !(sameKeys && sameValues) {
+                    let inlineValues = Dictionary(
+                        pairs.compactMap { pair in pair.name.flatMap { name in pair.value.stringValue.map { (name, $0) } } },
+                        uniquingKeysWith: { _, last in last }
+                    )
                     let spelled = wanted.map { entry -> String in
                         let kept = pairs.last { $0.name == entry.key }
                         let raw: String
                         if let kept, entry.value == nil || kept.value.stringValue == entry.value {
                             raw = current.slice(kept.value.span)
                         } else {
-                            raw = TOMLText.string(entry.value ?? "")
+                            raw = TOMLText.string(valueForNewKey(entry, fileValues: inlineValues))
                         }
                         return "\(TOMLText.key(entry.key)) = \(raw)"
                     }
@@ -451,7 +464,7 @@ extension ServerDraft {
             let current = try TOMLDocument.parse(text)
             guard let anchor = current.endOfTableContent(at: path) else { throw TOMLEditError.tableNotFound(path) }
             let lines = ["", "[\(TOMLText.path(envPath))]"]
-                + wanted.map { "\(TOMLText.key($0.key)) = \(TOMLText.string($0.value ?? ""))" }
+                + wanted.map { "\(TOMLText.key($0.key)) = \(TOMLText.string(valueForNewKey($0)))" }
             text = current.replacing(TOMLSpan(start: anchor, end: anchor), with: "\n" + lines.joined(separator: "\n"))
         }
 
@@ -462,8 +475,25 @@ extension ServerDraft {
     /// user's, and an edit leaves it alone.
     private static let describedJSONFields = ["command", "args", "url", "type", "env"]
 
+    /// The entries with a name, names trimmed: a pasted `"TOKEN "` is the
+    /// variable `TOKEN`, not a key no server will ever read.
     private var realEnvironment: [EnvEntry] {
-        env.filter { !$0.key.trimmingCharacters(in: .whitespaces).isEmpty }
+        env.compactMap { entry in
+            let key = entry.key.trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty else { return nil }
+            return EnvEntry(key: key, value: entry.value, previousKey: entry.previousKey?.trimmingCharacters(in: .whitespaces))
+        }
+    }
+
+    /// The value to write for a key the target does not have yet: the one typed,
+    /// else what the target or the server had under the entry's previous name
+    /// (a rename), else under this name. Never a blank over a known value.
+    private func valueForNewKey(_ entry: EnvEntry, fileValues: [String: String] = [:]) -> String {
+        if let value = entry.value { return value }
+        for key in [entry.previousKey, entry.key].compactMap({ $0 }) {
+            if let value = fileValues[key] ?? inheritedEnv[key] { return value }
+        }
+        return ""
     }
 
     private static func transport(of fields: ServerFields) -> Transport {

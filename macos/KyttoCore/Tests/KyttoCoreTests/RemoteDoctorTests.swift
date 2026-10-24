@@ -20,7 +20,9 @@ private final class RemoteFixture: @unchecked Sendable {
     static func reply(_ text: String = "", status: Int = 200, headers: [String: String] = [:]) -> RemoteHTTPTransport.Reply {
         .init(status: status, headers: ["content-type": "application/json"].merging(headers) { _, new in new }, body: Data(text.utf8))
     }
-    static let initialize = #"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{}},"serverInfo":{"name":"remote-fixture","version":"1"}}}"#
+    static let initialize = #"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"remote-fixture","version":"1"}}}"#
+    /// What a handshake-era TypeScript server answers a request without a session.
+    static let legacyRejection = reply(#"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}"#, status: 400)
     static let emptyTools = #"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#
 }
 
@@ -30,6 +32,7 @@ struct RemoteDoctorTests {
         let first = #"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","description":"Read","inputSchema": {"type":"object"},"annotations":{"readOnlyHint":true}}],"nextCursor":"two"}}"#
         let second = #"{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"write","inputSchema":{"type":"object"}}]}}"#
         let fixture = RemoteFixture([
+            RemoteFixture.legacyRejection,
             RemoteFixture.reply(RemoteFixture.initialize, headers: ["mcp-session-id": "session-secret"]),
             RemoteFixture.reply(status: 202), RemoteFixture.reply(first),
             RemoteFixture.reply(": heartbeat\r\n\r\nevent: message\r\ndata: " + second + "\r\n\r\n", headers: ["content-type": "text/event-stream"]),
@@ -40,21 +43,64 @@ struct RemoteDoctorTests {
         #expect(listing.tools[0].inputSchemaJSON == #"{"type":"object"}"#)
         #expect(listing.tools[0].annotations?.readOnlyHint == true)
         #expect(listing.serverName == "remote-fixture")
-        #expect(listing.negotiatedProtocolVersion == "2026-07-28")
-        #expect(fixture.requests.count == 5)
-        #expect(fixture.requests[0].value(forHTTPHeaderField: "MCP-Session-Id") == nil)
-        for request in fixture.requests.dropFirst() {
+        #expect(listing.negotiatedProtocolVersion == "2025-11-25")
+        #expect(fixture.requests.count == 6)
+        // The modern probe carries the 2026-07-28 metadata and no session.
+        #expect(fixture.requests[0].value(forHTTPHeaderField: "MCP-Protocol-Version") == "2026-07-28")
+        #expect(fixture.requests[0].value(forHTTPHeaderField: "Mcp-Method") == "server/discover")
+        #expect(fixture.requests[1].value(forHTTPHeaderField: "MCP-Session-Id") == nil)
+        #expect(fixture.requests[1].value(forHTTPHeaderField: "MCP-Protocol-Version") == nil)
+        for request in fixture.requests.dropFirst(2) {
             #expect(request.value(forHTTPHeaderField: "MCP-Session-Id") == "session-secret")
-            #expect(request.value(forHTTPHeaderField: "MCP-Protocol-Version") == "2026-07-28")
+            #expect(request.value(forHTTPHeaderField: "MCP-Protocol-Version") == "2025-11-25")
+            #expect(request.value(forHTTPHeaderField: "Mcp-Method") == nil)
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-secret")
         }
         #expect(fixture.requests.last?.httpMethod == "DELETE")
-        #expect(String(decoding: fixture.requests[3].httpBody!, as: UTF8.self).contains("two"))
+        #expect(String(decoding: fixture.requests[4].httpBody!, as: UTF8.self).contains("two"))
+    }
+
+    @Test func speaksTheModernRevisionWithoutAHandshake() throws {
+        let discover = #"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-remote","version":"3"}}}}"#
+        let tools = #"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}}"#
+        let fixture = RemoteFixture([RemoteFixture.reply(discover), RemoteFixture.reply(tools)])
+        let listing = try MCPHTTPClient(transport: fixture.transport).listTools(url: "https://mcp.example/mcp")
+        #expect(listing.negotiatedProtocolVersion == "2026-07-28")
+        #expect(listing.serverName == "modern-remote")
+        #expect(listing.tools.map(\.name) == ["read"])
+        #expect(fixture.requests.count == 2)
+        let list = fixture.requests[1]
+        #expect(list.value(forHTTPHeaderField: "Mcp-Method") == "tools/list")
+        #expect(list.value(forHTTPHeaderField: "MCP-Protocol-Version") == "2026-07-28")
+        #expect(String(decoding: list.httpBody!, as: UTF8.self).contains("io.modelcontextprotocol/protocolVersion"))
+    }
+
+    @Test func aModernVersionRefusalIsNotMistakenForAHandshakeServer() throws {
+        let refusal = #"{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"Unsupported","data":{"supported":["2027-01-01"],"requested":"2026-07-28"}}}"#
+        let fixture = RemoteFixture([RemoteFixture.reply(refusal, status: 400)])
+        #expect(throws: RemoteHTTPError.self) {
+            try MCPHTTPClient(transport: fixture.transport).listTools(url: "https://mcp.example/mcp")
+        }
+        #expect(fixture.requests.count == 1)
+    }
+
+    @Test func aLegacySSEEndpointIsUnsupportedNotFailed() throws {
+        let fixture = RemoteFixture([
+            RemoteFixture.reply(status: 405), RemoteFixture.reply(status: 405),
+            RemoteFixture.reply("event: endpoint\ndata: /messages?session=1\n\n", headers: ["content-type": "text/event-stream"]),
+        ])
+        let checker = HealthChecker(httpClient: MCPHTTPClient(transport: fixture.transport))
+        let server = Server(id: "remote", name: "remote", transport: .http, command: nil, args: [], env: [],
+                            url: "https://mcp.example/events", enabledIn: [:], origin: .configFile(.cursor),
+                            fingerprint: "test", isBundled: false, definitionSource: "{}")
+        let health = checker.check(server).health
+        #expect(health.status == .unsupported)
+        #expect(fixture.requests.last?.httpMethod == "GET")
     }
 
     @Test func refusesRepeatedCursorAndDoesNotReportPartialToolsAsPassed() throws {
         let fixture = RemoteFixture([
-            RemoteFixture.reply(RemoteFixture.initialize), RemoteFixture.reply(status: 202),
+            RemoteFixture.legacyRejection, RemoteFixture.reply(RemoteFixture.initialize), RemoteFixture.reply(status: 202),
             RemoteFixture.reply(#"{"jsonrpc":"2.0","id":2,"result":{"tools":[],"nextCursor":"same"}}"#),
             RemoteFixture.reply(#"{"jsonrpc":"2.0","id":3,"result":{"tools":[],"nextCursor":"same"}}"#),
         ])
@@ -88,7 +134,7 @@ struct RemoteDoctorTests {
 
     @Test func healthCheckMergesOAuthOverrideAndDoctorUsesRemoteOutcome() throws {
         let fixture = RemoteFixture([
-            RemoteFixture.reply(RemoteFixture.initialize), RemoteFixture.reply(status: 202),
+            RemoteFixture.legacyRejection, RemoteFixture.reply(RemoteFixture.initialize), RemoteFixture.reply(status: 202),
             RemoteFixture.reply(RemoteFixture.emptyTools),
         ])
         var server = Server(id: "remote", name: "remote", transport: .http, command: nil, args: [], env: [],
@@ -115,7 +161,7 @@ struct RemoteDoctorTests {
         let hugeTool: [String: Any] = ["name": "huge", "description": String(repeating: "abcdefghi", count: 200_000), "inputSchema": ["type": "object"]]
         let response = try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "id": 2, "result": ["tools": [hugeTool]]])
         let fixture = RemoteFixture([
-            RemoteFixture.reply(RemoteFixture.initialize), RemoteFixture.reply(status: 202),
+            RemoteFixture.legacyRejection, RemoteFixture.reply(RemoteFixture.initialize), RemoteFixture.reply(status: 202),
             .init(status: 200, headers: ["content-type": "application/json"], body: response),
         ])
         let checker = HealthChecker(timeout: 0.15, httpClient: MCPHTTPClient(transport: fixture.transport))
@@ -180,7 +226,7 @@ struct RemoteDoctorTests {
 struct RemoteOAuthTests {
     private let redirect = "app.kytto.oauth://callback"
     private var configuration: RemoteOAuthConfiguration {
-        .init(resourceURL: "https://mcp.example/mcp", issuer: "https://auth.example/tenant",
+        .init(resourceURL: "https://mcp.example/mcp", resource: nil, issuer: "https://auth.example/tenant",
               authorizationEndpoint: "https://auth.example/authorize", tokenEndpoint: "https://auth.example/token",
               registrationEndpoint: nil, scopes: ["read"], authorizationResponseIssuerSupported: true)
     }
@@ -203,6 +249,35 @@ struct RemoteOAuthTests {
         #expect(fixture.requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == nil })
         let bad = RemoteFixture([RemoteFixture.reply(resource), RemoteFixture.reply(auth.replacingOccurrences(of: #""issuer":"https://auth.example/tenant""#, with: #""issuer":"https://attacker.example""#))])
         #expect(throws: RemoteOAuthError.self) { try RemoteOAuthClient(transport: bad.transport).discover(resourceURL: "https://mcp.example/mcp", challenge: #"Bearer resource_metadata="https://mcp.example/meta""#) }
+    }
+
+    @Test func rootMetadataForTheOriginCoversAPathEndpoint() throws {
+        // Path-inserted metadata answers 401 from auth middleware; the root
+        // document describes the origin, which RFC 9728 allows.
+        let resource = #"{"resource":"https://mcp.example","authorization_servers":["https://auth.example"]}"#
+        let auth = #"{"issuer":"https://auth.example","authorization_endpoint":"https://auth.example/authorize","token_endpoint":"https://auth.example/token","code_challenge_methods_supported":["S256"]}"#
+        let fixture = RemoteFixture([RemoteFixture.reply(status: 401), RemoteFixture.reply(resource), RemoteFixture.reply(auth)])
+        let config = try RemoteOAuthClient(transport: fixture.transport).discover(resourceURL: "https://mcp.example/mcp/", challenge: "Bearer")
+        #expect(config.resourceURL == "https://mcp.example/mcp")
+        #expect(config.resource == "https://mcp.example")
+        #expect(fixture.requests.map { $0.url!.path } == ["/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server"])
+        let pending = try RemoteOAuthClient(transport: fixture.transport).prepareAuthorization(configuration: config, clientID: "c", redirectURI: redirect)
+        let query = URLComponents(url: pending.authorizationURL, resolvingAgainstBaseURL: false)!.queryItems!
+        #expect(query.first { $0.name == "resource" }?.value == "https://mcp.example")
+        #expect(!RemoteOAuthClient.resource("https://mcp.example/other", covers: URL(string: "https://mcp.example/mcp")!))
+        #expect(!RemoteOAuthClient.resource("https://mcp.example/mc", covers: URL(string: "https://mcp.example/mcp")!))
+        #expect(!RemoteOAuthClient.resource("https://other.example", covers: URL(string: "https://mcp.example/mcp")!))
+    }
+
+    @Test func acceptsGrantedScopesAndStringExpiry() throws {
+        let fixture = RemoteFixture([
+            RemoteFixture.reply(#"{"access_token":"a","token_type":"bearer","expires_in":"3600","scope":"read default"}"#),
+        ])
+        let client = RemoteOAuthClient(transport: fixture.transport)
+        let pending = try client.prepareAuthorization(configuration: configuration, clientID: "public-client", redirectURI: redirect)
+        let credential = try client.exchange(pending: pending, callbackURL: callback(pending))
+        #expect(credential.scopes == ["default", "read"])
+        #expect(credential.expiresAt != nil)
     }
 
     @Test func pkceBindsCallbackIssuerResourceAndRefreshTokens() throws {

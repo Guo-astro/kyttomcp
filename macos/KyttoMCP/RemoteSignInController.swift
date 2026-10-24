@@ -18,8 +18,11 @@ final class RemoteSignInController: NSObject, ASWebAuthenticationPresentationCon
         defer { signingIn = false }
         let resource = try model.remoteServerURL(serverID: serverID)
         let client = RemoteOAuthClient()
+        // Signing in again with a credential on file is how a server that
+        // answered 403 insufficient_scope gets the scope it asked for.
+        let saved = model.remoteAuthorizationContext(serverID: serverID)
         let configuration = try await Task.detached(priority: .userInitiated) {
-            try client.discover(resourceURL: resource)
+            try client.discover(resourceURL: resource, authorization: saved?.headers, previousScopes: saved?.scopes ?? [])
         }.value
         let consent = NSAlert()
         consent.messageText = "Sign in to remote MCP server"

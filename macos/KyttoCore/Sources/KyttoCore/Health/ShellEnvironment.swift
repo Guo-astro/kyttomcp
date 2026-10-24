@@ -52,7 +52,7 @@ public struct ShellEnvironment: Sendable {
 
         // `-i` matters: most people set PATH in `.zshrc`, which a non-interactive
         // shell never reads.
-        guard let output = runCapturing(shell, ["-ilc", "command printf %s \"$PATH\""]),
+        guard let output = runCapturing(shell, ["-ilc", "command printf '%s\\n\(endMarker)\\n' \"$PATH\""]),
               !output.isEmpty
         else {
             return ShellEnvironment(path: fallback(home: home), resolvedFromLoginShell: false)
@@ -79,6 +79,12 @@ public struct ShellEnvironment: Sendable {
         ([home.appending(path: ".local/bin").path] + fallbackPath).joined(separator: ":")
     }
 
+    /// Printed after PATH, so the answer is complete when it appears. Waiting
+    /// for end-of-file instead would wait on any daemon the rc files started
+    /// (gitstatusd, an update check sent to the background), which inherits
+    /// the pipe and keeps it open long after the shell itself is done.
+    private static let endMarker = "__KYTTO_PATH_END__"
+
     private static func runCapturing(_ executable: String, _ arguments: [String]) -> String? {
         let process = Process()
         process.executableURL = URL(filePath: executable)
@@ -90,6 +96,9 @@ public struct ShellEnvironment: Sendable {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        // Never the caller's stdin: inside the gateway helper that is the MCP
+        // client's pipe, and an rc file that reads input would eat its messages.
+        process.standardInput = FileHandle.nullDevice
 
         do {
             try process.run()
@@ -97,27 +106,26 @@ public struct ShellEnvironment: Sendable {
             return nil
         }
 
-        let deadline = Date().addingTimeInterval(probeTimeout)
-        var data = Data()
+        let output = CapturedOutput()
+        let finished = DispatchSemaphore(value: 0)
         let handle = pipe.fileHandleForReading
-
+        let marker = Data(endMarker.utf8)
         // Read on a background thread so a shell that never exits cannot pin us.
-        let done = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
-            data = handle.readDataToEndOfFile()
-            done.signal()
+            while true {
+                let chunk = handle.availableData
+                if output.append(chunk, endsWith: marker) || chunk.isEmpty { break }
+            }
+            finished.signal()
         }
 
-        if done.wait(timeout: .now() + probeTimeout) == .timedOut {
-            process.terminate()
-            _ = done.wait(timeout: .now() + 1)
-        }
-        while process.isRunning, Date() < deadline {
-            usleep(20_000)
-        }
+        _ = finished.wait(timeout: .now() + probeTimeout)
         if process.isRunning { process.terminate() }
 
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let captured = output.snapshot
+        guard let text = String(data: captured, encoding: .utf8),
+              let range = text.range(of: endMarker) else { return nil }
+        return String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The environment an MCP server should be launched with: this process's own,
@@ -128,4 +136,20 @@ public struct ShellEnvironment: Sendable {
         for (key, value) in extra { result[key] = value }
         return result
     }
+}
+
+/// Bytes a reader thread appends while the caller may already be reading them.
+private final class CapturedOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    /// Appends, and says whether `marker` has now arrived.
+    func append(_ chunk: Data, endsWith marker: Data) -> Bool {
+        lock.withLock {
+            data.append(chunk)
+            return data.range(of: marker) != nil
+        }
+    }
+
+    var snapshot: Data { lock.withLock { data } }
 }

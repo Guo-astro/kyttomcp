@@ -103,13 +103,20 @@ public final class PortableSetupService: @unchecked Sendable {
                           server.enabledIn[clientID] != .absent
                     else { omitted += 1; continue }
                     let label = "\(server.name) (\(clientID.rawValue))"
+                    let requirementsBefore = requirements.count
                     // Only exact, known launcher names and harmless flags are
                     // public. A generic argument may itself be a bearer token,
                     // even when no flag says "token" (§6.5).
                     let command: PortableValue? = definition.command.map {
                         Self.safeCommands.contains($0) ? .literal($0) : required("\(label): command", .path)
                     }
-                    let packageIndex = Self.safePackageIndex(command: definition.command, args: definition.args)
+                    // The package is public only beside a public launcher. With the
+                    // launcher itself an input (`/opt/homebrew/bin/npx`), import
+                    // cannot tell which argument names a package, so it is an
+                    // input too — otherwise the file fails its own validation.
+                    let packageIndex = definition.command.map(Self.safeCommands.contains) == true
+                        ? Self.safePackageIndex(command: definition.command, args: definition.args)
+                        : nil
                     let args = definition.args.enumerated().map { index, argument in
                         Self.safeArguments.contains(argument) || index == packageIndex
                             ? PortableValue.literal(argument)
@@ -122,7 +129,7 @@ public final class PortableSetupService: @unchecked Sendable {
                         headers[key] = required("\(label): header \(key)", .secret)
                     }
                     let cwd = definition.workingDirectory ?? Self.workingDirectory(in: definition.definitionSource, clientID: clientID)
-                    exported.append(PortableServer(
+                    let copy = PortableServer(
                         name: server.name, sourceClient: clientID,
                         wasEnabled: server.enabledIn[clientID] == .enabled,
                         transport: definition.transport, command: command,
@@ -131,7 +138,22 @@ public final class PortableSetupService: @unchecked Sendable {
                         // in userinfo, query, fragments *or path segments*.
                         url: definition.url.map { _ in required("\(label): remote URL", .secret) },
                         workingDirectory: cwd.map { _ in required("\(label): working directory", .path) }
-                    ))
+                    )
+                    // One copy the format cannot express (a name with a space, a
+                    // stdio entry that also has a url) is left out and counted,
+                    // rather than failing the export of everything else.
+                    let ownRequirements = Array(requirements[requirementsBefore...])
+                    do {
+                        try Self.validate(PortableSetup(
+                            format: "kytto-portable-setup", version: PortableSetup.currentVersion,
+                            servers: [copy], profiles: [], requirements: ownRequirements, reviewedContracts: []
+                        ))
+                    } catch {
+                        requirements.removeLast(requirements.count - requirementsBefore)
+                        omitted += 1
+                        continue
+                    }
+                    exported.append(copy)
                 }
             }
             let names = Set(exported.map { Server.identity(for: $0.name) })
@@ -167,11 +189,15 @@ public final class PortableSetupService: @unchecked Sendable {
 
     /// All `values` come from native controls. Target paths come exclusively
     /// from the registry/current local overrides, never from the imported file.
+    /// - Parameter existing: the servers discovered now. A name a target client
+    ///   already has by another route — an extension, a plugin — is a conflict
+    ///   too, not just one in its config file.
     public func preview(
         file: URL,
         targetClients: [ClientID],
         values: [String: String] = [:],
-        enableImportedServers: Bool = false
+        enableImportedServers: Bool = false,
+        existing: [Server] = []
     ) throws -> PortableImportPreview {
         try MutationCoordinator.sync {
             let read = try Self.read(file)
@@ -182,10 +208,14 @@ public final class PortableSetupService: @unchecked Sendable {
             else { throw PortableSetupError.invalid("choose distinct writable target clients") }
             let knownInputs = Set(setup.requirements.map(\.id))
             guard Set(values.keys).isSubset(of: knownInputs) else { throw PortableSetupError.invalid("unknown required input") }
-            for requirement in setup.requirements {
+            // Only the copies that will actually be written need their inputs:
+            // importing into Cursor alone must not demand the Codex copy's secrets.
+            let neededInputs = Set(Self.selectedCopies(setup, for: targetClients).flatMap(Self.requirementIDs))
+            let described = Dictionary(uniqueKeysWithValues: Self.describedRequirements(setup).map { ($0.id, $0.label) })
+            for requirement in setup.requirements where neededInputs.contains(requirement.id) {
                 guard let value = values[requirement.id], !value.isEmpty,
                       value.utf8.count <= 16_384, !value.contains("\0")
-                else { throw PortableSetupError.missingInput(requirement.label) }
+                else { throw PortableSetupError.missingInput(described[requirement.id] ?? requirement.label) }
                 if requirement.kind == .path {
                     // Relative paths would silently change meaning on another
                     // machine. Native path mapping must resolve them first.
@@ -228,7 +258,8 @@ public final class PortableSetupService: @unchecked Sendable {
                     case .json: exists = try JSONDocument.parse(text).serverKey(for: id, under: source.serversKey) != nil
                     case .toml: exists = try TOMLDocument.parse(text).serverName(for: id, under: source.serversKey) != nil
                     }
-                    guard !exists else { throw PortableSetupError.conflict("\(copy.name) in \(clientID.rawValue)") }
+                    let elsewhere = existing.contains { $0.id == id && ($0.enabledIn[clientID] ?? .absent) != .absent }
+                    guard !exists, !elsewhere else { throw PortableSetupError.conflict("\(copy.name) in \(clientID.rawValue)") }
                     let draft = ServerDraft(
                         name: copy.name, transport: copy.transport,
                         command: copy.command.map(resolve) ?? "", args: copy.args.map(resolve),
@@ -252,6 +283,12 @@ public final class PortableSetupService: @unchecked Sendable {
                     }
                 }
                 if text != (try Self.text(snapshot, format: source.format)) {
+                    // Checked now, as the write will check it, so a preview never
+                    // promises an import that apply then refuses.
+                    switch source.format {
+                    case .json: _ = try JSONDocument.parse(text)
+                    case .toml: _ = try TOMLDocument.parse(text)
+                    }
                     edits.append(FileEdit(snapshot: snapshot, clientID: clientID, format: source.format, updated: text))
                 }
                 if case .denyList(let denyFile, let key, let nameField) = source.enablement, !denied.isEmpty {
@@ -291,7 +328,7 @@ public final class PortableSetupService: @unchecked Sendable {
                 ? "Only copies enabled in the exported setup will be enabled; disabled copies remain disabled."
                 : "All imported servers start switched off. Review their commands before enabling them.")
             let preview = PortableImportPreview(
-                id: id, serverNames: grouped.keys.sorted(), profileNames: setup.profiles.map(\.name),
+                id: id, serverNames: grouped.values.compactMap(\.first?.name).sorted(), profileNames: setup.profiles.map(\.name),
                 targetClients: targetClients, pathDisplays: edits.map { $0.snapshot.display },
                 pendingContractCount: setup.reviewedContracts.count, warnings: warnings, enabled: enableImportedServers
             )
@@ -550,7 +587,10 @@ public final class PortableSetupService: @unchecked Sendable {
                 }
             }
         }
-        guard !protected.contains(where: { destination == $0 || destination.hasPrefix($0 + "/") }) else {
+        // macOS volumes are usually case-insensitive: `~/.cursor/MCP.json` is
+        // the live config, whatever its spelling.
+        let lowered = destination.lowercased()
+        guard !protected.map({ $0.lowercased() }).contains(where: { lowered == $0 || lowered.hasPrefix($0 + "/") }) else {
             throw PortableSetupError.invalid("choose an export file outside client configuration and Kytto's data folders")
         }
     }
@@ -597,9 +637,9 @@ public final class PortableSetupService: @unchecked Sendable {
             }
             return text
         case .toml:
-            // Codex does not distinguish legacy SSE in the same way as JSON
-            // clients. Refuse rather than silently change the transport.
-            guard copy.transport != .sse else { throw PortableSetupError.invalid("legacy SSE cannot be imported into Codex") }
+            // Codex tells transports apart by key, not by a `type`: a remote
+            // server is a `url`, as `ServerAuthoring` writes it too. A Codex URL
+            // that merely ends in /sse was inferred as SSE on export.
             var text = draft.tomlBlock(under: key, enabled: enabled ? nil : false)
             // Insert scalar cwd before the optional env subtable.
             if let cwd = copy.workingDirectory {
@@ -689,16 +729,55 @@ public final class PortableSetupService: @unchecked Sendable {
         return nil
     }
 
+    /// The copy each target client receives: its own, else the first exported.
+    private static func selectedCopies(_ setup: PortableSetup, for targets: [ClientID]) -> [PortableServer] {
+        let grouped = Dictionary(grouping: setup.servers, by: { Server.identity(for: $0.name) })
+        return targets.flatMap { client in
+            grouped.values.compactMap { copies in copies.first { $0.sourceClient == client } ?? copies.first }
+        }
+    }
+
+    private static func requirementIDs(_ server: PortableServer) -> [String] {
+        ([server.command, server.url, server.workingDirectory] + server.args.map(Optional.some)
+            + server.environment.values.map(Optional.some) + server.headers.values.map(Optional.some))
+            .compactMap { $0?.requirementID }
+    }
+
     private static func summary(_ setup: PortableSetup, omitted: Int = 0) -> PortableSetupSummary {
         var warnings = ["Environment/header values, arbitrary arguments, URLs and local paths require native input. Unknown fields and bundled plugins are excluded."]
-        if omitted > 0 { warnings.append("\(omitted) bundled or read-only definitions were excluded.") }
+        if omitted > 0 { warnings.append("\(omitted) \(omitted == 1 ? "definition was" : "definitions were") excluded: bundled, read-only, or not expressible in a setup file.") }
         if !setup.reviewedContracts.isEmpty { warnings.append("Reviewed contracts travel as fingerprints only and remain pending review after import.") }
         let groups = Dictionary(grouping: setup.servers, by: { Server.identity(for: $0.name) })
         if groups.values.contains(where: { $0.count > 1 }) {
             warnings.append("Each destination uses its original client's copy when available; otherwise the first exported copy is used.")
         }
-        return PortableSetupSummary(serverNames: groups.keys.sorted(), profileNames: setup.profiles.map(\.name),
-                                    requirements: setup.requirements, pendingContractCount: setup.reviewedContracts.count, warnings: warnings)
+        return PortableSetupSummary(serverNames: groups.values.compactMap(\.first?.name).sorted(), profileNames: setup.profiles.map(\.name),
+                                    requirements: describedRequirements(setup), pendingContractCount: setup.reviewedContracts.count, warnings: warnings)
+    }
+
+    /// Requirement labels written from the file's structure, never its text.
+    ///
+    /// A shared setup file is untrusted: its own label could ask for "your
+    /// GitHub token" on an input that feeds someone else's package. What the
+    /// user is shown is where the value goes — which server, which field, and
+    /// the public launcher it is handed to.
+    static func describedRequirements(_ setup: PortableSetup) -> [PortableRequirement] {
+        var labels: [String: String] = [:]
+        for server in setup.servers {
+            let launcher = ([server.command?.literal] + server.args.map(\.literal)).compactMap { $0 }.joined(separator: " ")
+            let feeds = launcher.isEmpty ? "" : " — for \(launcher)"
+            let base = "\(server.name) (\(server.sourceClient.rawValue))"
+            func note(_ value: PortableValue?, _ field: String) {
+                if let id = value?.requirementID { labels[id] = "\(base): \(field)\(feeds)" }
+            }
+            note(server.command, "command")
+            for (index, argument) in server.args.enumerated() { note(argument, "argument \(index + 1)") }
+            for (key, value) in server.environment { note(value, "environment \(key)") }
+            for (key, value) in server.headers { note(value, "header \(key)") }
+            note(server.url, "remote URL")
+            note(server.workingDirectory, "working directory")
+        }
+        return setup.requirements.map { PortableRequirement(id: $0.id, label: labels[$0.id] ?? "Unused input", kind: $0.kind) }
     }
 
     // MARK: - Untrusted file validation

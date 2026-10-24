@@ -51,12 +51,14 @@ private func relay(
     observer: GatewayMessageObserver? = nil,
     direction: GatewayDirection? = nil,
     closeDestinationAtEOF: Bool = false,
-    finished: DispatchSemaphore? = nil
+    finished: DispatchSemaphore? = nil,
+    afterEOF: (@Sendable () -> Void)? = nil
 ) {
     Thread.detachNewThread {
         defer {
             if closeDestinationAtEOF { destination.close() }
             finished?.signal()
+            afterEOF?()
         }
         do {
             while let data = try source.read(upToCount: 64 * 1024), !data.isEmpty {
@@ -78,17 +80,23 @@ private func relayMessages(
     to destination: SynchronizedWriter,
     observer: GatewayMessageObserver,
     direction: GatewayDirection,
-    transform: @escaping (Data) -> Data?,
+    transform: @escaping @Sendable (Data) -> Data?,
     closeDestinationAtEOF: Bool = false,
-    finished: DispatchSemaphore? = nil
+    finished: DispatchSemaphore? = nil,
+    afterEOF: (@Sendable () -> Void)? = nil
 ) {
     Thread.detachNewThread {
         var framer = GatewayLineFramer()
         defer {
-            // A trailing partial message still belongs to the other side.
-            framer.flush { destination.write($0) }
+            // A trailing partial message still belongs to the other side, and
+            // still goes through the filter: servers that read line by line
+            // act on a final line without its newline too.
+            framer.flush { tail in
+                if let forwarded = transform(tail) { destination.write(forwarded) }
+            }
             if closeDestinationAtEOF { destination.close() }
             finished?.signal()
+            afterEOF?()
         }
         do {
             while let data = try source.read(upToCount: 64 * 1024), !data.isEmpty {
@@ -140,12 +148,10 @@ do {
         eventLogURL = invocation.eventLogURL
     }
 
-    let sink: any GatewayEventSinking
-    if let url = eventLogURL {
-        sink = try JSONLinesGatewayEventSink(url: url)
-    } else {
-        sink = NullGatewayEventSink()
-    }
+    // Losing the event log must not interrupt the client's session
+    // (docs/gateway.md): if it cannot be opened, the session runs unlogged.
+    let sink: any GatewayEventSinking = eventLogURL
+        .flatMap { try? JSONLinesGatewayEventSink(url: $0) } ?? NullGatewayEventSink()
 
     let observer = GatewayMessageObserver(
         serverID: serverID,
@@ -164,16 +170,29 @@ do {
     observer.start()
 
     let terminationQueue = DispatchQueue(label: "app.kytto.gateway.signals")
+    /// SIGTERM to the upstream's group, then SIGKILL for anything that ignored it.
+    let shutDownUpstream: @Sendable (TimeInterval) -> Void = { delay in
+        terminationQueue.asyncAfter(deadline: .now() + delay) {
+            process.terminateGroup()
+            terminationQueue.asyncAfter(deadline: .now() + 2) {
+                process.terminateGroup(signal: SIGKILL)
+            }
+        }
+    }
     var signalSources: [DispatchSourceSignal] = []
     for watchedSignal in [SIGINT, SIGTERM, SIGHUP] {
         signal(watchedSignal, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: watchedSignal, queue: terminationQueue)
         source.setEventHandler {
-            process.terminateGroup()
+            shutDownUpstream(0)
         }
         source.resume()
         signalSources.append(source)
     }
+    // The client closing its end (a crash, a force quit) is the only notice the
+    // helper gets. The upstream's stdin is closed with it; a server with live
+    // handles that does not exit on that gets a grace period, then the signals.
+    let clientGone: @Sendable () -> Void = { shutDownUpstream(5) }
 
     let outputFinished = DispatchSemaphore(value: 0)
     let errorFinished = DispatchSemaphore(value: 0)
@@ -199,7 +218,8 @@ do {
                     return nil
                 }
             },
-            closeDestinationAtEOF: true
+            closeDestinationAtEOF: true,
+            afterEOF: clientGone
         )
         relayMessages(
             from: process.standardOutput,
@@ -215,7 +235,8 @@ do {
             to: toServer,
             observer: observer,
             direction: .clientToServer,
-            closeDestinationAtEOF: true
+            closeDestinationAtEOF: true,
+            afterEOF: clientGone
         )
         relay(
             from: process.standardOutput,
@@ -233,6 +254,8 @@ do {
     )
 
     let exitCode = process.waitUntilExit()
+    // Whatever the upstream started outlives it unless its group is told too.
+    process.terminateGroup()
     _ = outputFinished.wait(timeout: .now() + 1)
     _ = errorFinished.wait(timeout: .now() + 1)
     observer.finish(exitCode: exitCode)

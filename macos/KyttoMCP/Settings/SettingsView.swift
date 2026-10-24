@@ -43,9 +43,14 @@ struct SettingsView: View {
         // Closing the window cancels the debounce above; without this the last
         // change made just before closing would look applied and be lost.
         .onDisappear { flush() }
-        .alert("Could not save", isPresented: .constant(error != nil)) {
+        // A real binding, so however the alert is dismissed the error clears;
+        // a constant one let it reappear on the next render.
+        .alert("Could not save", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button("OK") { error = nil }
-            Button("Report a bug…") { NSWorkspace.shared.open(SupportLinks.bugReport) }
+            Button("Report a bug…") {
+                error = nil
+                NSWorkspace.shared.open(SupportLinks.bugReport)
+            }
         } message: {
             Text(error ?? "")
         }

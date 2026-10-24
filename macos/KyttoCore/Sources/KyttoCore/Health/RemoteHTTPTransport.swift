@@ -24,6 +24,10 @@ public struct RemoteHTTPTransport: Sendable {
 
     init(sender: @escaping Sender) { self.sender = sender }
 
+    /// A `responseID` meaning "return as soon as the first complete SSE event
+    /// has arrived", for probing a stream that never ends on its own.
+    static let firstEventOnly = -1
+
     func send(_ request: URLRequest, deadline: Date, limit: Int, responseID: Int? = nil) throws -> Reply {
         guard Date() < deadline else { throw RemoteHTTPError.timedOut }
         let reply = try sender(request, deadline, limit, responseID)
@@ -73,6 +77,9 @@ public struct RemoteHTTPTransport: Sendable {
 
 public enum RemoteHTTPError: Error, LocalizedError, Sendable {
     case invalidEndpoint, invalidHeaders, unresolvedCredential, timedOut, unavailable, responseTooLarge
+    /// The endpoint speaks the deprecated HTTP+SSE transport, which Kytto does
+    /// not inspect — not a broken server.
+    case legacySSE
     case httpStatus(Int)
     case authorizationRequired(challenge: String?)
     case protocolFailure(String)
@@ -85,6 +92,7 @@ public enum RemoteHTTPError: Error, LocalizedError, Sendable {
         case .timedOut: "The remote server did not finish the check within the time limit."
         case .unavailable: "The remote server could not be reached. Check its address, network connection and TLS certificate."
         case .responseTooLarge: "The remote response exceeded Kytto's inspection size limit."
+        case .legacySSE: "This endpoint uses the legacy HTTP+SSE transport, which Kytto does not inspect. It is deprecated; the server's Streamable HTTP endpoint can be checked instead."
         case .httpStatus(let status): "The remote server returned HTTP \(status)."
         case .authorizationRequired: "The remote server requires authorization. Sign in or check its configured credentials and permissions."
         case .protocolFailure(let detail): "The remote server did not speak MCP as expected: \(detail)"
@@ -94,7 +102,8 @@ public enum RemoteHTTPError: Error, LocalizedError, Sendable {
 
 private final class RemoteHTTPTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let condition = NSCondition()
-    private let limit: Int
+    private var limit: Int
+    private static let errorBodyLimit = 16 * 1024
     private let responseID: Int?
     private var reply: RemoteHTTPTransport.Reply?
     private var bytes = Data()
@@ -143,7 +152,10 @@ private final class RemoteHTTPTransfer: NSObject, URLSessionDataDelegate, @unche
         if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
             completionHandler(.performDefaultHandling, nil)
         } else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
+            // A 401 that also offers Basic or Negotiate must still arrive as a
+            // 401, so its Bearer challenge can be read; Kytto offers no
+            // credential for those schemes (credential storage is off).
+            completionHandler(.rejectProtectionSpace, nil)
         }
     }
 
@@ -157,7 +169,12 @@ private final class RemoteHTTPTransfer: NSObject, URLSessionDataDelegate, @unche
         var headers: [String: String] = [:]
         for (key, value) in http.allHeaderFields { headers[String(describing: key).lowercased()] = String(describing: value) }
         reply = .init(status: http.statusCode, headers: headers, body: Data())
-        if http.statusCode >= 300 {
+        if (400..<500).contains(http.statusCode) {
+            // A short error body says which era the server speaks (a modern
+            // JSON-RPC error code); read a little of it and no more.
+            limit = min(limit, Self.errorBodyLimit)
+            completionHandler(.allow)
+        } else if http.statusCode >= 300 {
             completed = true; condition.broadcast(); completionHandler(.cancel)
         } else if response.expectedContentLength > Int64(limit) {
             failure = .responseTooLarge; condition.broadcast(); completionHandler(.cancel)
@@ -169,9 +186,18 @@ private final class RemoteHTTPTransfer: NSObject, URLSessionDataDelegate, @unche
         defer { condition.unlock() }
         guard !completed, failure == nil else { return }
         guard bytes.count <= limit - data.count else {
-            failure = .responseTooLarge; condition.broadcast(); dataTask.cancel(); return
+            if let status = reply?.status, status >= 400 {
+                completed = true
+            } else {
+                failure = .responseTooLarge
+            }
+            condition.broadcast(); dataTask.cancel(); return
         }
         bytes.append(data)
+        if responseID == RemoteHTTPTransport.firstEventOnly,
+           String(decoding: bytes, as: UTF8.self).replacingOccurrences(of: "\r\n", with: "\n").contains("\n\n") {
+            completed = true; condition.broadcast(); dataTask.cancel(); return
+        }
         if let responseID, reply?.header("content-type")?.lowercased().hasPrefix("text/event-stream") == true,
            MCPHTTPClient.sseMessages(bytes).contains(where: { message in
                guard let document = RemoteHTTPTransport.document(message) else { return false }

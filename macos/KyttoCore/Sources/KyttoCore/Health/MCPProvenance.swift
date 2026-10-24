@@ -75,6 +75,7 @@ public enum MCPProvenanceResolver {
                 kind: kind,
                 packageName: package,
                 sourceURL: packageURL(kind: kind, package: package),
+                installedVersion: pinnedVersion(command: command, args: server.args),
                 confidence: "inferred"
             )
         }
@@ -87,6 +88,18 @@ public enum MCPProvenanceResolver {
         }
 
         return MCPProvenance(kind: .unknown)
+    }
+
+    /// The exact release a runner launch asks for, if it asks for one. This,
+    /// not the server's self-reported `serverInfo.version`, is what a registry
+    /// release can be compared with: `serverInfo` names whatever the author
+    /// typed and often has nothing to do with the package version.
+    static func pinnedVersion(command: String, args: [String]) -> String? {
+        guard let launch = PackageLaunch.parse(command: command, args: args),
+              let requested = launch.requestedVersion,
+              PackageLaunch.isExactVersion(requested, ecosystem: launch.ecosystem) else { return nil }
+        let trimmed = requested.drop { $0 == "=" || $0 == "v" }
+        return trimmed.isEmpty ? nil : String(trimmed)
     }
 
     public static func maintenanceState(

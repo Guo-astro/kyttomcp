@@ -52,7 +52,18 @@ export function on(event, handler) {
 // The native side calls this through evaluateJavaScript.
 globalThis.__kytto = {
   emit(event, payload) {
-    for (const handler of listeners.get(event) ?? []) handler(payload);
+    for (const handler of listeners.get(event) ?? []) {
+      try {
+        handler(payload);
+      } catch (error) {
+        // Thrown here, the error would go to evaluateJavaScript's completion
+        // and nowhere else, leaving a half-rendered window. Rethrown from a
+        // task, it reaches the page's error handler and its recovery screen.
+        setTimeout(() => {
+          throw error;
+        });
+      }
+    }
   },
 };
 

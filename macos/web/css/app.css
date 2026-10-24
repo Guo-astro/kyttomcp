@@ -55,11 +55,11 @@
      for an action, and the action is a browser away. */
   --auth: light-dark(#0969da, #58a6ff);
 
-  --shadow-sheet: light-dark(
-    0 24px 56px -16px rgb(0 0 0 / 25%),
-    0 32px 64px -16px rgb(0 0 0 / 65%)
-  ),
-  light-dark(0 2px 8px rgb(0 0 0 / 8%), 0 2px 8px rgb(0 0 0 / 35%));
+  /* light-dark() takes colours only; a whole shadow list inside it is an
+     invalid value, and the sheet silently lost its shadow. */
+  --shadow-sheet:
+    0 24px 56px -16px light-dark(rgb(0 0 0 / 25%), rgb(0 0 0 / 65%)),
+    0 2px 8px light-dark(rgb(0 0 0 / 8%), rgb(0 0 0 / 35%));
   --scrim: light-dark(rgb(0 0 0 / 20%), rgb(0 0 0 / 45%));
   --skeleton: light-dark(rgb(0 0 0 / 5%), rgb(255 255 255 / 6%));
   --skeleton-sheen: light-dark(rgb(0 0 0 / 9%), rgb(255 255 255 / 12%));
@@ -181,9 +181,17 @@ img {
 
 .side-resize:hover::before,
 .side-resize:focus-visible::before,
-.side-resize.dragging::before {
+.side-resize.dragging::before,
+.resizing-sidebar .side-resize::before {
   width: 2px;
   background: var(--hairline-strong);
+}
+
+/* The drag is tracked on the window, so the cursor and selection follow it
+   there too rather than flickering whenever the pointer leaves the handle. */
+.resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .side-resize:focus-visible {
@@ -421,6 +429,9 @@ img {
 
 .side-disclosure > span:not(.side-count) {
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .side-disclosure .side-count {
@@ -1708,6 +1719,10 @@ th.col-client.idle .app-icon {
   align-items: center;
   justify-content: center;
   text-decoration: none;
+  /* Inside a muted placeholder it would otherwise inherit the muted grey and
+     read as disabled next to "Try again". */
+  color: var(--text);
+  opacity: 1;
 }
 
 .support-actions {
@@ -4065,9 +4080,10 @@ body[data-stubbed='true'] .statusbar::after {
   }
 }
 
-/* Readable model contract changes. Long schemas stay inside their column. */
-.contract-change { flex-wrap: wrap; }
-.contract-field { flex-basis: 100%; min-width: 0; margin-top: 10px; }
+/* Readable model contract changes. Long schemas stay inside their column. The
+   field spans the whole row of the grid above it, and reads in body colour:
+   only the change's own summary carries the red or amber. */
+.contract-field { grid-column: 1 / -1; min-width: 0; margin-top: 10px; color: var(--text); }
 .contract-path { display: block; overflow-wrap: anywhere; font-size: 11px; }
 .contract-values { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 6px; }
 .contract-before, .contract-after { min-width: 0; padding: 8px; border: 1px solid var(--hairline); border-radius: 6px; }
@@ -4216,7 +4232,7 @@ body[data-stubbed='true'] .statusbar::after {
   font-size: 15px;
   font-weight: 600;
 }
-.inspector-header .button { padding: 5px 7px; font-size: 10px; }
+.inspector-header .button { flex: 0 0 auto; }
 .inspector-body { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; min-height: 0; padding: 14px; }
 .inspector-body .detail-section { margin-top: 18px; }
 .inspector-body .detail-section h3 { font-size: 12px; }
@@ -4231,6 +4247,8 @@ body[data-stubbed='true'] .statusbar::after {
 .inspector-body .clients-table .client-action { display: flex; flex-wrap: wrap; gap: 5px; }
 .inspector-body .clients-table .client-state { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .auth-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.auth-actions + .field-hint { margin-bottom: 12px; }
+.field-hint.warning { color: var(--warn); }
 .inspector-footer { display: flex; align-items: center; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--hairline); background: var(--bg-raised); }
 .inspector-empty { margin: auto; padding: 32px 24px; max-width: 330px; }
 .inspector-empty h2 { font-size: 17px; margin: 6px 0; }
@@ -4240,8 +4258,11 @@ body[data-stubbed='true'] .statusbar::after {
 
 .matrix tbody tr.selected-server > td { background-color: color-mix(in srgb, AccentColor 7%, var(--bg-elevated)); }
 .matrix tbody tr.selected-server .col-server { box-shadow: inset 3px 0 AccentColor; }
-.server-meta { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 3px; font-size: 10px; color: var(--text-muted); }
-.server-source-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+/* Indented like the command line above it, past the status dot, and kept to
+   one line so every row is the same height. */
+.server-meta { display: flex; flex-wrap: nowrap; gap: 3px 8px; min-width: 0; margin-top: 3px; margin-left: 15px; font-size: 10px; color: var(--text-muted); }
+.server-meta > * { flex: 0 0 auto; white-space: nowrap; }
+.server-meta > .server-source-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .server-health-label.ok { color: var(--ok); }
 .server-health-label.fail { color: var(--fail); }
 .server-health-label.auth { color: var(--auth); }
@@ -4253,11 +4274,18 @@ body[data-stubbed='true'] .statusbar::after {
 .side-child .app-icon { width: 15px; height: 15px; opacity: 0.7; }
 .source-lock { flex: 0 0 auto; width: 11px; height: 11px; color: var(--text-faint); }
 
-@media (max-width: 1100px) {
+/* Stacked below 1280px: beside the table, a fixed inspector column left the
+   matrix two or three client columns wide. Stacked, the workspace takes its
+   natural height and the content area scrolls, instead of squeezing the list
+   and the inspector into a box smaller than they are and spilling over the
+   diagnostics and the status bar. With nothing selected the inspector has
+   nothing to say, so it does not take a third of the window to say it. */
+@media (max-width: 1280px) {
+  .matrix-workspace { flex: 0 0 auto; }
   .matrix-split { display: flex; flex-direction: column; min-height: 0; }
-  .matrix-list { flex: 1 0 230px; }
+  .matrix-list { flex: 0 0 auto; }
   .server-inspector { flex: 0 0 auto; max-height: 420px; }
-  .server-inspector:has(.inspector-empty) { min-height: 145px; }
+  .server-inspector:has(.inspector-empty) { display: none; }
   .inspector-body { max-height: 320px; }
   .inspector-empty { padding: 20px; max-width: none; margin: 0; }
   .matrix-heading { padding-top: 14px; }

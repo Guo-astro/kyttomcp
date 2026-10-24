@@ -74,22 +74,52 @@ public struct NullGatewayEventSink: GatewayEventSinking {
 /// clients start the same server at once, and mode 0600 keeps the local activity
 /// inventory private even though payload capture is not enabled.
 public final class JSONLinesGatewayEventSink: GatewayEventSinking, @unchecked Sendable {
-    private let descriptor: Int32
+    /// Past this size the journal is moved to `<name>.1` (replacing the one
+    /// before) and a new one is started, so it never grows without bound.
+    static let rotationBytes: off_t = 5 * 1024 * 1024
+
+    private let url: URL
+    private let lock = NSLock()
+    private var descriptor: Int32
 
     public init(url: URL) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR)
+        self.url = url
+        descriptor = try Self.open(url)
+    }
+
+    private static func open(_ url: URL) throws -> Int32 {
+        let descriptor = Darwin.open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
         }
         _ = fchmod(descriptor, S_IRUSR | S_IWUSR)
+        return descriptor
     }
 
     deinit {
         close(descriptor)
+    }
+
+    /// Follows the journal across a rotation, and performs one when it is due.
+    /// Several helpers share the file; whichever notices first renames it, and
+    /// the others reopen the new one when their descriptor no longer matches.
+    private func currentDescriptor() -> Int32 {
+        var open = stat(), onDisk = stat()
+        let hasOpen = fstat(descriptor, &open) == 0
+        if hasOpen, stat(url.path, &onDisk) == 0, open.st_ino == onDisk.st_ino, open.st_dev == onDisk.st_dev {
+            guard open.st_size > Self.rotationBytes else { return descriptor }
+            let previous = url.appendingPathExtension("1")
+            _ = rename(url.path, previous.path)
+        }
+        if let reopened = try? Self.open(url) {
+            close(descriptor)
+            descriptor = reopened
+        }
+        return descriptor
     }
 
     public func record(_ event: GatewayEvent) {
@@ -99,6 +129,9 @@ public final class JSONLinesGatewayEventSink: GatewayEventSinking, @unchecked Se
         var bytes = Array(encoded)
         bytes.append(0x0A)
 
+        lock.lock()
+        defer { lock.unlock() }
+        let descriptor = currentDescriptor()
         _ = flock(descriptor, LOCK_EX)
         defer { _ = flock(descriptor, LOCK_UN) }
 

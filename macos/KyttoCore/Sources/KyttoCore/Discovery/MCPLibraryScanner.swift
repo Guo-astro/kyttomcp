@@ -137,7 +137,10 @@ public struct MCPLibraryScanner: Sendable {
                     sourcePath: url.path,
                     relativePath: relative,
                     command: "python3",
-                    args: [relative],
+                    // Absolute: a client starts the server from a directory of
+                    // its own (Claude Desktop uses `/`), so a relative path
+                    // would name a file that is not there.
+                    args: [url.path],
                     detected: detectedClients(for: url),
                     warning: "This is an entry-point suggestion. Kytto did not execute it or verify that it speaks MCP."
                 )
@@ -233,7 +236,7 @@ public struct MCPLibraryScanner: Sendable {
             sourcePath: url.path,
             relativePath: relativePath,
             command: "node",
-            args: [relativePath == "package.json" ? entry : "\(url.deletingLastPathComponent().path)/\(entry)"],
+            args: [url.deletingLastPathComponent().appending(path: entry).standardizedFileURL.path],
             detected: detectedClients(for: url),
             warning: "This is a package entry-point suggestion. Kytto did not execute it or verify that it speaks MCP."
         )

@@ -575,3 +575,23 @@ struct ToggleSafetyTests {
         #expect(final.value(at: ["mcpServers"])?.keys.isEmpty == true)
     }
 }
+
+@Suite("ToggleService — what cannot cross formats")
+struct UnportableDefinitionTests {
+    @Test("launch and auth settings that rendering would drop are named")
+    func namesLostFields() {
+        let toml = """
+        [mcp_servers.app]
+        command = "node"
+        args = ["dist/index.js"]
+        cwd = "/Users/example/app"
+
+        [mcp_servers.app.http_headers]
+        X-Key = "value"
+        """
+        #expect(ToggleService.unportableFields(in: toml, format: .toml) == ["http_headers", "cwd"])
+        #expect(ToggleService.unportableFields(in: #"{"type":"http","url":"https://x","headers":{"Authorization":"Bearer t"}}"#, format: .json) == ["headers"])
+        #expect(ToggleService.unportableFields(in: #"{"command":"npx","args":["-y","pkg"],"env":{"A":"b"}}"#, format: .json).isEmpty)
+        #expect(ToggleService.unportableFields(in: "[mcp_servers.cwd]\ncommand = \"x\"", format: .toml).isEmpty)
+    }
+}

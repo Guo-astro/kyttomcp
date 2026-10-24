@@ -251,6 +251,41 @@ struct GatewayMigrationTests {
         #expect(try String(contentsOf: configURL, encoding: .utf8) == original)
     }
 
+    @Test("a Codex inline env is carried into the route and never shown in the preview")
+    func tomlInlineEnvironment() throws {
+        let harness = try Harness()
+        defer { harness.home.cleanUp() }
+        try harness.home.write("""
+        [mcp_servers.github]
+        command = "npx"
+        args = ["-y", "@modelcontextprotocol/server-github"]
+        env = { GITHUB_TOKEN = "ghp_inlinesecret" }
+        startup_timeout_sec = 30
+        """, to: ".codex/config.toml")
+        let github = try #require(harness.discover().servers.first { $0.id == "github" })
+        let routeID = "8f6a2f30-6a49-4d3c-9f43-6f2f3b6e8f10"
+        let preview = try harness.service().preview(server: github, clientID: .codex, routeID: routeID)
+        #expect(preview.environmentKeys == ["GITHUB_TOKEN"])
+        #expect(!preview.directDefinitionPreview.contains("ghp_inlinesecret"))
+        _ = try harness.service().enable(server: github, clientID: .codex, routeID: routeID)
+        let launch = try harness.routes.resolve(id: routeID, secrets: harness.secrets)
+        #expect(launch.environment["GITHUB_TOKEN"] == "ghp_inlinesecret")
+        let migrated = try TOMLDocument.parse(String(contentsOf: harness.home.root.appending(path: ".codex/config.toml"), encoding: .utf8))
+        #expect(migrated.table(at: ["mcp_servers", "github"])?.value("startup_timeout_sec") != nil)
+    }
+
+    @Test("settings the gateway cannot carry, and client placeholders, are refused")
+    func refusesUnmodelledDefinitions() throws {
+        let harness = try Harness()
+        defer { harness.home.cleanUp() }
+        try harness.home.write(#"{"mcpServers": {"app": {"command": "node", "args": ["dist/index.js"], "cwd": "/Users/example/app"}, "tok": {"command": "npx", "args": ["pkg"], "env": {"T": "${env:TOKEN}"}}}}"#, to: ".cursor/mcp.json")
+        let servers = harness.discover().servers
+        let app = try #require(servers.first { $0.id == "app" })
+        let tok = try #require(servers.first { $0.id == "tok" })
+        #expect(throws: GatewayMigrationError.self) { try harness.service().preview(server: app, clientID: .cursor, routeID: UUID().uuidString.lowercased()) }
+        #expect(throws: GatewayMigrationError.self) { try harness.service().preview(server: tok, clientID: .cursor, routeID: UUID().uuidString.lowercased()) }
+    }
+
     @Test("a changed config is refused before migration writes anything")
     func staleConfig() throws {
         let harness = try Harness()

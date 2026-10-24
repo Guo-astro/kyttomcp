@@ -133,7 +133,7 @@ struct GatewayMaskingEndToEndTests {
 
         let refused = try #require(replies.first { ($0["id"] as? NSNumber)?.intValue == 2 })
         let error = try #require(refused["error"] as? [String: Any])
-        #expect(error["code"] as? Int == GatewayToolFilter.methodNotFound)
+        #expect(error["code"] as? Int == GatewayToolFilter.unknownTool)
         // The fixture answers every call with "fixture result", so a result
         // here would mean the refusal never happened.
         #expect(refused["result"] == nil)

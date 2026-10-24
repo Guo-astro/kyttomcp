@@ -210,12 +210,19 @@ public struct BackupStore: Sendable {
         }
     }
 
+    /// Keeps the newest `retentionPerClient` backups of each file.
+    ///
+    /// Per file, not per client: Claude Code's off switch writes two files, so
+    /// counting them together let twenty deny-list toggles push out every
+    /// backup of its main config — and at a low setting, one toggle could
+    /// delete the backup its own Undo was about to use.
     private func prune(clientID: ClientID) throws {
-        let all = list(clientID: clientID)
-        guard all.count > retentionPerClient else { return }
-        for backup in all.dropFirst(retentionPerClient) {
-            try? FileManager.default.removeItem(at: backup.url)
-            try? FileManager.default.removeItem(at: backup.url.appendingPathExtension("origin"))
+        let byFile = Dictionary(grouping: list(clientID: clientID)) { $0.originalURL.standardizedFileURL.path }
+        for backups in byFile.values where backups.count > retentionPerClient {
+            for backup in backups.sorted(by: { ($0.takenAt, $0.id) > ($1.takenAt, $1.id) }).dropFirst(retentionPerClient) {
+                try? FileManager.default.removeItem(at: backup.url)
+                try? FileManager.default.removeItem(at: backup.url.appendingPathExtension("origin"))
+            }
         }
     }
 

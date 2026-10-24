@@ -197,7 +197,7 @@ public extension JSONDocument {
             return JSONSpan(start: start, end: end)
         }
 
-        if index > 0, let comma = offsetOfComma(before: span.start) {
+        if index > 0, let comma = offsetOfComma(from: spans[index - 1].end, before: span.start) {
             return JSONSpan(start: comma, end: span.end)
         }
 
@@ -260,18 +260,33 @@ public extension JSONDocument {
 
     /// Offset of the comma directly after `offset`, ignoring spaces.
     private func offsetOfComma(after offset: Int) -> Int? {
-        var index = offset
-        while index < sourceBytes.count, isSpace(sourceBytes[index]) { index += 1 }
-        guard index < sourceBytes.count, sourceBytes[index] == UInt8(ascii: ",") else { return nil }
-        return index
+        offsetOfComma(from: offset, before: sourceBytes.count)
     }
 
-    /// Offset of the comma directly before `offset`, ignoring whitespace.
-    private func offsetOfComma(before offset: Int) -> Int? {
-        var index = offset - 1
-        while index >= 0, isSpace(sourceBytes[index]) { index -= 1 }
-        guard index >= 0, sourceBytes[index] == UInt8(ascii: ",") else { return nil }
-        return index
+    /// Offset of the first comma at or after `offset` and before `limit`, with
+    /// only whitespace and comments in between. JSONC puts comments between a
+    /// value and its comma (`"a": 1 /* x */,`) and after it on the same line;
+    /// a scan that stopped at the first `/` would leave a dangling comma behind.
+    private func offsetOfComma(from offset: Int, before limit: Int) -> Int? {
+        var index = offset
+        while index < limit {
+            let byte = sourceBytes[index]
+            if isSpace(byte) { index += 1; continue }
+            if byte == UInt8(ascii: ","), index < limit { return index }
+            guard byte == UInt8(ascii: "/"), index + 1 < limit else { return nil }
+            switch sourceBytes[index + 1] {
+            case UInt8(ascii: "/"):
+                index += 2
+                while index < limit, sourceBytes[index] != 0x0A { index += 1 }
+            case UInt8(ascii: "*"):
+                index += 2
+                while index + 1 < limit, !(sourceBytes[index] == UInt8(ascii: "*") && sourceBytes[index + 1] == UInt8(ascii: "/")) { index += 1 }
+                index += 2
+            default:
+                return nil
+            }
+        }
+        return nil
     }
 
     /// Offset just past the newline, if everything between `offset` and it is blank.

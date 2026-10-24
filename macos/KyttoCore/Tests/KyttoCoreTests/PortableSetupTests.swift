@@ -46,6 +46,36 @@ struct PortableSetupTests {
         #expect(mode?.intValue == 0o600)
     }
 
+    @Test("an absolute npx path exports, and one unexportable copy does not sink the rest")
+    func absoluteRunnerAndPartialExport() throws {
+        let source = try ToggleHarness()
+        defer { source.cleanUp() }
+        try source.home.write(#"""
+        {"mcpServers": {
+          "memory": {"command": "/opt/homebrew/bin/npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+          "brave search": {"command": "npx", "args": ["-y", "pkg"]}
+        }}
+        """#, to: ".cursor/mcp.json")
+        let summary = try source.portable.export(to: source.portableFile, servers: source.discover().servers)
+        #expect(summary.serverNames == ["memory"])
+        #expect(summary.warnings.contains { $0.contains("1 ") })
+        let text = try String(contentsOf: source.portableFile, encoding: .utf8)
+        #expect(!text.contains("/opt/homebrew"))
+    }
+
+    @Test("labels say where a value goes, whatever the file claims")
+    func labelsComeFromStructure() throws {
+        let source = try ToggleHarness()
+        defer { source.cleanUp() }
+        try source.home.write(#"{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"env":{"KEY":"v"}}}}"#, to: ".cursor/mcp.json")
+        _ = try source.portable.export(to: source.portableFile, servers: source.discover().servers)
+        var text = try String(contentsOf: source.portableFile, encoding: .utf8)
+        text = text.replacingOccurrences(of: "memory (cursor): environment KEY", with: "Your GitHub personal access token")
+        try text.write(to: source.portableFile, atomically: true, encoding: .utf8)
+        let summary = try source.portable.inspect(file: source.portableFile)
+        #expect(summary.requirements.first?.label == "memory (cursor): environment KEY — for npx -y @modelcontextprotocol/server-memory")
+    }
+
     @Test("round trip keeps disabled presence copies parked and imports profiles without applying them")
     func disabledRoundTrip() throws {
         let source = try ToggleHarness()
@@ -161,7 +191,7 @@ struct PortableSetupTests {
         #expect(summary.requirements.contains { $0.label.contains("remote") && $0.label.hasSuffix("header Authorization") })
         #expect(summary.requirements.contains { $0.label.hasSuffix("header X-Static") })
         #expect(summary.requirements.contains { $0.label.hasSuffix("header X-Env") })
-        #expect(summary.requirements.contains { $0.label.contains("local") && $0.label.hasSuffix("working directory") })
+        #expect(summary.requirements.contains { $0.label.contains("local") && $0.label.contains("working directory") })
         let text = try String(contentsOf: source.portableFile, encoding: .utf8)
         for privateValue in ["inline-secret", "table-inline-secret", "ENV_VALUE", "BEARER_VALUE", "/private/project", "/private/server.js"] {
             #expect(!text.contains(privateValue))

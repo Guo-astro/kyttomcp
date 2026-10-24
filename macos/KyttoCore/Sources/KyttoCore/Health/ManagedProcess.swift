@@ -92,12 +92,17 @@ final class ManagedProcess {
         let resolved = try ManagedExecutable.resolve(executable, path: environment["PATH"] ?? "", workingDirectory: workingDirectory)
         resolvedExecutable = resolved
 
-        var inPipe: [Int32] = [0, 0]
-        var outPipe: [Int32] = [0, 0]
-        var errPipe: [Int32] = [0, 0]
+        var inPipe: [Int32] = [-1, -1]
+        var outPipe: [Int32] = [-1, -1]
+        var errPipe: [Int32] = [-1, -1]
         guard pipe(&inPipe) == 0, pipe(&outPipe) == 0, pipe(&errPipe) == 0 else {
-            throw ProcessError.spawnFailed(executable, code: errno)
+            let code = errno
+            for fd in inPipe + outPipe + errPipe where fd >= 0 { close(fd) }
+            throw ProcessError.spawnFailed(executable, code: code)
         }
+        // A server that exits between two of Kytto's writes must surface as
+        // EPIPE, not as a SIGPIPE that terminates the whole app.
+        _ = fcntl(inPipe[1], F_SETNOSIGPIPE, 1)
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
@@ -126,7 +131,16 @@ final class ManagedProcess {
         // it a server inherits every descriptor Kytto has open — the other ends
         // of its own pipes, another check's pipes, watcher handles — and a
         // grandchild holding the stderr write end keeps the drain thread alive.
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        // The calling thread is a GCD worker whose mask may block signals the
+        // server needs to see; start it the way a shell would, with nothing
+        // blocked and every signal at its default action, so SIGTERM works.
+        var noSignals = sigset_t()
+        sigemptyset(&noSignals)
+        posix_spawnattr_setsigmask(&attributes, &noSignals)
+        var allSignals = sigset_t()
+        sigfillset(&allSignals)
+        posix_spawnattr_setsigdefault(&attributes, &allSignals)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
 
         let argv: [String] = [resolved] + arguments
         let envp = environment.map { "\($0.key)=\($0.value)" }
@@ -155,6 +169,7 @@ final class ManagedProcess {
         }
 
         pid = spawned
+        HealthProcesses.register(spawned)
         stdinFD = inPipe[1]
         stdoutFD = outPipe[0]
         stderrFD = errPipe[0]
@@ -231,25 +246,45 @@ final class ManagedProcess {
     // MARK: - Lifecycle
 
     /// Kills the whole group and reaps the child, so no `node` outlives its `npx`.
+    ///
+    /// Shutdown follows the MCP stdio rules: close the server's input first
+    /// (the portable "please exit"), then SIGTERM, then SIGKILL. The group is
+    /// always killed at the end, so descendants of a leader that exited on
+    /// its own are not left behind. Afterwards `capturedStderr` is complete.
     func terminateGroup() {
         guard !reaped else { return }
         reaped = true
 
-        kill(-pid, SIGTERM)
-        // A short grace period, then no more Mr Nice Guy.
-        for _ in 0..<20 {
-            var status: Int32 = 0
-            if waitpid(pid, &status, WNOHANG) == pid { break }
-            usleep(25_000)
+        close(stdinFD)
+        if !waitForExit(attempts: 8) {
+            kill(-pid, SIGTERM)
+            // A short grace period, then no more Mr Nice Guy.
+            _ = waitForExit(attempts: 20)
         }
         kill(-pid, SIGKILL)
         var status: Int32 = 0
         _ = waitpid(pid, &status, 0)
+        HealthProcesses.unregister(pid)
 
-        close(stdinFD)
         close(stdoutFD)
+        // The drain thread owns the stderr descriptor and closes it itself: if
+        // something outside the group still holds the write end, closing it
+        // here would let the thread read whatever later reuses the number.
         _ = stderrThreadDone.wait(timeout: .now() + 1)
-        close(stderrFD)
+    }
+
+    private var exited = false
+
+    private func waitForExit(attempts: Int) -> Bool {
+        for _ in 0..<attempts {
+            var status: Int32 = 0
+            if exited || waitpid(pid, &status, WNOHANG) == pid {
+                exited = true
+                return true
+            }
+            usleep(25_000)
+        }
+        return false
     }
 
     private func startDrainingStderr() {
@@ -267,8 +302,27 @@ final class ManagedProcess {
                 }
                 stderrLock.unlock()
             }
+            close(fd)
             stderrThreadDone.signal()
         }
     }
 
+}
+
+/// Process groups a health check has started and not yet ended.
+///
+/// Each check kills its own group when it finishes, but `deinit` and `defer`
+/// do not run when the app quits mid-check — and a server in its own group
+/// gets no signal from Kytto exiting. The app ends these on its way out.
+public enum HealthProcesses {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var groups: Set<pid_t> = []
+
+    static func register(_ pid: pid_t) { lock.withLock { _ = groups.insert(pid) } }
+    static func unregister(_ pid: pid_t) { lock.withLock { _ = groups.remove(pid) } }
+
+    /// Kills every group still running. For app termination only.
+    public static func terminateAll() {
+        for pid in lock.withLock({ groups }) { kill(-pid, SIGKILL) }
+    }
 }

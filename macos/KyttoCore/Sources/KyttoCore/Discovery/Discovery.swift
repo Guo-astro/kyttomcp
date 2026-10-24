@@ -143,8 +143,10 @@ public struct Discovery: Sendable {
                 configExists = configExists || outcome.sourceExists
 
                 for found in outcome.servers {
-                    countForClient += 1
                     let key = Server.identity(for: found.name)
+                    // A second source for a name this client already has is one
+                    // server shown once, not two.
+                    if merged[key]?.definitionsByClient[descriptor.id] == nil { countForClient += 1 }
 
                     if var existing = merged[key] {
                         // One cell cannot faithfully describe two competing
@@ -591,6 +593,11 @@ public struct Discovery: Sendable {
     ) -> SourceOutcome {
         var outcome = SourceOutcome()
         let url = resolver.resolveServerMap(file, for: descriptor.id)
+        // Read (and so track) the deny file whether or not the config exists:
+        // the first server switched on in a client that has never been run
+        // creates the config and edits the deny file in one transaction, and
+        // that edit is refused unless Kytto has read the file it changes.
+        let denied = deniedNames(for: enablement)
         guard let source = readTracked(url) else { return outcome }
         outcome.sourceExists = true
 
@@ -601,8 +608,6 @@ public struct Discovery: Sendable {
             outcome.diagnostics.append(unreadable(error, file: file, descriptor: descriptor))
             return outcome
         }
-
-        let denied = deniedNames(for: enablement)
 
         // Only the top-level servers key. For Claude Code that deliberately skips
         // `projects.<path>.mcpServers`, which is project scope and out of v1 (§4).

@@ -137,12 +137,15 @@ public enum MCPDoctor {
         var findings: [DoctorFinding] = []
 
         if server.transport != .stdio {
-            if server.transport == .sse {
+            let detectedSSE = server.health?.failure == .remoteTransport(transport: "sse")
+            if server.transport == .sse || detectedSSE {
                 findings.append(DoctorFinding(
-                    code: "remote-check-unavailable", severity: .info,
-                    title: "Legacy SSE inspection is not supported",
-                    detail: "Remote Doctor supports Streamable HTTP endpoints.",
-                    remediation: "Use the server's Streamable HTTP endpoint if available; otherwise verify the legacy endpoint in its client."
+                    code: "deprecated-http-sse", severity: .warning,
+                    title: "This server uses the deprecated HTTP+SSE transport",
+                    detail: """
+                    HTTP+SSE has been superseded since MCP 2025-03-26 and is formally deprecated                     in 2026-07-28, eligible for removal after at least twelve months' notice.                     Kytto does not inspect it.
+                    """,
+                    remediation: "Move to the server's Streamable HTTP endpoint if it has one; until then, verify it in its client."
                 ))
             } else if let health = server.health {
                 if health.status == .needsAuthorization {
@@ -171,6 +174,7 @@ public enum MCPDoctor {
                     action: .runHealthCheck
                 ))
             }
+            findings.append(contentsOf: deprecatedFeatureFindings(server.health))
             findings.append(contentsOf: ToolSafetyScanner.scan(server.knownTools).map(finding(for:)))
             return DoctorServerReport(serverID: server.id, serverName: server.name, findings: findings)
         }
@@ -235,13 +239,12 @@ public enum MCPDoctor {
         // The last passing contract, not this check's: a failed check lists no
         // tools, and failing must not be a way to make a finding go away.
         findings.append(contentsOf: ToolSafetyScanner.scan(server.knownTools).map(finding(for:)))
+        findings.append(contentsOf: deprecatedFeatureFindings(health))
 
         if health.status == .passed,
            let configured = server.command?.trimmingCharacters(in: .whitespacesAndNewlines),
            let resolved = health.resolvedCommand,
-           !configured.isEmpty,
-           configured != resolved,
-           !configured.hasPrefix("/") {
+           resolvedCommand(resolved, matches: configured) {
             findings.append(DoctorFinding(
                 code: "unpinned-command",
                 severity: .info,
@@ -253,6 +256,37 @@ public enum MCPDoctor {
         }
 
         return DoctorServerReport(serverID: server.id, serverName: server.name, findings: findings)
+    }
+
+    /// Whether a check's resolved path is the configured command, found on PATH.
+    ///
+    /// Health is stored per server, not per definition, so after the command
+    /// is edited the last result describes a different program. Offering to pin
+    /// that program's path would replace `docker` with an old `npx`; the names
+    /// must agree before the resolution counts.
+    public static func resolvedCommand(_ resolved: String, matches configured: String) -> Bool {
+        guard !configured.isEmpty, configured != resolved, !configured.hasPrefix("/"),
+              !configured.contains("/") else { return false }
+        return URL(filePath: resolved).lastPathComponent == configured
+    }
+
+    /// Features the 2026-07-28 revision deprecates, seen during the last check.
+    /// Information only: nothing is broken yet, but clients will drop them.
+    private static func deprecatedFeatureFindings(_ health: HealthResult?) -> [DoctorFinding] {
+        (health?.deprecatedFeatures ?? []).map { feature in
+            let (name, replacement): (String, String) = switch feature {
+            case .logging: ("MCP logging", "Servers are expected to log to stderr or through OpenTelemetry instead.")
+            case .roots: ("Roots", "The server asked Kytto for roots during the check; future clients may not answer.")
+            case .sampling: ("Sampling", "The server asked for sampling during the check; future clients may not answer.")
+            }
+            return DoctorFinding(
+                code: "deprecated-\(feature.rawValue)",
+                severity: .info,
+                title: "Uses \(name), deprecated in MCP 2026-07-28",
+                detail: "\(replacement) Deprecated features stay available for at least twelve months.",
+                remediation: "Nothing to change now. Prefer an updated release of the server when one drops this dependency."
+            )
+        }
     }
 
     /// A package fetched by name with no exact version (§7.10).
@@ -332,6 +366,45 @@ public enum MCPDoctor {
     }
 
     private static func classifyFailure(_ health: HealthResult) -> DoctorFinding {
+        // What the check actually ran into decides first. Matching words over
+        // the message and stderr comes after, and only for failures where the
+        // server's own output is the evidence — otherwise "Method not found"
+        // reads as a missing executable, and a timeout whose stderr mentions a
+        // missing optional file reads as one too.
+        switch health.failure {
+        case .commandNotFound?, .executableMissing?, .relativeCommand?:
+            return failure(
+                code: "executable-not-found",
+                title: "The executable or one of its files was not found",
+                remediation: "Check the command, use an absolute path, and verify that the client can see the same Node, Python or uv installation as your shell."
+            )
+        case .notExecutable?:
+            return failure(
+                code: "permission-denied",
+                title: "The operating system denied access",
+                remediation: "Check executable and file permissions, then review the client’s macOS privacy permissions before trying again."
+            )
+        case .timedOut?:
+            return failure(
+                code: "timeout",
+                title: "The server did not complete the MCP handshake in time",
+                remediation: "Run the command directly to check for an install prompt, slow package download, blocked network request or server output written to stdout."
+            )
+        case .protocolError?:
+            return failure(
+                code: "protocol-output",
+                title: "The server returned invalid MCP/JSON output",
+                remediation: "Run it directly and ensure diagnostic messages go to stderr while stdout contains only MCP JSON-RPC messages."
+            )
+        case .serverRefused?:
+            return failure(
+                code: "server-refused",
+                title: "The server refused Kytto's MCP request",
+                remediation: "Open the server detail for the error it returned. A server that only speaks a newer MCP revision than Kytto, or needs configuration it lacks, refuses this way."
+            )
+        default:
+            break
+        }
         let evidence = [health.currentMessage, health.stderr].compactMap { $0 }.joined(separator: "\n")
         let lower = evidence.lowercased()
 

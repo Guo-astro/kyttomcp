@@ -7,13 +7,20 @@ import FoundationNetworking
 
 /// Validated metadata retained natively; never send endpoints or credentials to web state (§6).
 public struct RemoteOAuthConfiguration: Codable, Equatable, Sendable {
+    /// The configured endpoint, canonicalised. Names the Keychain entry.
     public let resourceURL: String
+    /// The protected resource the metadata described (RFC 9728), sent as the
+    /// RFC 8707 `resource` parameter. It may be the endpoint or a parent of it
+    /// on the same origin. Absent in records saved before it was kept.
+    public let resource: String?
     public let issuer: String
     public let authorizationEndpoint: String
     public let tokenEndpoint: String
     public let registrationEndpoint: String?
     public let scopes: [String]
     public let authorizationResponseIssuerSupported: Bool
+
+    var resourceIndicator: String { resource ?? resourceURL }
 }
 
 public enum RemoteOAuthError: Error, LocalizedError, Sendable {
@@ -77,6 +84,7 @@ public struct RemoteOAuthCredential: Codable, Sendable {
 
     public var authorizationHeaders: [String: String] { ["Authorization": "Bearer " + accessToken] }
     public var requiresRefresh: Bool { expiresAt.map { $0.timeIntervalSinceNow < 60 } ?? false }
+    public var canRefresh: Bool { refreshToken?.isEmpty == false }
 
     fileprivate init(configuration: RemoteOAuthConfiguration, clientID: String, scopes: [String],
                      expiresAt: Date?, accessToken: String, refreshToken: String?) {
@@ -117,21 +125,65 @@ public struct RemoteOAuthClient: Sendable {
     private let transport: RemoteHTTPTransport
     public init(transport: RemoteHTTPTransport = .init()) { self.transport = transport }
 
+    /// The configured endpoint in one spelling: lowercase scheme and host, no
+    /// default port, no trailing slash. The query stays, because two servers
+    /// on one path told apart by a query are two sign-ins.
     public static func canonicalResource(_ text: String) throws -> String {
         let url = try RemoteHTTPTransport.endpoint(text)
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw RemoteOAuthError.discovery }
         components.scheme = components.scheme?.lowercased()
         components.host = components.host?.lowercased()
-        if components.path == "/" { components.path = "" }
+        if components.port == defaultPort(components.scheme) { components.port = nil }
+        while components.path.hasSuffix("/") { components.path.removeLast() }
         guard let result = components.string else { throw RemoteOAuthError.discovery }
         return result
     }
 
-    public func discover(resourceURL: String, challenge: String? = nil) throws -> RemoteOAuthConfiguration {
+    private static func defaultPort(_ scheme: String?) -> Int? {
+        switch scheme?.lowercased() { case "https": 443; case "http": 80; default: nil }
+    }
+
+    /// Whether protected-resource metadata may speak for the endpoint: same
+    /// origin, and a path that is the endpoint's or a parent of it on a segment
+    /// boundary. Root metadata describes the origin (RFC 9728 §3.3), so an exact
+    /// match would refuse every server found through the root fallback.
+    static func resource(_ described: String, covers endpoint: URL) -> Bool {
+        guard let url = try? RemoteHTTPTransport.endpoint(described), sameOrigin(url, endpoint) else { return false }
+        if let query = url.query, query != endpoint.query { return false }
+        var parent = url.path
+        while parent.hasSuffix("/") { parent.removeLast() }
+        var path = endpoint.path
+        while path.hasSuffix("/") { path.removeLast() }
+        return parent.isEmpty || path == parent || path.hasPrefix(parent + "/")
+    }
+
+    /// - Parameters:
+    ///   - authorization: the saved credential's headers, when re-signing in.
+    ///     The probe then carries them, so a server that needs more scope says
+    ///     which in a 403 `insufficient_scope` challenge (step-up).
+    ///   - previousScopes: what the saved credential was granted. A step-up asks
+    ///     for these and the challenged ones together, so it gains scope rather
+    ///     than trading one for another.
+    public func discover(resourceURL: String, challenge: String? = nil,
+                         authorization: [String: String]? = nil, previousScopes: [String] = []) throws -> RemoteOAuthConfiguration {
         let canonical = try Self.canonicalResource(resourceURL)
         let resource = try RemoteHTTPTransport.endpoint(canonical)
         let deadline = Date().addingTimeInterval(10)
         var challenge = challenge
+        if challenge == nil, let authorization {
+            var request = URLRequest(url: resource)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+            request.setValue(MCPStdioClient.modernProtocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
+            request.setValue("tools/list", forHTTPHeaderField: "Mcp-Method")
+            for (key, value) in authorization { request.setValue(value, forHTTPHeaderField: key) }
+            request.httpBody = Data(MCPStdioClient.request(id: 1, method: "tools/list", params: [:], modern: true).utf8)
+            if let reply = try? transport.send(request, deadline: deadline, limit: 256 * 1024, responseID: 1),
+               [401, 403].contains(reply.status) {
+                challenge = reply.header("www-authenticate")
+            }
+        }
         if challenge == nil {
             var request = URLRequest(url: resource)
             request.httpMethod = "POST"
@@ -159,7 +211,7 @@ public struct RemoteOAuthClient: Sendable {
         }
         let metadata = try firstMetadata(candidates, deadline: deadline)
         guard let describedResource = metadata.root["resource"]?.stringValue,
-              try Self.canonicalResource(describedResource) == canonical else { throw RemoteOAuthError.resourceMismatch }
+              Self.resource(describedResource, covers: resource) else { throw RemoteOAuthError.resourceMismatch }
         guard let issuers = metadata.root["authorization_servers"]?.elements?.compactMap(\.stringValue),
               let issuer = issuers.first, issuers.count <= 16 else { throw RemoteOAuthError.discovery }
         let issuerURL = try RemoteHTTPTransport.endpoint(issuer, allowLoopbackHTTP: false)
@@ -178,16 +230,19 @@ public struct RemoteOAuthClient: Sendable {
             _ = try RemoteHTTPTransport.endpoint(value, allowLoopbackHTTP: false)
             return value
         }
-        let scopes: [String]
+        var scopes: [String]
         if let required = parameters["scope"] { scopes = try Self.scopes(required) }
         else {
             scopes = metadata.root["scopes_supported"]?.elements?.compactMap(\.stringValue) ?? []
             _ = try Self.scopes(scopes.joined(separator: " "))
         }
+        if !previousScopes.isEmpty, !scopes.isEmpty {
+            scopes = try Self.scopes((scopes + previousScopes).joined(separator: " "))
+        }
         let registration = authorization.root["registration_endpoint"]?.stringValue
         if let registration { _ = try RemoteHTTPTransport.endpoint(registration, allowLoopbackHTTP: false) }
         return RemoteOAuthConfiguration(
-            resourceURL: canonical, issuer: issuer,
+            resourceURL: canonical, resource: describedResource, issuer: issuer,
             authorizationEndpoint: try endpoint("authorization_endpoint"), tokenEndpoint: try endpoint("token_endpoint"),
             registrationEndpoint: registration, scopes: scopes,
             authorizationResponseIssuerSupported: authorization.root["authorization_response_iss_parameter_supported"]?.boolValue == true
@@ -203,6 +258,8 @@ public struct RemoteOAuthClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "client_name": "Kytto MCP", "redirect_uris": [redirectURI],
+            // Required in registration requests since MCP 2026-07-28 (SEP-837).
+            "application_type": "native",
             "token_endpoint_auth_method": "none", "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
         ])
@@ -233,7 +290,7 @@ public struct RemoteOAuthClient: Sendable {
         items += [URLQueryItem(name: "response_type", value: "code"), .init(name: "client_id", value: clientID),
                   .init(name: "redirect_uri", value: redirectURI), .init(name: "state", value: state),
                   .init(name: "code_challenge", value: challenge), .init(name: "code_challenge_method", value: "S256"),
-                  .init(name: "resource", value: configuration.resourceURL)]
+                  .init(name: "resource", value: configuration.resourceIndicator)]
         if !configuration.scopes.isEmpty { items.append(.init(name: "scope", value: configuration.scopes.joined(separator: " "))) }
         components.queryItems = items
         guard let url = components.url else { throw RemoteOAuthError.discovery }
@@ -278,7 +335,7 @@ public struct RemoteOAuthClient: Sendable {
 
     private func tokens(configuration: RemoteOAuthConfiguration, clientID: String, fields: [String: String], previous: RemoteOAuthCredential?) throws -> RemoteOAuthCredential {
         var fields = fields
-        fields["client_id"] = clientID; fields["resource"] = configuration.resourceURL
+        fields["client_id"] = clientID; fields["resource"] = configuration.resourceIndicator
         var request = URLRequest(url: try RemoteHTTPTransport.endpoint(configuration.tokenEndpoint, allowLoopbackHTTP: false))
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -289,13 +346,17 @@ public struct RemoteOAuthClient: Sendable {
               let token = document.root["access_token"]?.stringValue, !token.isEmpty, token.utf8.count <= 64 * 1024,
               token.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7E }),
               document.root["token_type"]?.stringValue?.lowercased() == "bearer" else { throw RemoteOAuthError.invalidToken }
+        // The authorization server may grant other scopes than requested
+        // (RFC 6749 §3.3) — its default when none were asked for, or a
+        // normalised spelling. What it granted is what is recorded.
         let granted: [String]
         if let scope = document.root["scope"]?.stringValue { granted = try Self.scopes(scope) }
         else { granted = previous?.scopes ?? configuration.scopes }
-        guard Set(granted).isSubset(of: Set(previous?.scopes ?? configuration.scopes)) else { throw RemoteOAuthError.invalidToken }
         var expiry: Date?
-        if let raw = document.root["expires_in"] {
-            guard let seconds = raw.numberValue, seconds.isFinite, seconds > 0, seconds <= 366 * 24 * 3600 else { throw RemoteOAuthError.invalidToken }
+        if let raw = document.root["expires_in"], !raw.isNull {
+            // Some servers send it as a string.
+            guard let seconds = raw.numberValue ?? raw.stringValue.flatMap(Double.init),
+                  seconds.isFinite, seconds > 0, seconds <= 366 * 24 * 3600 else { throw RemoteOAuthError.invalidToken }
             expiry = Date().addingTimeInterval(seconds)
         }
         let refresh = document.root["refresh_token"]?.stringValue ?? previous?.refreshToken
@@ -304,14 +365,16 @@ public struct RemoteOAuthClient: Sendable {
                                      expiresAt: expiry, accessToken: token, refreshToken: refresh)
     }
 
+    /// The first candidate that answers with a JSON object. Clients must try
+    /// the well-known locations in order, so a 401 from auth middleware, a
+    /// redirect (never followed) or an HTML catch-all page moves on to the next
+    /// one rather than ending discovery.
     private func firstMetadata(_ candidates: [URL], deadline: Date) throws -> JSONDocument {
         for candidate in candidates {
             var request = URLRequest(url: candidate)
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let reply = try transport.send(request, deadline: deadline, limit: 256 * 1024)
-            if [404, 405].contains(reply.status) { continue }
-            guard reply.status == 200, let document = Self.document(reply.body) else { throw RemoteOAuthError.discovery }
-            return document
+            if reply.status == 200, let document = Self.document(reply.body) { return document }
         }
         throw RemoteOAuthError.discovery
     }
@@ -323,7 +386,9 @@ public struct RemoteOAuthClient: Sendable {
 
     private static func wellKnown(_ url: URL, suffix: String, includeAppend: Bool) -> [URL] {
         var base = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-        let path = base.percentEncodedPath == "/" ? "" : base.percentEncodedPath
+        // RFC 8414 §3.1: a trailing slash is removed before insertion.
+        var path = base.percentEncodedPath
+        while path.hasSuffix("/") { path.removeLast() }
         base.query = nil; base.percentEncodedPath = "/.well-known/" + suffix + path
         var result = [base.url!]
         if includeAppend && !path.isEmpty {
@@ -335,7 +400,8 @@ public struct RemoteOAuthClient: Sendable {
     }
 
     private static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
-        a.scheme?.lowercased() == b.scheme?.lowercased() && a.host?.lowercased() == b.host?.lowercased() && (a.port ?? 443) == (b.port ?? 443)
+        a.scheme?.lowercased() == b.scheme?.lowercased() && a.host?.lowercased() == b.host?.lowercased()
+            && (a.port ?? defaultPort(a.scheme)) == (b.port ?? defaultPort(b.scheme))
     }
 
     private static func validClient(_ value: String) -> Bool {

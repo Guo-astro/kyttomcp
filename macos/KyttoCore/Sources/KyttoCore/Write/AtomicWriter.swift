@@ -105,9 +105,13 @@ public enum AtomicWriter {
             guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path) else {
                 return current
             }
+            // A relative target is relative to the directory the link really
+            // sits in. Removing `..` against the link's own path instead goes
+            // wrong when a directory on the way is itself a link.
             current = destination.hasPrefix("/")
                 ? URL(filePath: destination).standardizedFileURL
-                : current.deletingLastPathComponent().appending(path: destination).standardizedFileURL
+                : current.deletingLastPathComponent().resolvingSymlinksInPath()
+                    .appending(path: destination).standardizedFileURL
         }
         throw WriteError.couldNotCreateTemporaryFile(POSIXError(.ELOOP).localizedDescription)
     }

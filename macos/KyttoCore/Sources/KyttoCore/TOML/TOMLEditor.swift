@@ -402,7 +402,8 @@ public enum TOMLText {
             case "\r": out += "\\r"
             case "\t": out += "\\t"
             default:
-                if scalar.value < 0x20 {
+                // DEL is a control character TOML forbids unescaped too.
+                if scalar.value < 0x20 || scalar.value == 0x7F {
                     out += String(format: "\\u%04X", scalar.value)
                 } else {
                     out.unicodeScalars.append(scalar)

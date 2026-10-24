@@ -176,7 +176,10 @@ export function renderProfileApply(state) {
   if (!profile) return null;
 
   const clients = state.clients.filter((client) => client.state !== 'notInstalled' && !client.isReadOnly);
-  const client = clients.find((entry) => entry.id === state.sheet.clientId);
+  // The select can only show a listed client, so state that names another (one
+  // that disappeared, or a source the sheet does not offer) falls back to the
+  // first option rather than leaving Apply inert under a different label.
+  const client = clients.find((entry) => entry.id === state.sheet.clientId) ?? clients[0];
   const body = [];
 
   if (clients.length === 0) {
@@ -187,7 +190,7 @@ export function renderProfileApply(state) {
     for (const optionClient of clients) {
       const option = el('option');
       option.value = optionClient.id;
-      option.selected = optionClient.id === state.sheet.clientId;
+      option.selected = optionClient.id === client?.id;
       option.textContent = optionClient.state === 'orphanedConfig'
         ? `${optionClient.displayName} — not installed`
         : optionClient.displayName;
@@ -202,7 +205,7 @@ export function renderProfileApply(state) {
     el(
       'p',
       'muted',
-      'Kytto will back up every affected configuration before writing. Servers installed as read-only plugins may be reported as skipped.',
+      'Kytto will back up every affected configuration before writing. Servers that come from plugins are switched with their plugin and are left as they are.',
     ),
   );
 
@@ -222,9 +225,12 @@ export function renderProfileApply(state) {
 
 function applyPreview(state, profile, client) {
   const desired = new Set(profile.serverIDs);
-  const knownDesired = state.servers.filter((server) => desired.has(server.id));
+  // Plugin servers switch with their plugin, so a profile leaves them alone
+  // (the native plan skips them too).
+  const switchable = state.servers.filter((server) => server.originKind !== 'plugin');
+  const knownDesired = switchable.filter((server) => desired.has(server.id));
   const toEnable = knownDesired.filter((server) => server.enabledIn[client.id] !== 'enabled');
-  const toDisable = state.servers.filter(
+  const toDisable = switchable.filter(
     (server) => !desired.has(server.id) && server.enabledIn[client.id] === 'enabled',
   );
   const unchanged = knownDesired.length - toEnable.length;

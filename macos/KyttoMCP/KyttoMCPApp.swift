@@ -5,6 +5,7 @@
 
 import AppKit
 import SwiftUI
+import KyttoCore
 
 @main
 struct KyttoMCPApp: App {
@@ -52,6 +53,11 @@ struct KyttoMCPApp: App {
                 }
             }
         }
+
+        // A health check running when Kytto quits would leave its server behind.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { _ in HealthProcesses.terminateAll() }
 
         _router = State(initialValue: router)
         _model = State(initialValue: model)

@@ -123,18 +123,24 @@ public struct KyttoSettings: Codable, Equatable, Sendable {
     /// reject such a file entirely because a newer non-optional key is absent.
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        backupRetention = try values.decodeIfPresent(Int.self, forKey: .backupRetention) ?? Self.default.backupRetention
-        tokenWarningThreshold = try values.decodeIfPresent(Int.self, forKey: .tokenWarningThreshold) ?? Self.default.tokenWarningThreshold
-        theme = try values.decodeIfPresent(Theme.self, forKey: .theme) ?? Self.default.theme
-        launchAtLogin = try values.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? Self.default.launchAtLogin
-        menuBarEnabled = try values.decodeIfPresent(Bool.self, forKey: .menuBarEnabled) ?? Self.default.menuBarEnabled
-        menuBarClient = try values.decodeIfPresent(ClientID.self, forKey: .menuBarClient)
-        clientPathOverrides = try values.decodeIfPresent([String: String].self, forKey: .clientPathOverrides) ?? [:]
-        customConfigSources = try values.decodeIfPresent([CustomConfigSource].self, forKey: .customConfigSources) ?? []
-        hasCompletedOnboarding = try values.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? false
-        hasConfirmedMatrixWrites = try values.decodeIfPresent(Bool.self, forKey: .hasConfirmedMatrixWrites) ?? false
-        showsCustomSources = try values.decodeIfPresent(Bool.self, forKey: .showsCustomSources) ?? true
-        sidebarWidth = try values.decodeIfPresent(Int.self, forKey: .sidebarWidth) ?? Self.defaultSidebarWidth
+        // Field by field, each falling back alone: one value this build does not
+        // know — a menu-bar client added by a newer version — must not reset
+        // every other setting, which the next save would then make permanent.
+        func field<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            (try? values.decodeIfPresent(type, forKey: key)) ?? nil
+        }
+        backupRetention = field(Int.self, .backupRetention) ?? Self.default.backupRetention
+        tokenWarningThreshold = field(Int.self, .tokenWarningThreshold) ?? Self.default.tokenWarningThreshold
+        theme = field(Theme.self, .theme) ?? Self.default.theme
+        launchAtLogin = field(Bool.self, .launchAtLogin) ?? Self.default.launchAtLogin
+        menuBarEnabled = field(Bool.self, .menuBarEnabled) ?? Self.default.menuBarEnabled
+        menuBarClient = field(ClientID.self, .menuBarClient)
+        clientPathOverrides = field([String: String].self, .clientPathOverrides) ?? [:]
+        customConfigSources = field([CustomConfigSource].self, .customConfigSources) ?? []
+        hasCompletedOnboarding = field(Bool.self, .hasCompletedOnboarding) ?? false
+        hasConfirmedMatrixWrites = field(Bool.self, .hasConfirmedMatrixWrites) ?? false
+        showsCustomSources = field(Bool.self, .showsCustomSources) ?? true
+        sidebarWidth = field(Int.self, .sidebarWidth) ?? Self.defaultSidebarWidth
     }
 
     public func pathOverride(for client: ClientID) -> String? {

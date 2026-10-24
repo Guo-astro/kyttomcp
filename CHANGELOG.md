@@ -9,6 +9,68 @@ without a backup.
 
 ## [Unreleased]
 
+## [1.0.9] — 2026-10-24
+
+A macOS release: support for the MCP 2026-07-28 revision and the fixes from a
+full review of the app. Windows stays at 1.0.8 for now; its port of these fixes
+follows in a later release.
+
+### Added (macOS)
+
+- Health checks speak MCP 2026-07-28, which drops the `initialize` handshake. Kytto asks `server/discover` first and falls back to the handshake for older servers, on stdio and Streamable HTTP alike, so a server that only speaks the new revision is no longer reported as broken.
+- MCP Doctor notes when a server uses something the 2026-07-28 revision deprecates: the legacy HTTP+SSE transport, Roots, Sampling or MCP logging.
+
+### Changed (macOS)
+
+- An endpoint that turns out to use the legacy HTTP+SSE transport is shown as not checkable instead of failed, and so is a plain-HTTP address on your local network.
+- Signing in to a remote server again asks for any additional scope the server requested, keeping the scopes you already granted.
+- Up to a window width of 1280 px the server inspector sits below the matrix and the window scrolls, so more client columns fit beside the server names.
+- Copying a server between a JSON client and Codex is refused, with the settings named, when it uses HTTP headers, a bearer token or a working directory that the other format could not carry.
+
+### Fixed (macOS) — configuration writes
+
+- Renaming a server that was switched off in Claude Code switched it back on. Renaming only the letter case of a name was ignored.
+- Saving an edit overwrote other clients' environment values with one client's value, and removed keys only some clients had. Each client now keeps its own value for an untouched field, and renaming a key in the edit form keeps its value.
+- Undo after adding a server to a client restored the whole file from before the change, discarding anything the client or you changed in it since. Undo now removes just that server.
+- Applying a profile tried, and failed, to switch off plugin servers. They are now left to their plugin.
+- Toggling a Codex server that shared its name with a Claude Desktop extension was refused, and a Claude Code deny entry used another client's spelling of the name. Two Codex tables that differ only in case are now refused instead of toggling one of them.
+- Switching on the first server in a Claude Code that had never run failed with a misleading "changed on disk" message.
+- Backup retention counted all of a client's files together, so Claude Code's two-file switch could push out every backup of its main config, or delete the backup its own Undo needed.
+- Kytto could write a Codex `config.toml` that Codex refuses (a table defined twice), and reported some valid files as unreadable. Removing an entry from a VS Code `mcp.json` with comments could leave a trailing comma.
+- Importing an entry point from the MCP Library wrote a relative path that clients could not start.
+
+### Fixed (macOS) — health checks, Doctor and Contract Guard
+
+- A server reply nested deeply enough crashed Kytto, and so could a server that exited between two of Kytto's messages.
+- Health checks reported prompts-only servers as broken, timed out on servers that asked Kytto a question, showed truncated error output, and could leave a server running if Kytto quit mid-check.
+- Doctor offered to pin an executable from an outdated check, called "method not found" a missing executable, and marked servers stale by comparing against the version a server reports about itself.
+- Starting Kytto ran your login shell on the main thread, and a daemon started from your shell profile could make Kytto fall back to a minimal PATH.
+- Contract Guard missed a schema change hidden behind a repeated key, showed identical before/after text for changes past the first 800 characters, and printed invisible characters as nothing. "Mark as reviewed" now accepts only the changes that were on screen.
+- The Tool Safety Scanner missed variation selectors, the combining grapheme joiner and Hangul fillers used to hide text or split a phrase.
+
+### Fixed (macOS) — remote servers, Gateway and portable setup
+
+- Remote OAuth sign-in failed when the authorization server granted a different scope than requested, when protected-resource metadata described the whole origin, when a discovery URL answered with an error page, or when `expires_in` arrived as text. A token without an expiry or revoked early is now refreshed once, and two checks no longer spend the same refresh token.
+- Gateway mode dropped a Codex inline `env` and showed its values in the preview, lost working directories and client placeholders, and could leave server processes running after the client quit. A hidden tool could still be called inside a JSON-RPC batch.
+- Health checks of a Gateway server now check the server itself rather than the masked helper, so hidden tools stay in the tool picker. The activity log is rotated and read without stalling the window.
+- Portable export failed for any server launched through an absolute `npx` path and stopped at the first unusual server. Import into Codex refused remote URLs ending in `/sse`, missed name conflicts with installed extensions and plugins, and asked for inputs of copies going nowhere. Input labels now say where each value goes, whatever the file claims.
+
+### Fixed (macOS) — app and interface
+
+- Menu bar rows for servers a client does not have could be clicked, which copied the server in. Check All could run twice at once and reported interrupted checks as a disk problem.
+- A setting written by a newer version no longer resets all settings, turning off "Open at login" now also cancels a registration waiting for approval, and the Settings error alert no longer comes back after "Report a bug…".
+- Cancelling an update download now stops it at once, abandoned installers are cleaned up, and a failed rollback names where the previous version is.
+- In narrow windows the matrix and inspector spilled over the status bar. Contract Guard diffs were squeezed into a narrow column, sheets had no shadow, row status lines were misaligned and wrapped, and Compact density looked like an active filter.
+- Refresh now also reloads Secrets, Profiles and Activity. Dragging the sidebar no longer freezes when the window updates mid-drag, keyboard focus stays inside an open dialog, and Apply profile no longer does nothing when the default client is a read-only source.
+
+### Downloads
+
+| Platform | Artifact | Size | SHA-256 |
+|---|---|---:|---|
+| macOS (universal) | `KyttoMCP-1.0.9.dmg` | 5.7 MB | `2cb955c50c2df94af27fe4445fc6929f17cb4664089f383b9c0d49cdd8837846` |
+
+Windows: use 1.0.8 (below) until its port of these fixes ships.
+
 ## [1.0.8] — 2026-10-15
 
 ### Added (macOS)
@@ -978,7 +1040,8 @@ First public beta, for macOS and Windows.
 - MCP Doctor findings with previewed fixes
 - Optional Gateway mode with metadata-only Live Activity
 
-[Unreleased]: https://github.com/heyitsjakub/KyttoMCP/compare/v1.0.8...HEAD
+[Unreleased]: https://github.com/heyitsjakub/KyttoMCP/compare/v1.0.9...HEAD
+[1.0.9]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9
 [1.0.8]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.8
 [1.0.7.1]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.7.1
 [1.0.7]: https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.7

@@ -134,10 +134,10 @@ public struct ServerAuthoring: Sendable {
         let errors = draft.validate(takenNames: taken, allowing: originalName)
         guard errors.isEmpty else { throw AuthoringError.invalid(errors) }
 
-        // A rename changes the key, and only the key.
-        let renamedFrom = Server.identity(for: originalName) == Server.identity(for: draft.trimmedName)
-            ? nil
-            : originalName
+        // A rename changes the key, and only the key. "github" → "GitHub" is a
+        // rename too: the files should say what the user typed.
+        let renamedFrom = originalName == draft.trimmedName ? nil : originalName
+        let identityChanged = Server.identity(for: originalName) != Server.identity(for: draft.trimmedName)
 
         // A copy that is switched off in a presence-only client is not in that
         // file. Writing the edit there would switch it back on while the matrix
@@ -166,7 +166,7 @@ public struct ServerAuthoring: Sendable {
             }
             // The park store is keyed by identity, so a rename is a new entry
             // and the old one has to go or the row would come back twice.
-            if renamedFrom != nil {
+            if renamedFrom != nil, identityChanged {
                 try? parkStore.unpark(clientID: clientID, serverName: entry.serverName)
             }
             result.parkedUpdated.append(clientID)
@@ -515,9 +515,10 @@ public struct ServerAuthoring: Sendable {
                             var text = document.sourceText
                             var name = key
                             if oldName != nil {
-                                guard try document.serverKey(
+                                let clash = try document.serverKey(
                                     for: Server.identity(for: draft.trimmedName), under: source.serversKey
-                                ) == nil else {
+                                )
+                                guard clash == nil || clash == key else {
                                     throw AuthoringError.invalid([.nameTaken(draft.trimmedName)])
                                 }
                                 // A rename is the key and nothing else.
@@ -565,9 +566,10 @@ public struct ServerAuthoring: Sendable {
                             var text = document.sourceText
                             var name = existing
                             if oldName != nil {
-                                guard try document.serverName(
+                                let clash = try document.serverName(
                                     for: Server.identity(for: draft.trimmedName), under: source.serversKey
-                                ) == nil else {
+                                )
+                                guard clash == nil || clash == existing else {
                                     throw AuthoringError.invalid([.nameTaken(draft.trimmedName)])
                                 }
                                 text = try document.renamingServer(
@@ -596,18 +598,21 @@ public struct ServerAuthoring: Sendable {
             }
 
             if let oldName {
+                // A server switched off through a deny list stays off under its
+                // new name: the entry is renamed, not dropped.
                 try clearDenyListEntries(
                     for: oldName,
                     in: clients,
                     snapshots: denySnapshots,
-                    committed: &committed
+                    committed: &committed,
+                    renamingTo: draft.trimmedName
                 )
             }
         } catch {
             try rollBack(committed, after: error)
         }
 
-        if let oldName {
+        if let oldName, Server.identity(for: oldName) != Server.identity(for: draft.trimmedName) {
             for clientID in clients {
                 try? parkStore.unpark(clientID: clientID, serverName: oldName)
             }
@@ -624,11 +629,15 @@ public struct ServerAuthoring: Sendable {
     /// Removes a name from any client's deny list. Without this, deleting a
     /// disabled server leaves a dangling entry, and recreating it later would
     /// come back mysteriously switched off.
+    ///
+    /// - Parameter newName: for a rename, the entry is respelt instead, one
+    ///   string splice, so the server is still switched off afterwards.
     private func clearDenyListEntries(
         for name: String,
         in clients: [ClientID],
         snapshots: [String: FileSnapshot],
-        committed: inout [CommittedWrite]
+        committed: inout [CommittedWrite],
+        renamingTo newName: String? = nil
     ) throws {
         for clientID in clients {
             guard let descriptor = descriptors.first(where: { $0.id == clientID }),
@@ -651,10 +660,17 @@ public struct ServerAuthoring: Sendable {
                 pathDisplay: file.displayString(),
                 expecting: ledger.digest(for: url)
             ) { document in
-                try document.removingElements(fromArrayAt: [key]) { element in
+                func names(_ element: JSONNode) -> Bool {
                     let entry = element[nameField]?.stringValue ?? element.stringValue
                     return entry.map { Server.identity(for: $0) == Server.identity(for: name) } ?? false
                 }
+                guard let newName else {
+                    return try document.removingElements(fromArrayAt: [key], where: names)
+                }
+                let edits = (document.value(at: [key])?.elements ?? []).filter(names).map { element in
+                    (span: (element[nameField] ?? element).span, replacement: JSONText.string(newName))
+                }
+                return document.replacing(edits)
             }
             record(receipt, for: snapshot, in: &committed)
         }

@@ -24,10 +24,14 @@ public enum Enablement: String, Codable, Sendable {
 public struct EnvEntry: Equatable, Sendable {
     public let key: String
     public let value: String?
+    /// In an edit: the name this entry had before the user renamed it, so a
+    /// value left "unchanged" moves with it instead of being lost.
+    public let previousKey: String?
 
-    public init(key: String, value: String?) {
+    public init(key: String, value: String?, previousKey: String? = nil) {
         self.key = key
         self.value = value
+        self.previousKey = previousKey
     }
 
     public var hasValue: Bool { !(value ?? "").isEmpty }

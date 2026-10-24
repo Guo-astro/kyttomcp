@@ -8,17 +8,23 @@ public struct HealthChecker: Sendable {
     public static let defaultTimeout: TimeInterval = 10
 
     private let client: MCPStdioClient
-    private let shell: ShellEnvironment
+    private let pinnedShell: ShellEnvironment?
     private let httpClient: MCPHTTPClient
     private let timeout: TimeInterval
 
+    /// The login shell's PATH, asked for on the first check rather than when
+    /// the checker is made. The app builds its checker at launch, on the main
+    /// thread, and starting the user's interactive shell there would both
+    /// stall the launch and run their rc files before anything was asked for.
+    private var shell: ShellEnvironment { pinnedShell ?? .current }
+
     public init(
-        shell: ShellEnvironment = .current,
+        shell: ShellEnvironment? = nil,
         timeout: TimeInterval = HealthChecker.defaultTimeout,
         client: MCPStdioClient = MCPStdioClient(),
         httpClient: MCPHTTPClient = MCPHTTPClient()
     ) {
-        self.shell = shell
+        self.pinnedShell = shell
         self.timeout = timeout
         self.client = client
         self.httpClient = httpClient
@@ -88,7 +94,8 @@ public struct HealthChecker: Sendable {
                     resourceCount: listing.resourceCount,
                     inspectionNotes: listing.inspectionNotes,
                     resolvedCommand: listing.resolvedExecutable,
-                    environmentSource: environmentSource
+                    environmentSource: environmentSource,
+                    deprecatedFeatures: listing.deprecatedFeatures
                 ),
                 weight
             )
@@ -131,13 +138,22 @@ public struct HealthChecker: Sendable {
                 serverVersion: listing.serverVersion, protocolVersion: listing.negotiatedProtocolVersion,
                 capabilityNames: listing.capabilityNames, promptCount: listing.promptCount,
                 resourceCount: listing.resourceCount, inspectionNotes: listing.inspectionNotes,
-                environmentSource: "Streamable HTTP"
+                environmentSource: "Streamable HTTP", deprecatedFeatures: listing.deprecatedFeatures
             ), weight)
         } catch {
             let remote = error as? RemoteHTTPError
+            if case .legacySSE = remote {
+                // Deprecated, but its client may well run it: not Kytto's to call broken.
+                return (result(status: .unsupported, reason: .remoteTransport(transport: "sse"), stderr: nil, started: started), nil)
+            }
             let status: HealthResult.Status
-            if case .authorizationRequired = remote { status = .needsAuthorization }
-            else { status = .failed }
+            switch remote {
+            case .authorizationRequired: status = .needsAuthorization
+            // Plain HTTP to a LAN address: Kytto will not send it, but the
+            // client that owns the entry may reach it fine.
+            case .invalidEndpoint: status = .unsupported
+            default: status = .failed
+            }
             // Never retain response bodies, WWW-Authenticate values or URLSession's
             // descriptions: any can contain a token, signed URL or echoed header (§6).
             let message = remote?.errorDescription ?? "The remote check could not be completed."

@@ -69,7 +69,7 @@ struct GatewayToolFilterTests {
 
         let reply = try object(response)
         let error = try #require(reply["error"] as? [String: Any])
-        #expect(error["code"] as? Int == GatewayToolFilter.methodNotFound)
+        #expect(error["code"] as? Int == GatewayToolFilter.unknownTool)
         #expect((error["message"] as? String)?.contains("write_file") == true)
         // The id has to come back in the type it arrived in, or the client
         // cannot match the reply to its own request.
@@ -305,5 +305,34 @@ struct GatewayRouteMaskingTests {
         #expect(throws: GatewayRouteError.unknownRoute("missing")) {
             try store.update(id: "missing", exposedTools: [])
         }
+    }
+}
+
+@Suite("GatewayToolFilter — batches")
+struct GatewayToolFilterBatchTests {
+    @Test("a hidden tool cannot be called by wrapping it in a batch")
+    func batchedHiddenCall() throws {
+        let filter = GatewayToolFilter(exposedTools: ["read"])
+        let batch = Data(#"[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete"}},{"jsonrpc":"2.0","id":2,"method":"ping"}]"#.utf8)
+        guard case .refuse(let reply) = filter.inspectClientLine(batch) else {
+            Issue.record("the batch was forwarded"); return
+        }
+        let answers = try #require(try JSONSerialization.jsonObject(with: reply) as? [[String: Any]])
+        #expect(answers.count == 2)
+    }
+
+    @Test("a batched tools/list response is filtered too")
+    func batchedListResponse() throws {
+        let filter = GatewayToolFilter(exposedTools: ["read"])
+        _ = filter.inspectClientLine(Data(#"[{"jsonrpc":"2.0","id":7,"method":"tools/list"}]"#.utf8))
+        let response = Data(#"[{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"read"},{"name":"delete"}]}}]"#.utf8)
+        let rewritten = String(decoding: filter.rewriteServerLine(response), as: UTF8.self)
+        #expect(rewritten.contains("read"))
+        #expect(!rewritten.contains("delete"))
+    }
+
+    @Test("a numeric id and a string id are different requests")
+    func idKinds() {
+        #expect(GatewayJSONRPC.requestKey(1) != GatewayJSONRPC.requestKey("1"))
     }
 }

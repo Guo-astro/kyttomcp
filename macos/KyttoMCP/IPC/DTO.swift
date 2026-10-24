@@ -286,7 +286,9 @@ struct MCPProvenanceDTO: Encodable {
 
     nonisolated init(_ server: Server, provenance: MCPProvenance? = nil) {
         let resolvedProvenance = provenance ?? MCPProvenanceResolver.identify(server: server)
-        let reportedVersion = server.health?.serverVersion ?? resolvedProvenance.installedVersion
+        // Shown: the package's own version when known, else what the server
+        // reports. Compared with the registry: the package's own version only.
+        let reportedVersion = resolvedProvenance.installedVersion ?? server.health?.serverVersion
         sourceKind = resolvedProvenance.kind.rawValue
         packageName = resolvedProvenance.packageName
         sourceURL = resolvedProvenance.sourceURL
@@ -296,8 +298,7 @@ struct MCPProvenanceDTO: Encodable {
         confidence = resolvedProvenance.confidence
         maintenanceState = MCPProvenanceResolver.maintenanceState(
             health: server.health,
-            provenance: resolvedProvenance,
-            installedVersion: reportedVersion
+            provenance: resolvedProvenance
         ).rawValue
     }
 }
@@ -934,10 +935,13 @@ struct ContractAlertDTO: Encodable {
     let serverName: String
     let changedAt: Double
     let changes: [ContractChangeDTO]
+    /// Opaque; sent back with `contract.acknowledge`.
+    let reviewToken: String
 
     nonisolated init(_ alert: ContractAlert) {
         serverID = alert.serverID
         serverName = alert.serverName
+        reviewToken = alert.reviewToken
         changedAt = alert.changedAt.timeIntervalSince1970
         changes = alert.changes.map(ContractChangeDTO.init)
     }

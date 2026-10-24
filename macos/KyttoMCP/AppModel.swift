@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import KyttoCore
 import ServiceManagement
 
@@ -34,6 +35,7 @@ final class AppModel {
     private var portableSetup: PortableSetupService?
     private let remoteOAuthCredentials = RemoteOAuthCredentials(store: KeychainSecretStore(service: "app.kytto.remote-oauth"))
     private var remoteAuthorizationGenerations: [String: Int] = [:]
+    private var remoteRefreshes: [String: Task<RemoteOAuthCredential, Error>] = [:]
 
     // Rebuilt only when retention or path overrides change, because those values
     // are baked into the write services at construction.
@@ -308,7 +310,7 @@ final class AppModel {
 
     func previewPortableSetup(file: URL, targetClients: [ClientID], values: [String: String]) throws -> PortableImportPreview {
         guard let service = portableSetup else { throw PortableSetupError.stalePreview }
-        return try service.preview(file: file, targetClients: targetClients, values: values)
+        return try service.preview(file: file, targetClients: targetClients, values: values, existing: current().servers)
     }
 
     func applyPortableSetup(previewID: String) throws {
@@ -339,7 +341,9 @@ final class AppModel {
     /// attached to a new server definition.
     func provenance(for server: Server) -> MCPProvenance {
         let identified = MCPProvenanceResolver.identify(server: server)
-        let installedVersion = server.health?.serverVersion ?? identified.installedVersion
+        // Only a version that comes from the package itself (a pinned launch
+        // or a local package.json) is compared with the registry.
+        let installedVersion = identified.installedVersion
         let checked = latestProvenance[server.id]
         let latest = checked?.kind == identified.kind && checked?.packageName == identified.packageName
             ? checked
@@ -377,6 +381,8 @@ final class AppModel {
         let warnings: [String]
     }
 
+    private var libraryScanGeneration = 0
+
     func libraryScan(path: String) async throws -> MCPLibraryScanResult {
         let url = URL(filePath: path).standardizedFileURL
         guard url.isFileURL, url.path.hasPrefix("/"), isDirectory(url) else {
@@ -384,10 +390,16 @@ final class AppModel {
         }
         // Up to 5,000 entries and as many file reads: off the main actor, so the
         // window keeps drawing while a large directory is walked.
+        libraryScanGeneration += 1
+        let generation = libraryScanGeneration
         let result = await Task.detached(priority: .userInitiated) {
             MCPLibraryScanner(root: url).scan()
         }.value
-        libraryCandidates = Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.id, $0) })
+        // A slower, older scan finishing last must not replace the candidates
+        // of the one the window is showing.
+        if generation == libraryScanGeneration {
+            libraryCandidates = Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.id, $0) })
+        }
         return result
     }
 
@@ -680,7 +692,9 @@ final class AppModel {
         if enabled {
             guard service.status != .enabled else { return }
             try service.register()
-        } else if service.status == .enabled {
+        } else if service.status != .notRegistered && service.status != .notFound {
+            // Also when it is waiting for approval: approved later, it would
+            // open Kytto at login although the setting says off.
             try service.unregister()
         }
     }
@@ -743,23 +757,16 @@ final class AppModel {
 
     private func recordHealth(for server: Server) async throws -> HealthResult {
         let checker = self.checker
-        var httpHeaders: [String: String]?
         let resource = server.transport == .http ? server.runnableURL.flatMap { try? RemoteOAuthClient.canonicalResource($0) } : nil
         let authorizationGeneration = resource.map { remoteAuthorizationGenerations[$0, default: 0] }
+        var credential: RemoteOAuthCredential?
+        var refreshed = false
         if let resource {
             do {
-                if var credential = try remoteOAuthCredentials.load(resourceURL: resource) {
-                    if credential.requiresRefresh {
-                        let saved = credential
-                        credential = try await Task.detached(priority: .userInitiated) {
-                            try RemoteOAuthClient().refresh(saved)
-                        }.value
-                        guard remoteAuthorizationGenerations[resource, default: 0] == authorizationGeneration else {
-                            throw AppError.authorizationChanged
-                        }
-                        try remoteOAuthCredentials.store(credential)
-                    }
-                    httpHeaders = credential.authorizationHeaders
+                credential = try remoteOAuthCredentials.load(resourceURL: resource)
+                if let saved = credential, saved.requiresRefresh {
+                    credential = try await refreshedCredential(saved, resource: resource, generation: authorizationGeneration)
+                    refreshed = true
                 }
             } catch {
                 if remoteAuthorizationGenerations[resource, default: 0] != authorizationGeneration {
@@ -777,10 +784,20 @@ final class AppModel {
                 return health
             }
         }
-        let headers = httpHeaders
-        let outcome = await Task.detached(priority: .userInitiated) {
-            checker.check(server, httpHeaders: headers)
-        }.value
+        let checked = directDefinitionForCheck(server)
+        func run(_ headers: [String: String]?) async -> (health: HealthResult, tokenWeight: TokenWeight?) {
+            await Task.detached(priority: .userInitiated) {
+                checker.check(checked, httpHeaders: headers)
+            }.value
+        }
+        var outcome = await run(credential?.authorizationHeaders)
+        // A token revoked early, or one issued without an expiry, shows up only
+        // as the server refusing it. One refresh and one retry, not a loop.
+        if outcome.health.status == .needsAuthorization, !refreshed, let resource,
+           let saved = credential, saved.canRefresh,
+           let renewed = try? await refreshedCredential(saved, resource: resource, generation: authorizationGeneration) {
+            outcome = await run(renewed.authorizationHeaders)
+        }
 
         // The check can take ten seconds and the window stays usable meanwhile.
         // A server deleted (or renamed) in that time must not get its metadata
@@ -802,12 +819,23 @@ final class AppModel {
     func checkAllHealth(
         onProgress: @MainActor (String, Int, Int) async -> Void
     ) async throws {
+        // One run at a time: the window and the menu bar can both start one,
+        // and two would start every server twice, in parallel, which is what
+        // "sequential on purpose" is for.
+        guard !isCheckingAll else { throw AppError.checkAllAlreadyRunning }
+        isCheckingAll = true
+        defer { isCheckingAll = false }
         let servers = current().servers.filter { $0.transport != .sse }
         var persistenceFailures = 0
+        var interrupted = 0
         for (index, server) in servers.enumerated() {
             await onProgress(server.name, index + 1, servers.count)
             do {
                 _ = try await recordHealth(for: server)
+            } catch AppError.authorizationChanged {
+                // A sign-in during the run: that server is simply not recorded,
+                // which is not a disk problem.
+                interrupted += 1
             } catch {
                 persistenceFailures += 1
             }
@@ -816,6 +844,60 @@ final class AppModel {
         if persistenceFailures > 0 {
             throw AppError.healthResultsCouldNotBeSaved(persistenceFailures)
         }
+        if interrupted > 0 {
+            throw AppError.checksInterrupted(interrupted)
+        }
+    }
+
+    /// Whether a check of every server is in progress, for menus that offer one.
+    private(set) var isCheckingAll = false
+
+    /// The server a Gateway route stands for, so a health check measures the
+    /// server rather than the helper. Checked through the helper, `tools/list`
+    /// comes back already masked: hidden tools would vanish from the tool
+    /// picker (and saving it unchanged would drop the mask), Contract Guard
+    /// would see tools removed, and every check would log a client session in
+    /// Live Activity that no client started.
+    private func directDefinitionForCheck(_ server: Server) -> Server {
+        guard server.transport == .stdio, let command = server.command,
+              URL(filePath: command).lastPathComponent == "kytto-mcp-proxy",
+              let flag = server.args.firstIndex(of: "--route"), server.args.indices.contains(flag + 1),
+              let launch = try? gatewayRoutes.resolve(id: server.args[flag + 1], secrets: gatewaySecretStore)
+        else { return server }
+        var direct = Server(
+            id: server.id, name: server.name, transport: .stdio,
+            command: launch.route.command, args: launch.route.arguments,
+            env: launch.environment.map { EnvEntry(key: $0.key, value: $0.value) }.sorted { $0.key < $1.key },
+            url: nil, enabledIn: server.enabledIn, origin: server.origin, fingerprint: server.fingerprint,
+            isBundled: server.isBundled, definitionSource: server.definitionSource
+        )
+        direct.definitionsByClient = server.definitionsByClient
+        return direct
+    }
+
+    /// One refresh per resource at a time. Refresh tokens rotate, so two
+    /// checks of the same remote refreshing in parallel would spend the same
+    /// token twice — and an authorization server that detects the replay
+    /// revokes the whole grant. Later callers wait for the running refresh.
+    private func refreshedCredential(_ saved: RemoteOAuthCredential, resource: String, generation: Int?) async throws -> RemoteOAuthCredential {
+        if let running = remoteRefreshes[resource] { return try await running.value }
+        let task = Task.detached(priority: .userInitiated) { try RemoteOAuthClient().refresh(saved) }
+        remoteRefreshes[resource] = task
+        defer { remoteRefreshes[resource] = nil }
+        let renewed = try await task.value
+        guard remoteAuthorizationGenerations[resource, default: 0] == generation else {
+            throw AppError.authorizationChanged
+        }
+        try remoteOAuthCredentials.store(renewed)
+        return renewed
+    }
+
+    /// The saved credential's headers and scopes, for a step-up sign-in.
+    func remoteAuthorizationContext(serverID: String) -> (headers: [String: String], scopes: [String])? {
+        guard let url = try? remoteServerURL(serverID: serverID),
+              let resource = try? RemoteOAuthClient.canonicalResource(url),
+              let credential = try? remoteOAuthCredentials.load(resourceURL: resource) else { return nil }
+        return (credential.authorizationHeaders, credential.scopes)
     }
 
     func remoteServerURL(serverID: String) throws -> String {
@@ -862,9 +944,20 @@ final class AppModel {
     }
 
     /// Records that a contract change has been read, so the alert can end.
-    func acknowledgeContract(serverID: String) throws {
+    static func reviewToken(for changes: [ContractChange]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let data = (try? encoder.encode(changes)) ?? Data()
+        return SHA256.hash(data: data).prefix(12).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func acknowledgeContract(serverID: String, reviewToken: String? = nil) throws {
         guard current().servers.contains(where: { $0.id == serverID }) else {
             throw AppError.unknownServer(serverID)
+        }
+        if let reviewToken, let changes = metadata.all()[serverID]?.contractChanges, !changes.isEmpty,
+           Self.reviewToken(for: changes) != reviewToken {
+            throw AppError.contractChangedSinceShown
         }
         let portable = makePortableSetup()
         let pending = try portable.pendingContractSummary().first { $0.serverID == serverID }
@@ -889,8 +982,8 @@ final class AppModel {
               let currentCommand = server.command,
               let resolvedCommand = server.health?.resolvedCommand,
               server.health?.status == .passed,
-              currentCommand != resolvedCommand,
-              resolvedCommand.hasPrefix("/")
+              resolvedCommand.hasPrefix("/"),
+              MCPDoctor.resolvedCommand(resolvedCommand, matches: currentCommand.trimmingCharacters(in: .whitespacesAndNewlines))
         else { throw AppError.noVerifiedExecutable(server.name) }
 
         let clients = server.enabledIn
@@ -1089,6 +1182,9 @@ final class AppModel {
         clientID: ClientID
     ) -> [(server: Server, enabled: Bool)] {
         servers.compactMap { server in
+            // A plugin's servers are switched with the plugin, in its client;
+            // listing them under "Switch off" promised a change that always fails.
+            if case .plugin = server.origin { return nil }
             let current = server.enabledIn[clientID] ?? .absent
             if desired.contains(server.id), current != .enabled {
                 return (server, true)
@@ -1422,6 +1518,9 @@ final class AppModel {
         case gatewayManaged(String)
         case noVerifiedExecutable(String)
         case healthResultsCouldNotBeSaved(Int)
+        case checkAllAlreadyRunning
+        case contractChangedSinceShown
+        case checksInterrupted(Int)
         case authorizationChanged
         case noDrift(String)
         case launchAtLoginRollbackFailed(original: String, rollback: String)
@@ -1453,6 +1552,12 @@ final class AppModel {
                 "“\(name)” does not have a successful health check with a verified absolute executable path."
             case .healthResultsCouldNotBeSaved(let count):
                 "Could not save \(count) health check result\(count == 1 ? "" : "s"). The server processes were stopped safely; check that Kytto can write to its application data directory."
+            case .contractChangedSinceShown:
+                "The contract changed again while you were reviewing it. Kytto did not mark it reviewed; read the new changes first."
+            case .checkAllAlreadyRunning:
+                "Kytto is already checking every server. Wait for that run to finish."
+            case .checksInterrupted(let count):
+                "\(count) server\(count == 1 ? " was" : "s were") not recorded because \(count == 1 ? "its" : "their") sign-in or saved authorization changed during the run. Check \(count == 1 ? "it" : "them") again."
             case .noDrift(let name):
                 "Every editable copy of “\(name)” already matches. There is nothing to unify."
             case .launchAtLoginRollbackFailed(let original, let rollback):
@@ -1475,6 +1580,11 @@ struct ContractAlert: Sendable {
     let serverName: String
     let changedAt: Date
     let changes: [ContractChange]
+
+    /// Names exactly these changes. The page sends it back when the user marks
+    /// the alert reviewed, so a check that recorded something newer in the
+    /// meantime cannot be accepted along with what was on screen.
+    var reviewToken: String { AppModel.reviewToken(for: changes) }
 }
 
 /// What unifying would do, before it does it.

@@ -30,6 +30,9 @@ public enum GatewayMigrationError: Error, LocalizedError, Equatable {
     case invalidDefinition(String)
     case routeMismatch
     case orphanedRouteInBackup(String)
+    /// The app is running from a place that will not exist later — a disk
+    /// image, or the random folder macOS translocates a quarantined app to.
+    case helperLocationUnstable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -51,6 +54,8 @@ public enum GatewayMigrationError: Error, LocalizedError, Equatable {
             "The client configuration no longer points at this gateway route. Kytto did not overwrite it."
         case .orphanedRouteInBackup(let id):
             "That backup points at gateway route \(id), but its credentials no longer exist. Restore a Direct backup instead."
+        case .helperLocationUnstable(let path):
+            "Kytto is running from \(path), which will not exist after a restart or once the disk image is ejected. Move Kytto to the Applications folder, open it from there, then turn on Gateway mode."
         }
     }
 }
@@ -239,6 +244,11 @@ public struct GatewayMigrationService: Sendable {
         guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
             throw GatewayMigrationError.helperUnavailable(helperURL.path)
         }
+        // The helper's path is written into the client's config, so it has to
+        // outlive this launch.
+        if helperURL.path.contains("/AppTranslocation/") || helperURL.path.hasPrefix("/Volumes/") {
+            throw GatewayMigrationError.helperLocationUnstable(helperURL.deletingLastPathComponent().path)
+        }
         guard server.transport == .stdio else { throw GatewayMigrationError.unsupportedTransport }
         guard !server.isBundled else { throw GatewayMigrationError.bundledServer }
         guard server.enabledIn[clientID] == .enabled else { throw GatewayMigrationError.serverNotEnabled }
@@ -272,6 +282,11 @@ public struct GatewayMigrationService: Sendable {
                   let member = map.members?.first(where: { Server.identity(for: $0.key) == serverID })
             else { throw GatewayMigrationError.definitionMissing }
             let node = member.value
+            let extra = node.keys.filter { !["command", "args", "env", "type"].contains($0) }
+            if !extra.isEmpty { throw Self.unmodelled(extra) }
+            if let type = node["type"], type.stringValue != "stdio" {
+                throw GatewayMigrationError.invalidDefinition("it is not a stdio server")
+            }
             guard let command = node["command"]?.stringValue, !command.isEmpty else {
                 throw GatewayMigrationError.invalidDefinition("its command is missing or is not a string")
             }
@@ -280,6 +295,7 @@ public struct GatewayMigrationService: Sendable {
                 throw GatewayMigrationError.invalidDefinition("one of its arguments is not a string")
             }
             let environment = try jsonEnvironment(node["env"])
+            try Self.refusePlaceholders(command: command, arguments: arguments, environment: environment)
             let unit = IndentStyle.detect(in: document.sourceText).text
             let replacement = ServerDraft(
                 name: member.key,
@@ -302,6 +318,25 @@ public struct GatewayMigrationService: Sendable {
                   let table = document.table(at: [target.source.serversKey, name]),
                   let sourceText = document.serverDefinitionText(name, under: target.source.serversKey)
             else { throw GatewayMigrationError.definitionMissing }
+            // Restore puts this text back as one block, so it must be this
+            // server's tables and nothing else — not a neighbour sitting between
+            // two of them, which would then be written twice.
+            let ownPath = [target.source.serversKey, name]
+            guard let slice = try? TOMLDocument.parse(sourceText),
+                  slice.tables.allSatisfy({ $0.path.starts(with: ownPath) }) else {
+                throw GatewayMigrationError.invalidDefinition("its tables are not next to each other in config.toml; move them together first")
+            }
+            let subtables = slice.tables.map(\.path).filter { $0.count > ownPath.count }
+            if let other = subtables.first(where: { $0 != ownPath + ["env"] }) {
+                throw Self.unmodelled([other[ownPath.count]])
+            }
+            // Launch settings move into the route; settings that tell Codex how
+            // to treat the entry (timeouts, which tools to show) apply to the
+            // helper just the same and stay in the block, spelled as they were.
+            let clientSide = table.pairs.filter { Self.codexClientKeys.contains($0.key.first ?? "") }
+            let extra = table.pairs.compactMap(\.key.first)
+                .filter { !["command", "args", "env"].contains($0) && !Self.codexClientKeys.contains($0) }
+            if !extra.isEmpty { throw Self.unmodelled(Array(Set(extra)).sorted()) }
             guard let command = table.value("command")?.stringValue, !command.isEmpty else {
                 throw GatewayMigrationError.invalidDefinition("its command is missing or is not a string")
             }
@@ -310,9 +345,11 @@ public struct GatewayMigrationService: Sendable {
                 throw GatewayMigrationError.invalidDefinition("one of its arguments is not a string")
             }
             let environment = try tomlEnvironment(
-                document.table(at: [target.source.serversKey, name, "env"])
+                table: table,
+                subtable: document.table(at: [target.source.serversKey, name, "env"])
             )
-            let replacement = TOMLBuilder.serverBlock(
+            try Self.refusePlaceholders(command: command, arguments: arguments, environment: environment)
+            let replacement = ([TOMLBuilder.serverBlock(
                 name: name,
                 under: target.source.serversKey,
                 command: helperURL.path,
@@ -320,7 +357,7 @@ public struct GatewayMigrationService: Sendable {
                 url: nil,
                 env: [],
                 enabled: nil
-            )
+            )] + clientSide.map { document.slice($0.span) }).joined(separator: "\n")
             return DirectDefinition(
                 serverName: name,
                 sourceText: sourceText,
@@ -345,12 +382,43 @@ public struct GatewayMigrationService: Sendable {
         }
     }
 
-    private func tomlEnvironment(_ table: TOMLTable?) throws -> [EnvEntry] {
-        try (table?.pairs ?? []).map { pair in
-            guard let key = pair.name, let value = pair.value.stringValue else {
+    /// Every way Codex accepts an environment: an `[….env]` sub-table, an
+    /// inline `env = { … }` (what Codex's own docs show), or dotted `env.K = …`.
+    /// Missing one would start the server without it — and leave its values
+    /// unredacted in the preview.
+    private func tomlEnvironment(table: TOMLTable, subtable: TOMLTable?) throws -> [EnvEntry] {
+        var pairs: [(String?, TOMLValue)] = (subtable?.pairs ?? []).map { ($0.name, $0.value) }
+        if let env = table.value("env") {
+            guard let inline = env.inlinePairs else {
+                throw GatewayMigrationError.invalidDefinition("its environment is not a table")
+            }
+            pairs += inline.map { ($0.name, $0.value) }
+        }
+        pairs += table.pairs.filter { $0.key.count == 2 && $0.key[0] == "env" }.map { ($0.key[1], $0.value) }
+        return try pairs.map { key, value in
+            guard let key, let value = value.stringValue else {
                 throw GatewayMigrationError.invalidDefinition("one of its environment values is not a string")
             }
             return EnvEntry(key: key, value: value)
+        }
+    }
+
+    /// Codex keys about the entry rather than the process it launches.
+    private static let codexClientKeys: Set<String> = [
+        "enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools",
+    ]
+
+    private static func unmodelled(_ keys: [String]) -> GatewayMigrationError {
+        .invalidDefinition("it uses \(keys.joined(separator: ", ")), which the gateway does not carry over. Remove \(keys.count == 1 ? "it" : "them") or keep this server Direct")
+    }
+
+    /// `${…}` is expanded by the client that launches a definition. Behind the
+    /// gateway the client launches the helper instead, so the server would
+    /// receive the placeholder text itself.
+    private static func refusePlaceholders(command: String, arguments: [String], environment: [EnvEntry]) throws {
+        let values = [command] + arguments + environment.compactMap(\.value)
+        if values.contains(where: { $0.contains("${") }) {
+            throw GatewayMigrationError.invalidDefinition("it uses ${…} placeholders, which only its client can expand")
         }
     }
 
@@ -447,12 +515,21 @@ public struct GatewayMigrationService: Sendable {
                 ($0.value.span, JSONText.string("<stored in credentials>"))
             })
         case .toml:
-            guard let document = try? TOMLDocument.parse(direct.sourceText),
-                  let environment = document.tables.first(where: { $0.path.last == "env" })
-            else { return direct.sourceText }
-            return document.replacing(environment.pairs.map {
-                ($0.value.span, TOMLText.string("<stored in credentials>"))
-            })
+            guard let document = try? TOMLDocument.parse(direct.sourceText) else {
+                return direct.environment.isEmpty ? direct.sourceText : "<preview withheld: the definition could not be redacted>"
+            }
+            var spans: [TOMLSpan] = []
+            for table in document.tables {
+                if table.path.last == "env" { spans += table.pairs.map(\.value.span) }
+                for pair in table.pairs where pair.key.first == "env" {
+                    if pair.key.count == 2 { spans.append(pair.value.span) }
+                    spans += (pair.value.inlinePairs ?? []).map(\.value.span)
+                }
+            }
+            guard spans.count >= direct.environment.count else {
+                return "<preview withheld: the definition could not be redacted>"
+            }
+            return document.replacing(spans.map { ($0, TOMLText.string("<stored in credentials>")) })
         }
     }
 }

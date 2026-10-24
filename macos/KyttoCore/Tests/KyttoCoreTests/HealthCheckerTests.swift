@@ -68,6 +68,58 @@ struct HealthCheckerTests {
         #expect(weight != nil)
     }
 
+    @Test("the login shell's PATH is read up to its end marker")
+    func loginShellPath() {
+        #expect(testShell.resolvedFromLoginShell)
+        #expect(!testShell.path.contains("__KYTTO_PATH_END__"))
+        #expect(testShell.path.split(separator: ":").allSatisfy { $0.hasPrefix("/") })
+    }
+
+    @Test("a server that speaks only MCP 2026-07-28 is checked without a handshake")
+    func modernOnlyServer() throws {
+        let checker = HealthChecker(shell: testShell, timeout: 20)
+        let (health, _) = checker.check(fakeServer(mode: "modern", name: "modern-only"))
+        #expect(health.status == .passed, Comment(rawValue: health.currentMessage ?? "no message"))
+        #expect(health.protocolVersion == MCPStdioClient.modernProtocolVersion)
+        #expect(health.serverName == "modern-server")
+        #expect(health.toolCount == 1)
+    }
+
+    @Test("handshake-era servers that ignore, or die on, the discovery probe still pass",
+          arguments: ["silent", "exitearly"])
+    func handshakeServersSurviveTheProbe(mode: String) throws {
+        let checker = HealthChecker(shell: testShell, timeout: 8)
+        let (health, _) = checker.check(fakeServer(mode: mode, name: "legacy-\(mode)"))
+        #expect(health.status == .passed, Comment(rawValue: health.currentMessage ?? "no message"))
+        #expect(health.protocolVersion == MCPStdioClient.preferredProtocolVersion)
+        #expect(health.toolCount == 3)
+    }
+
+    @Test("a server that names the one revision it accepts gets a second handshake")
+    func strictVersionRetry() throws {
+        let checker = HealthChecker(shell: testShell, timeout: 20)
+        let (health, _) = checker.check(fakeServer(mode: "strict"))
+        #expect(health.status == .passed, Comment(rawValue: health.currentMessage ?? "no message"))
+        #expect(health.protocolVersion == "2024-11-05")
+    }
+
+    @Test("a prompts-only server is healthy with no tools")
+    func promptsOnlyServer() throws {
+        let checker = HealthChecker(shell: testShell, timeout: 20)
+        let (health, _) = checker.check(fakeServer(mode: "promptsonly"))
+        #expect(health.status == .passed, Comment(rawValue: health.currentMessage ?? "no message"))
+        #expect(health.toolCount == 0)
+        #expect(health.promptCount == 2)
+    }
+
+    @Test("a server request is answered, so a server waiting on it does not time out")
+    func serverRequestIsAnswered() throws {
+        let checker = HealthChecker(shell: testShell, timeout: 20)
+        let (health, _) = checker.check(fakeServer(mode: "roots"))
+        #expect(health.status == .passed, Comment(rawValue: health.currentMessage ?? "no message"))
+        #expect(health.deprecatedFeatures == [.roots])
+    }
+
     @Test("every page of tools/list is read, not just the first")
     func followsPagination() throws {
         let checker = HealthChecker(shell: testShell, timeout: 20)

@@ -406,3 +406,25 @@ struct RealConfigEditTests {
         #expect(restored == original.sourceText)
     }
 }
+
+@Suite("JSONEditor — commas around comments")
+struct JSONCCommaTests {
+    @Test("removing the last member after a commented line leaves no trailing comma")
+    func lastAfterComment() throws {
+        let text = "{\n  \"a\": {}, // primary\n  \"b\": {}\n}"
+        let result = try JSONDocument.parse(text).removingMember("b", at: [])
+        #expect(!result.contains("{}, // primary"))
+        #expect(try JSONDocument.parse(result).root.keys == ["a"])
+        // Strict JSON readers (and a client that does not accept trailing
+        // commas) must still read the file once comments are stripped.
+        let stripped = result.split(separator: "\n").map { $0.components(separatedBy: "//")[0] }.joined(separator: "\n")
+        #expect((try? JSONSerialization.jsonObject(with: Data(stripped.utf8))) != nil)
+    }
+
+    @Test("removing a member whose comma follows a block comment")
+    func commaAfterBlockComment() throws {
+        let result = try JSONDocument.parse(#"{ "a": 1 /* x */, "b": 2 }"#).removingMember("a", at: [])
+        #expect(try JSONDocument.parse(result).root.keys == ["b"])
+        #expect(!result.contains("{ ,"))
+    }
+}

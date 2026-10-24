@@ -298,3 +298,27 @@ struct TOMLRoundTripTests {
         #expect(updated.contains("\r\n"))
     }
 }
+
+@Suite("TOMLDocument — strictness Codex shares")
+struct TOMLStrictnessTests {
+    @Test("a table defined twice is refused, so Kytto never writes one")
+    func duplicateTable() {
+        #expect(throws: TOMLParseError.self) { try TOMLDocument.parse("[mcp_servers.a]\ncommand = \"x\"\n[mcp_servers.a]\nargs = []\n") }
+        #expect(throws: TOMLParseError.self) { try TOMLDocument.parse("[mcp_servers]\nfoo.command = \"x\"\n[mcp_servers.foo]\nargs = []\n") }
+        #expect(throws: TOMLParseError.self) { try TOMLDocument.parse("[a]\nk = 1\nk = 2\n") }
+    }
+
+    @Test("legal repetition still parses")
+    func legalRepetition() throws {
+        _ = try TOMLDocument.parse("[[profiles]]\nname = \"a\"\n[[profiles]]\nname = \"b\"\n")
+        _ = try TOMLDocument.parse("[mcp_servers.a.env]\nK = \"v\"\n[mcp_servers.a]\ncommand = \"x\"\n")
+        _ = try TOMLDocument.parse("[mcp_servers.a]\ncommand = \"x\"\n[mcp_servers.b]\ncommand = \"y\"\n[mcp_servers.a.env]\nK = \"v\"\n")
+    }
+
+    @Test("a multi-line string may end in quotes before its delimiter")
+    func trailingQuotesInMultilineString() throws {
+        let document = try TOMLDocument.parse("note = \"\"\"say \"hi\"\"\"\"\nnext = 1\n")
+        #expect(document.tables.first?.value("note")?.stringValue == "say \"hi\"")
+        #expect(document.tables.first?.value("next") != nil)
+    }
+}

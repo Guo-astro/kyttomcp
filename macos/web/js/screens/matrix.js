@@ -211,7 +211,11 @@ function focusSnapshot(element, root) {
 
 function restoreFocus(snapshot, root) {
   if (!snapshot?.dataset?.action) return;
-  const candidates = root.querySelectorAll(`[data-action="${snapshot.dataset.action}"]`);
+  // With a dialog open, focus belongs inside it. The inspector behind the
+  // backdrop renders the same buttons first in DOM order, and focus landing
+  // there would let Enter act outside the modal.
+  const scope = root.querySelector('.sheet[role="dialog"]') ?? root;
+  const candidates = scope.querySelectorAll(`[data-action="${snapshot.dataset.action}"]`);
   const element = [...candidates].find((candidate) =>
     Object.entries(snapshot.dataset).every(([key, value]) => candidate.dataset[key] === value),
   );
@@ -523,7 +527,9 @@ function matrixWorkspace(state, clients, servers) {
 
 function filterSelect(label, action, selected, options, icon) {
   const field = el('label', 'matrix-filter');
-  if (selected !== options[0]?.id) field.classList.add('is-active');
+  // Highlighted when it narrows what is shown. Row density narrows nothing, so
+  // choosing Compact must not look like an active filter.
+  if (action !== 'row-density' && selected !== options[0]?.id) field.classList.add('is-active');
   const control = el('span', 'filter-control');
   const leading = glyph(icon);
   leading.classList.add('filter-icon');
@@ -811,7 +817,7 @@ function emptyState(clients) {
   const box = el('div', 'placeholder');
   box.append(el('p', null, 'No MCP servers found in any client configuration.'));
   const detail = clients.length
-    ? 'The clients below were detected, but none of them has a server configured yet.'
+    ? 'The clients in the sidebar were detected, but none of them has a server configured yet.'
     : 'No supported clients were detected on this machine.';
   box.append(el('p', 'muted', detail));
   return box;

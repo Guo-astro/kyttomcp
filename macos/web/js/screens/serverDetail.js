@@ -308,7 +308,9 @@ function contractSection(state, server) {
   const alert = (state.contractAlerts ?? []).find((entry) => entry.serverID === server.id);
   const pending = state.pendingContractImports?.entries?.find((entry) => entry.serverID === server.id);
   const importError = state.pendingContractImports?.error;
-  if (!alert && !pending && !importError) return null;
+  // The pending-import store is one file for every server; its error belongs
+  // with a server that has something to review, not on every server's page.
+  if (!alert && !pending) return null;
   const section = el('section', 'detail-section contract-alert');
   section.append(el('h3', null, 'Contract Guard'));
   if (importError) section.append(el('p', 'failure-message', importError));
@@ -345,7 +347,7 @@ function contractSection(state, server) {
   if (alert || pending) {
     const review = busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
       className: 'button subtle',
-      dataset: { serverId: server.id },
+      dataset: { serverId: server.id, reviewToken: alert?.reviewToken ?? '' },
     });
     if (importError || (pending && (pending.matching == null || server.health?.status !== 'passed'))) {
       review.disabled = true;

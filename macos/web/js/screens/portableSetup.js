@@ -38,6 +38,7 @@ export function renderPortableImport(state) {
   if (current.error) body.push(el('p', 'failure-message', current.error));
   return sheet('Import setup', body, [
     button('Cancel', 'close-sheet', { className: 'button subtle' }),
+    el('span', 'spacer'),
     busyButton(current.busy, 'Import disabled', 'Importing…', 'apply-setup-import', { className: 'button primary' }),
   ]);
 }

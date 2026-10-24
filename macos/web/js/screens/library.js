@@ -119,7 +119,7 @@ function agentImport(state) {
   inputLabel.append(input);
   section.append(inputLabel);
 
-  section.append(targetPicker(state, state.importTargetIDs?.length ? state.importTargetIDs : defaultTargets(state), 'import-target', 'import'));
+  section.append(targetPicker(state, state.importTargetIDs ?? defaultTargets(state), 'import-target', 'import'));
   const actions = el('div', 'library-actions');
   const preview = button(state.importBusy ? 'Previewing…' : 'Preview JSON', state.importBusy ? 'noop' : 'preview-import');
   preview.disabled = state.importBusy || !(state.importText ?? '').trim();

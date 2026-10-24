@@ -72,7 +72,9 @@ export function renderSidebar(state, selectionChanged = false) {
       }
     }
     if (custom.length > 0) {
-      sidebar.append(customHeading(custom.length, shown));
+      // Grouped sources sit under their client, so with none left over the
+      // heading only offers the show/hide switch, and says so.
+      sidebar.append(customHeading(custom.length, shown, custom.some((entry) => !grouped.has(entry.id))));
       if (shown) {
         for (const client of custom.filter((entry) => !grouped.has(entry.id))) sidebar.append(clientItem(state, client, selectionChanged));
       }
@@ -193,7 +195,7 @@ function panelCount(state, panelID) {
 /// sidebar — a project scope per directory Claude Code has been run in — and
 /// folding them takes them out of the matrix as well, because a column of
 /// switches that cannot be switched is the part that was in the way (§7.8).
-function customHeading(count, shown) {
+function customHeading(count, shown, hasUngrouped = true) {
   const heading = el('button', `side-heading side-disclosure${shown ? '' : ' collapsed'}`);
   heading.dataset.action = 'toggle-custom-sources';
   heading.dataset.shown = String(shown);
@@ -202,7 +204,7 @@ function customHeading(count, shown) {
     ? `Hide the ${count} read-only ${count === 1 ? 'source' : 'sources'}, here and in the matrix. They are still read and counted.`
     : `Show the ${count} read-only ${count === 1 ? 'source' : 'sources'} again, here and in the matrix.`;
   heading.append(glyph(GLYPH.disclosure));
-  heading.append(el('span', null, 'Custom sources · read-only'));
+  heading.append(el('span', null, hasUngrouped ? 'Custom sources' : shown ? 'Hide read-only sources' : 'Show read-only sources'));
   heading.append(el('span', 'side-count', String(count)));
   return heading;
 }

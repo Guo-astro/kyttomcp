@@ -90,7 +90,7 @@ public enum ContractGuard {
                     severity: .warning,
                     toolName: name,
                     summary: "Model-facing description changed",
-                    details: [ContractFieldChange(path: "description", before: excerpt(lhs.description), after: excerpt(rhs.description))]
+                    details: [field("description", lhs.description, rhs.description)]
                 ))
             }
             if !sameSchema(lhs.inputSchemaJSON, rhs.inputSchemaJSON) {
@@ -115,20 +115,73 @@ public enum ContractGuard {
         return result
     }
 
-    private static func excerpt(_ value: String?) -> String? {
-        value.map {
-            let scalars = $0.unicodeScalars.prefix(801)
-            return scalars.count > 800
-                ? String(String.UnicodeScalarView(scalars.prefix(800))) + "… [truncated]"
-                : $0
+    static let excerptLimit = 800
+
+    /// Bounded, comparable excerpts of a before/after pair.
+    ///
+    /// A plain prefix would make two long texts that differ only near the end
+    /// look identical, which is exactly how an appended instruction would hide.
+    /// When either side is too long, both are cut to the same window around
+    /// the first difference. Invisible and format characters are spelled out,
+    /// so a change made only of them never renders as "no change".
+    static func excerpts(_ before: String?, _ after: String?) -> (String?, String?) {
+        let lhs = before.map { Array($0.unicodeScalars) }
+        let rhs = after.map { Array($0.unicodeScalars) }
+        let limit = excerptLimit
+        guard max(lhs?.count ?? 0, rhs?.count ?? 0) > limit else {
+            return (before.map(visible), after.map(visible))
+        }
+        var start = 0
+        if let lhs, let rhs {
+            var common = 0
+            while common < lhs.count, common < rhs.count, lhs[common] == rhs[common] { common += 1 }
+            start = max(0, common - limit / 4)
+        }
+        func window(_ scalars: [Unicode.Scalar]?) -> String? {
+            guard let scalars else { return nil }
+            let lower = min(start, scalars.count)
+            let upper = min(scalars.count, lower + limit)
+            var text = visible(String(String.UnicodeScalarView(scalars[lower..<upper])))
+            if lower > 0 { text = "[from character \(lower + 1)] …" + text }
+            if upper < scalars.count { text += "… [truncated]" }
+            return text
+        }
+        return (window(lhs), window(rhs))
+    }
+
+    private static func visible(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: invisible) else { return text }
+        var result = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            if invisible(scalar) {
+                result.append(contentsOf: String(format: "⟨U+%04X⟩", scalar.value).unicodeScalars)
+            } else {
+                result.append(scalar)
+            }
+        }
+        return String(result)
+    }
+
+    private static func invisible(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .format, .control:
+            return scalar != "\n" && scalar != "\t"
+        default:
+            return scalar.properties.isVariationSelector || scalar.value == 0x034F
+                || (0x115F...0x1160).contains(scalar.value) || scalar.value == 0x3164 || scalar.value == 0xFFA0
         }
     }
 
-    private static func display(_ value: Any?) -> String? {
+    private static func field(_ path: String, _ before: String?, _ after: String?, explanation: String? = nil) -> ContractFieldChange {
+        let (lhs, rhs) = excerpts(before, after)
+        return ContractFieldChange(path: path, before: lhs, after: rhs, explanation: explanation)
+    }
+
+    private static func serialized(_ value: Any?) -> String? {
         guard let value else { return nil }
         guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes]),
               let text = String(data: data, encoding: .utf8) else { return nil }
-        return excerpt(text)
+        return text
     }
 
     private static func annotationDetails(_ before: ToolAnnotations?, _ after: ToolAnnotations?) -> [ContractFieldChange] {
@@ -152,9 +205,10 @@ public enum ContractGuard {
         // Parsing is bounded independently of rendering. Large or malformed
         // contracts remain changes, with a raw excerpt instead of a deep walk.
         guard let before, let after, before.utf8.count <= 1_000_000, after.utf8.count <= 1_000_000,
+              !repeatsKeys(before), !repeatsKeys(after),
               let lhs = try? JSONSerialization.jsonObject(with: Data(before.utf8), options: [.fragmentsAllowed]),
               let rhs = try? JSONSerialization.jsonObject(with: Data(after.utf8), options: [.fragmentsAllowed]) else {
-            return [ContractFieldChange(path: "inputSchema", before: excerpt(before), after: excerpt(after), explanation: "Inspect the original schema; a structured comparison is unavailable.")]
+            return [field("inputSchema", before, after, explanation: "Inspect the original schema; a structured comparison is unavailable.")]
         }
         var result: [ContractFieldChange] = []
         var omitted = false
@@ -172,8 +226,8 @@ public enum ContractGuard {
                         let newField = right[key].flatMap { try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed]) }
                         if oldField == newField { continue }
                         if result.count >= 40 { omitted = true; break }
-                        result.append(ContractFieldChange(
-                            path: "inputSchema/[long field path]", before: display(left[key]), after: display(right[key]),
+                        result.append(field(
+                            "inputSchema/[long field path]", serialized(left[key]), serialized(right[key]),
                             explanation: "The schema field name or path is too long to display. Inspect the complete schema."
                         ))
                         continue
@@ -187,18 +241,18 @@ public enum ContractGuard {
             }
             let lower = path.lowercased()
             let guardRelated = ["dry_run", "dryrun", "confirm", "approval"].contains { lower.contains($0) }
-                || (lower.hasSuffix("/required") && ((display(lhs) ?? "") + (display(rhs) ?? "")).lowercased().contains("confirm"))
+                || (lower.hasSuffix("/required") && ((serialized(lhs) ?? "") + (serialized(rhs) ?? "")).lowercased().contains("confirm"))
             let explanation = guardRelated
                 ? "A confirmation or dry-run field changed. This may alter how the model requests a guarded action; verify the server's actual enforcement."
                 : (path.hasSuffix("/required") ? "Required arguments changed; existing calls may need different inputs." : nil)
-            result.append(ContractFieldChange(path: path, before: display(lhs), after: display(rhs), explanation: explanation))
+            result.append(field(path, serialized(lhs), serialized(rhs), explanation: explanation))
         }
         visit(lhs, rhs, "inputSchema", 0)
         if omitted {
             result.append(ContractFieldChange(path: "inputSchema", before: nil, after: nil, explanation: "Additional changes omitted. Inspect the complete schema before acknowledging."))
         }
         if result.isEmpty {
-            result.append(ContractFieldChange(path: "inputSchema", before: excerpt(before), after: excerpt(after)))
+            result.append(field("inputSchema", before, after))
         }
         return result
     }
@@ -222,7 +276,7 @@ public enum ContractGuard {
     }
 
     static func canonical(_ json: String) -> Data? {
-        guard json.utf8.count <= 1_000_000 else { return nil }
+        guard json.utf8.count <= 1_000_000, !repeatsKeys(json) else { return nil }
         guard let object = try? JSONSerialization.jsonObject(
             with: Data(json.utf8),
             options: [.fragmentsAllowed]
@@ -231,5 +285,31 @@ public enum ContractGuard {
             withJSONObject: object,
             options: [.sortedKeys, .fragmentsAllowed, .withoutEscapingSlashes]
         )
+    }
+
+    /// Whether any object in the schema names a key twice.
+    ///
+    /// `JSONSerialization` keeps the first value of a repeated key; clients'
+    /// parsers keep the last. Canonicalizing would therefore drop exactly the
+    /// value the model is shown, so a schema like this is compared as raw text
+    /// instead, and never collapses into "unchanged".
+    static func repeatsKeys(_ json: String) -> Bool {
+        guard let document = try? JSONDocument.parse(json) else { return false }
+        var pending = [document.root]
+        while let node = pending.popLast() {
+            switch node.kind {
+            case .object(let members):
+                var seen = Set<String>()
+                for member in members {
+                    if !seen.insert(member.key).inserted { return true }
+                    pending.append(member.value)
+                }
+            case .array(let elements):
+                pending.append(contentsOf: elements)
+            default:
+                break
+            }
+        }
+        return false
     }
 }

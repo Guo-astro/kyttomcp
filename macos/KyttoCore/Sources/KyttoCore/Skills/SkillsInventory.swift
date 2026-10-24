@@ -81,11 +81,14 @@ public struct SkillsInventoryScanner: Sendable {
         var warnings: [String] = []
 
         for root in roots {
-            guard isDirectory(root.url) else { continue }
+            // A root kept in dotfiles (`~/.claude/skills -> ~/dotfiles/…`) is a
+            // link; the clients follow it, so the inventory does too.
+            let rootURL = root.url.resolvingSymlinksInPath()
+            guard isDirectory(rootURL) else { continue }
             let children: [URL]
             do {
                 children = try FileManager.default.contentsOfDirectory(
-                    at: root.url,
+                    at: rootURL,
                     includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
                     options: [.skipsHiddenFiles]
                 )
@@ -94,8 +97,14 @@ public struct SkillsInventoryScanner: Sendable {
                 continue
             }
 
-            for directory in children.sorted(by: { $0.path < $1.path }) {
-                guard isDirectory(directory), !isSymbolicLink(directory) else { continue }
+            for child in children.sorted(by: { $0.path < $1.path }) {
+                // Skill installers link skill folders into place; a link to a
+                // folder is read like the folder it names.
+                let directory = isSymbolicLink(child) ? child.resolvingSymlinksInPath() : child
+                guard isDirectory(directory) else {
+                    if isSymbolicLink(child) { warnings.append("Skipped \(child.lastPathComponent) in the \(root.label) skills directory: its link does not lead to a folder.") }
+                    continue
+                }
                 guard let skillFile = skillFile(in: directory) else { continue }
                 drafts.append(readSkill(
                     file: skillFile,

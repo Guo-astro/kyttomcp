@@ -204,6 +204,8 @@ public struct HealthResult: Codable, Equatable, Sendable {
     /// Display-only resolution of the configured command.
     public let resolvedCommand: String?
     public let environmentSource: String?
+    /// Features the 2026-07-28 revision deprecates that this server used.
+    public let deprecatedFeatures: [DeprecatedFeature]?
 
     public init(
         status: Status,
@@ -223,8 +225,10 @@ public struct HealthResult: Codable, Equatable, Sendable {
         resolvedCommand: String? = nil,
         environmentSource: String? = nil,
         failure: HealthFailureReason? = nil,
-        authorizationURL: String? = nil
+        authorizationURL: String? = nil,
+        deprecatedFeatures: [DeprecatedFeature]? = nil
     ) {
+        self.deprecatedFeatures = deprecatedFeatures?.isEmpty == true ? nil : deprecatedFeatures
         self.status = status
         self.checkedAt = checkedAt
         self.toolCount = toolCount

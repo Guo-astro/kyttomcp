@@ -221,7 +221,8 @@ public enum ToolSafetyScanner {
         var lastWasSpace = false
         for scalar in text.lowercased().unicodeScalars {
             switch scalar.value {
-            case 0x00AD, 0x200B...0x200D, 0x2060, 0xFEFF:
+            case 0x00AD, 0x034F, 0x115F, 0x1160, 0x180E, 0x200B...0x200D, 0x2060...0x2064, 0x3164, 0xFEFF, 0xFFA0,
+                 0xFE00...0xFE0F, 0xE0000...0xE01EF:
                 continue
             default:
                 break
@@ -282,6 +283,10 @@ public enum ToolSafetyScanner {
                 return label("invisible formatting character", scalar)
             case 0xE0000...0xE007F: // Unicode tag characters
                 return label("Unicode tag character", scalar)
+            case 0xE0100...0xE01EF: // supplementary variation selectors, used to smuggle payloads
+                return label("variation selector", scalar)
+            case 0x034F, 0x180E, 0x115F, 0x1160, 0x3164, 0xFFA0: // grapheme joiner, Mongolian separator, Hangul fillers
+                return label("invisible formatting character", scalar)
             default:
                 continue
             }

@@ -211,6 +211,14 @@ struct JSONErrorTests {
         }
     }
 
+    @Test("nesting beyond the depth bound is a parse error, not a crash")
+    func nestingTooDeep() {
+        let deep = String(repeating: "[", count: 5_000) + String(repeating: "]", count: 5_000)
+        #expect(throws: JSONParseError.self) { try JSONDocument.parse(deep) }
+        let fine = String(repeating: "[", count: 127) + String(repeating: "]", count: 127)
+        #expect((try? JSONDocument.parse(fine)) != nil)
+    }
+
     @Test("unterminated block comment is rejected")
     func unterminatedComment() {
         #expect(throws: JSONParseError.self) {

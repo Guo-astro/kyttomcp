@@ -104,7 +104,9 @@ final class MenuBarController {
         open.target = self
         menu.addItem(open)
 
-        let check = NSMenuItem(title: "Check All Servers", action: #selector(checkAll), keyEquivalent: "")
+        let checking = model.isCheckingAll
+        let check = NSMenuItem(title: checking ? "Checking All Servers…" : "Check All Servers",
+                               action: checking ? nil : #selector(checkAll), keyEquivalent: "")
         check.target = self
         menu.addItem(check)
 
@@ -134,8 +136,11 @@ final class MenuBarController {
             item.state = state == .enabled ? .on : .off
             // A server this client does not have is shown, but dimmed: it is
             // information, and switching it on here would be a bigger decision
-            // than a menu bar click should carry.
+            // than a menu bar click should carry. Without an action: menus
+            // validate items themselves and ignore `isEnabled`, so a dimmed-
+            // looking row with an action would still copy the server in.
             item.isEnabled = state != .absent
+            if state == .absent { item.action = nil }
             if state == .absent {
                 item.title = "\(server.name) — not in this client"
             }
@@ -213,10 +218,11 @@ final class MenuBarController {
         Task {
             defer { onModelChanged?() }
             do {
-                try await model.checkAllHealth { _, _, _ in }
+                // Rebuilt once the run has started, so the menu says it is running.
+                try await model.checkAllHealth { _, index, _ in if index == 1 { self.refresh() } }
             } catch {
                 let alert = NSAlert()
-                alert.messageText = "Could not save every health result"
+                alert.messageText = "Not every server was checked"
                 alert.informativeText = error.localizedDescription
                 alert.alertStyle = .warning
                 alert.runModal()

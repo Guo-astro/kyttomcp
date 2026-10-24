@@ -67,7 +67,7 @@ enum PortableSetupController {
         scroll.documentView = form
         let alert = NSAlert()
         alert.messageText = "Prepare portable import"
-        alert.informativeText = "\(summary.serverNames.count) servers · \(summary.profileNames.count) profiles. Fill required values and choose destinations. The next screen previews the import; nothing is written yet. Existing names will not be overwritten."
+        alert.informativeText = "\(summary.serverNames.count) servers · \(summary.profileNames.count) profiles. Fill required values and choose destinations; inputs for a copy that goes to none of them can stay empty. Each label says where the value is used. The next screen previews the import; nothing is written yet. Existing names will not be overwritten."
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Preview")
         alert.addButton(withTitle: "Cancel")

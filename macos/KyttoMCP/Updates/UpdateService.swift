@@ -29,6 +29,9 @@ final class UpdateService {
     private var downloadCancelled = false
     /// The same request, readable from the streaming loop off the main actor.
     private var activeCancellation: DownloadCancellation?
+    /// The detached streaming task, so Cancel stops the transfer at once
+    /// instead of after the next 64 KB arrives — or after the idle timeout.
+    private var activeStream: Task<(byteCount: Int64, sha256: String), Error>?
 
     init(
         session: URLSession = .shared,
@@ -102,10 +105,17 @@ final class UpdateService {
         guard !downloadInProgress else { throw UpdateError.downloadInProgress }
         downloadInProgress = true
         downloadCancelled = false
+        // Exists from the first moment, so a Cancel during the manifest check
+        // or while waiting for the response is honoured, not just recorded.
+        let cancellation = DownloadCancellation()
+        activeCancellation = cancellation
         defer {
             downloadInProgress = false
             downloadCancelled = false
+            activeCancellation = nil
+            activeStream = nil
         }
+        removeAbandonedDownloads()
 
         do {
             // The checksum is useful only when it belongs to a fresh, verified
@@ -120,6 +130,7 @@ final class UpdateService {
                   latest > current else {
                 throw UpdateError.noUpdateAvailable
             }
+            try ensureDownloadActive()
 
             var request = URLRequest(url: Self.downloadURL)
             request.timeoutInterval = 60
@@ -138,6 +149,7 @@ final class UpdateService {
                   Self.isAllowedArtifactURL(servedURL) else {
                 throw UpdateError.invalidResponse
             }
+            try ensureDownloadActive()
 
             let expectedLength = response.expectedContentLength > 0
                 ? response.expectedContentLength
@@ -172,9 +184,6 @@ final class UpdateService {
             // The bytes arrive one at a time; iterating, writing and hashing
             // millions of them on the main actor stalls the window, so the loop
             // runs detached and only the progress reports hop back here.
-            let cancellation = DownloadCancellation()
-            activeCancellation = cancellation
-            defer { activeCancellation = nil }
             let reportChunk: @Sendable (Int64) async -> Void = { @MainActor [weak self] completed in
                 await progress(UpdateProgress(
                     phase: .downloading,
@@ -192,10 +201,19 @@ final class UpdateService {
                     chunkWritten: reportChunk
                 )
             }
-            let (completed, actualSHA256) = try await withTaskCancellationHandler {
-                try await streaming.value
-            } onCancel: {
-                cancellation.cancel()
+            activeStream = streaming
+            let (completed, actualSHA256): (Int64, String)
+            do {
+                (completed, actualSHA256) = try await withTaskCancellationHandler {
+                    try await streaming.value
+                } onCancel: {
+                    cancellation.cancel()
+                    streaming.cancel()
+                }
+            } catch is CancellationError {
+                throw UpdateError.cancelled
+            } catch where cancellation.isCancelled {
+                throw UpdateError.cancelled
             }
             try ensureDownloadActive()
             await progress(UpdateProgress(
@@ -240,6 +258,19 @@ final class UpdateService {
         guard downloadInProgress else { return }
         downloadCancelled = true
         activeCancellation?.cancel()
+        activeStream?.cancel()
+    }
+
+    /// Installers downloaded and never installed, and partial downloads, from
+    /// earlier sessions. The stage this session may still install is kept.
+    private func removeAbandonedDownloads() {
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix("Kytto-")
+            && (entry.pathExtension == "dmg" || entry.pathExtension == "part")
+            && entry.standardizedFileURL != stagedUpdate?.fileURL.standardizedFileURL {
+            try? fileManager.removeItem(at: entry)
+        }
     }
 
     /// Writes and hashes the streamed installer. Cancellation is checked between
@@ -477,7 +508,7 @@ final class UpdateService {
     }
 
     private func ensureDownloadActive() throws {
-        guard !downloadCancelled, !Task.isCancelled else {
+        guard !downloadCancelled, activeCancellation?.isCancelled != true, !Task.isCancelled else {
             throw UpdateError.cancelled
         }
     }
@@ -651,7 +682,7 @@ final class UpdateInstaller {
                 if movedOriginal && !fileManager.fileExists(atPath: destination.path) {
                     do { try fileManager.moveItem(at: backup, to: destination) } catch { rollbackFailed = true }
                 }
-                if rollbackFailed { throw UpdateError.rollbackFailed }
+                if rollbackFailed { throw UpdateError.rollbackFailed(backupPath: backup.path) }
                 throw error
             }
         } catch let error as UpdateError {
@@ -911,7 +942,7 @@ enum UpdateError: LocalizedError {
     case invalidInstalledApplication
     case insufficientPermissions
     case replacementFailed
-    case rollbackFailed
+    case rollbackFailed(backupPath: String)
     case relaunchFailed
     case couldNotOpenDownload
 
@@ -949,8 +980,8 @@ enum UpdateError: LocalizedError {
             "Kytto cannot write beside the current application. Move it to a writable Applications folder and try again."
         case .replacementFailed:
             "Kytto could not replace the current application. The previous version was kept when possible."
-        case .rollbackFailed:
-            "The update failed and Kytto could not restore the previous application automatically. Do not quit Kytto; move the backup back into place or reinstall the verified installer."
+        case .rollbackFailed(let backupPath):
+            "The update failed and Kytto could not restore the previous application automatically. The previous version is at \(backupPath) (a hidden item in Finder; press ⇧⌘. to show it). Move it back to Applications under its original name, or reinstall the verified installer."
         case .relaunchFailed:
             "The new application was not launched, so Kytto restored the previous version."
         case .couldNotOpenDownload:

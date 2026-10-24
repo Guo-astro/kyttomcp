@@ -329,6 +329,54 @@ struct AuthoringEditTests {
         #expect(config.value(at: ["mcpServers", "figma-design", "url"])?.stringValue == "https://mcp.figma.com/sse")
     }
 
+    @Test("renaming a server switched off in Claude Code keeps it switched off")
+    func renameKeepsDenyEntry() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        let xcode = try harness.server("XcodeBuildMCP")
+        #expect(xcode.enabledIn[.claudeCode] == .disabled)
+        var draft = ServerDraft(editing: xcode)
+        draft.name = "xcode-build"
+        _ = try harness.authoring.update(draft, originalName: "XcodeBuildMCP", server: xcode, existing: harness.discover().servers)
+        let renamed = try harness.server("xcode-build")
+        #expect(renamed.enabledIn[.claudeCode] == .disabled)
+        let settings = try JSONDocument.parse(harness.text(".claude/settings.json"))
+        let denied = settings.root["deniedMcpServers"]?.elements?.compactMap { $0["serverName"]?.stringValue }
+        #expect(denied?.contains("xcode-build") == true)
+        #expect(denied?.contains("XcodeBuildMCP") == false)
+    }
+
+    @Test("a rename that only changes letter case is written")
+    func caseOnlyRename() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+        let figma = try harness.server("figma")
+        var draft = ServerDraft(editing: figma)
+        draft.name = "Figma"
+        _ = try harness.authoring.update(draft, originalName: "figma", server: figma, existing: harness.discover().servers)
+        let config = try JSONDocument.parse(harness.text(".cursor/mcp.json"))
+        #expect(config.value(at: ["mcpServers"])?.keys == ["github", "Figma"])
+    }
+
+    @Test("an untouched secret keeps each client's own value, and follows a renamed key")
+    func keptSecretsArePerFile() throws {
+        let harness = try ToggleHarness()
+        defer { harness.cleanUp() }
+        try harness.home.write(#"{"mcpServers": {"github": {"command": "npx", "env": {"GITHUB_TOKEN": "cursor-token", "GITHUB_HOST": "x"}}}}"#, to: ".cursor/mcp.json")
+        try harness.home.write(#"{"mcpServers": {"github": {"command": "npx", "env": {"GITHUB_TOKEN": "claude-token"}}}}"#, to: ".claude.json")
+        let server = try harness.server("github")
+        var draft = ServerDraft(editing: server)
+        draft.args = ["-y", "new"]
+        draft.env = [EnvEntry(key: "GH_TOKEN", value: nil, previousKey: "GITHUB_TOKEN"), EnvEntry(key: "GITHUB_HOST", value: nil)]
+        _ = try harness.authoring.update(draft.mergingSecrets(from: server), originalName: "github", server: server, existing: harness.discover().servers)
+        let cursor = try JSONDocument.parse(harness.text(".cursor/mcp.json"))
+        #expect(cursor.value(at: ["mcpServers", "github", "env", "GH_TOKEN"])?.stringValue == "cursor-token")
+        #expect(cursor.value(at: ["mcpServers", "github", "env", "GITHUB_HOST"])?.stringValue == "x")
+        #expect(cursor.value(at: ["mcpServers", "github", "env", "GITHUB_TOKEN"]) == nil)
+        let claude = try JSONDocument.parse(harness.text(".claude.json"))
+        #expect(claude.value(at: ["mcpServers", "github", "env", "GH_TOKEN"])?.stringValue == "claude-token")
+    }
+
     @Test("deleting removes the server from every client")
     func deleteEverywhere() throws {
         let harness = try makeHarness()

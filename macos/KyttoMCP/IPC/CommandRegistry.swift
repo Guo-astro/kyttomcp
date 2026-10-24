@@ -151,8 +151,8 @@ enum CommandRegistry {
             ), model: model)
         }
 
-        router.register("contract.acknowledge") { (payload: DoctorFixPayload) -> StateDTO in
-            try model.acknowledgeContract(serverID: payload.serverID)
+        router.register("contract.acknowledge") { (payload: AcknowledgeContractPayload) -> StateDTO in
+            try model.acknowledgeContract(serverID: payload.serverID, reviewToken: payload.reviewToken)
             return StateDTO(model)
         }
 
@@ -615,6 +615,13 @@ struct ExposedToolsPayload: Decodable {
     let toolNames: [String]?
 }
 
+struct AcknowledgeContractPayload: Decodable {
+    let serverID: String
+    /// The alert's `reviewToken` as displayed; absent for an imported contract
+    /// with no local alert.
+    let reviewToken: String?
+}
+
 struct DoctorFixPayload: Decodable {
     let serverID: String
     /// Which repair; absent means the executable pin, the only one there was.
@@ -649,6 +656,9 @@ struct ServerDraftPayload: Decodable {
         /// The form never receives secret values, so it cannot send them back.
         /// `AppModel` fills these in from the existing server before writing.
         let value: String?
+        /// The entry's name before a rename in the edit form, so a kept value
+        /// follows it. Names only; never a value.
+        let previousKey: String?
     }
 
     let name: String
@@ -667,7 +677,7 @@ struct ServerDraftPayload: Decodable {
             transport: resolvedTransport,
             command: command ?? "",
             args: args ?? [],
-            env: (env ?? []).map { EnvEntry(key: $0.key, value: $0.value) },
+            env: (env ?? []).map { EnvEntry(key: $0.key, value: $0.value, previousKey: $0.previousKey) },
             url: url ?? ""
         )
     }

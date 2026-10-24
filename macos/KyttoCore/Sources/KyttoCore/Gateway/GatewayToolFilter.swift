@@ -37,6 +37,13 @@ enum GatewayJSONRPC {
         }
         return nil
     }
+
+    /// The id as a correlation key, kind included: `1` and `"1"` are different
+    /// requests, and matching them up would filter (or skip) the wrong reply.
+    static func requestKey(_ value: Any?) -> String? {
+        guard let id = requestID(value) else { return nil }
+        return (value is String ? "s:" : "n:") + id
+    }
 }
 
 /// Hides tools a route is not allowed to expose, in both directions (§7.11).
@@ -68,10 +75,10 @@ public final class GatewayToolFilter: @unchecked Sendable {
         case refuse(Data)
     }
 
-    /// JSON-RPC "method not found" — the closest standard code for a tool the
-    /// client cannot see. It is also what a client gets from a server that
-    /// genuinely does not have the tool, which is the behaviour being imitated.
-    static let methodNotFound = -32_601
+    /// JSON-RPC "invalid params" — what MCP servers answer for a tool they do
+    /// not have, which is the behaviour being imitated. "Method not found"
+    /// would tell the client the server has no `tools/call` at all.
+    static let unknownTool = -32_602
 
     private let exposed: Set<String>
     private let lock = NSLock()
@@ -90,13 +97,38 @@ public final class GatewayToolFilter: @unchecked Sendable {
     // MARK: - Client → server
 
     public func inspectClientLine(_ line: Data) -> ClientDecision {
-        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
-            return .forward
+        guard let parsed = try? JSONSerialization.jsonObject(with: line) else { return .forward }
+        if let batch = parsed as? [Any] {
+            // A batch is inspected element by element; letting it through
+            // unread would let a hidden tool be called by wrapping it in `[…]`.
+            // One hidden call refuses the whole batch, answered as a batch.
+            let objects = batch.compactMap { $0 as? [String: Any] }
+            let hidden = objects.contains { object in
+                object["method"] as? String == "tools/call"
+                    && ((object["params"] as? [String: Any])?["name"] as? String).map { !allows($0) } ?? false
+            }
+            guard hidden else {
+                for object in objects where object["method"] as? String == "tools/list" {
+                    if let id = GatewayJSONRPC.requestKey(object["id"]) {
+                        lock.lock(); pendingListRequests.insert(id); lock.unlock()
+                    }
+                }
+                return .forward
+            }
+            let replies: [[String: Any]] = objects.compactMap { object in
+                guard let id = object["id"], GatewayJSONRPC.requestID(id) != nil else { return nil }
+                return ["jsonrpc": "2.0", "id": id, "error": [
+                    "code": Self.unknownTool,
+                    "message": "Kytto refused this batch: it calls a tool this route does not expose.",
+                ]]
+            }
+            return .refuse(replies.isEmpty ? Data() : (try? JSONSerialization.data(withJSONObject: replies)) ?? Data())
         }
+        guard let object = parsed as? [String: Any] else { return .forward }
 
         switch object["method"] as? String {
         case "tools/list":
-            if let id = GatewayJSONRPC.requestID(object["id"]) {
+            if let id = GatewayJSONRPC.requestKey(object["id"]) {
                 lock.lock()
                 pendingListRequests.insert(id)
                 lock.unlock()
@@ -124,7 +156,7 @@ public final class GatewayToolFilter: @unchecked Sendable {
             "jsonrpc": "2.0",
             "id": id ?? rawID,
             "error": [
-                "code": Self.methodNotFound,
+                "code": Self.unknownTool,
                 "message": "\(toolName) is not available: Kytto is not exposing this tool on this route.",
             ],
         ]
@@ -136,8 +168,16 @@ public final class GatewayToolFilter: @unchecked Sendable {
     /// The line to forward, which is the original unless it is a `tools/list`
     /// result with something to remove.
     public func rewriteServerLine(_ line: Data) -> Data {
+        if let batch = try? JSONSerialization.jsonObject(with: line) as? [[String: Any]] {
+            let rewritten = batch.map { element -> Any in
+                guard let data = try? JSONSerialization.data(withJSONObject: element) else { return element }
+                let filtered = rewriteServerLine(data)
+                return filtered == data ? element : ((try? JSONSerialization.jsonObject(with: filtered)) ?? element)
+            }
+            return (try? JSONSerialization.data(withJSONObject: rewritten)) ?? line
+        }
         guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let id = GatewayJSONRPC.requestID(object["id"]),
+              let id = GatewayJSONRPC.requestKey(object["id"]),
               // Only a response answers the client's request. The server's own
               // requests (`roots/list`, `sampling/createMessage`) number from
               // their own id space and can reuse the id of a pending `tools/list`;

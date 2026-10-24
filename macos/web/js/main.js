@@ -7,6 +7,7 @@ import {
   setRenderer,
   getState,
   setCellBusy,
+  cellKey,
   emptyDraft,
   draftFromServer,
   visibleServers,
@@ -174,14 +175,37 @@ async function refresh() {
       invoke('backups.list', { clientID: null }),
     ]);
     setState({ backups, ...state });
+    await reloadActivePanel();
   } catch (error) {
     setState({ notice: { kind: 'error', message: error.message } });
   }
 }
 
+/**
+ * Panels whose data is not part of the state reply. Without this, Refresh (or a
+ * config changed on disk) left Secrets, Profiles and Activity showing what was
+ * true before — and acting on a row that no longer exists fails natively.
+ */
+async function reloadActivePanel() {
+  switch (getState().panel) {
+    case 'secrets': return reloadSecrets();
+    case 'profiles': return reloadProfiles();
+    case 'activity': return reloadActivity();
+    default: return undefined;
+  }
+}
+
 /** Applies whatever the native side says the world now looks like. */
 function applyState(state) {
-  if (state) setState(state);
+  if (!state) return;
+  setState(state);
+  // A sheet about a server that just disappeared (removed in its client, or
+  // renamed elsewhere) renders nothing; left in state it would swallow Escape
+  // and keep focus "in a sheet" that is not on screen.
+  const { sheet, servers } = getState();
+  if (sheet && !sheet.busy && sheet.serverId && !servers.some((server) => server.id === sheet.serverId)) {
+    setState({ sheet: null });
+  }
 }
 
 async function reloadBackups() {
@@ -268,7 +292,12 @@ async function applySetupImport() {
     const warning = await refreshAfterMutation({ backups: true, profiles: true });
     setState({ notice: withRefreshWarning({ kind: 'info', message: 'Setup imported. New server definitions are disabled; review each server before enabling it.' }, warning) });
   } catch (error) {
-    failSheetRequest(request, error);
+    // The native plan is single-use and is spent even when applying fails, so
+    // a retry button here could only ever answer "stale preview".
+    setState({
+      sheet: null,
+      notice: { kind: 'error', message: `${error.message} Nothing was imported. Choose the setup file again to retry.` },
+    });
   }
 }
 
@@ -377,7 +406,7 @@ async function copyImportPrompt() {
 
 async function previewAgentImport() {
   const state = getState();
-  const targets = state.importTargetIDs?.length ? state.importTargetIDs : defaultImportTargets(state);
+  const targets = state.importTargetIDs ?? defaultImportTargets(state);
   setState({ importBusy: true, importError: null, notice: null });
   try {
     const preview = await invoke('imports.preview', { json: state.importText, clientIDs: targets });
@@ -389,7 +418,7 @@ async function previewAgentImport() {
 
 async function applyAgentImport() {
   const state = getState();
-  const targets = state.importTargetIDs?.length ? state.importTargetIDs : defaultImportTargets(state);
+  const targets = state.importTargetIDs ?? defaultImportTargets(state);
   setState({ importBusy: true, importError: null });
   try {
     const result = await invoke('imports.import', { json: state.importText, clientIDs: targets });
@@ -474,10 +503,13 @@ async function saveProfile() {
 }
 
 function defaultProfileClient(state) {
+  // Only clients the apply sheet offers: a read-only source here left the
+  // select showing one client while state held another, and Apply did nothing.
+  const writable = state.clients.filter((client) => !client.isReadOnly && client.state !== 'notInstalled');
   return (
-    state.clients.find((client) => client.state === 'ready') ??
-    state.clients.find((client) => client.state === 'noConfig') ??
-    state.clients.find((client) => client.state === 'orphanedConfig') ??
+    writable.find((client) => client.state === 'ready') ??
+    writable.find((client) => client.state === 'noConfig') ??
+    writable.find((client) => client.state === 'orphanedConfig') ??
     null
   );
 }
@@ -905,6 +937,8 @@ async function confirmToggle(serverId, clientId, currentlyEnabled) {
 }
 
 async function undoToggle(action) {
+  // A second click while the first undo is still in flight must not send it twice.
+  if (getState().busyCells.has(cellKey(action.serverId, action.clientId))) return;
   const server = getState().servers.find((entry) => entry.id === action.serverId);
   const current = server?.enabledIn[action.clientId] ?? 'absent';
   if (current === action.previousState) {
@@ -913,26 +947,23 @@ async function undoToggle(action) {
   }
 
   // Adding an absent server has no inverse toggle: switching it off would leave
-  // a parked/disabled definition. Restore the exact pre-write backup instead.
+  // a parked/disabled definition. Remove just that definition instead. Restoring
+  // the whole pre-write backup would also undo everything the client or the user
+  // changed in that file since — a notice can be clicked hours later.
   if (action.previousState === 'absent') {
     setCellBusy(action.serverId, action.clientId, true);
     try {
-      const restored = action.backupId
-        ? await invoke('backups.restore', {
-            backupID: action.backupId,
-            clientID: action.clientId,
-          })
-        : await invoke('servers.removeFromClient', {
-            serverID: action.serverId,
-            clientID: action.clientId,
-          });
+      const restored = await invoke('servers.removeFromClient', {
+        serverID: action.serverId,
+        clientID: action.clientId,
+      });
       applyState(restored.state ?? restored);
       const refreshWarning = await refreshAfterMutation({ backups: true });
       setState({
         notice: withRefreshWarning(
           {
             kind: 'info',
-            message: `Undid the change to “${server?.name ?? action.serverId}” and restored the previous configuration.`,
+            message: `Undid the change: “${server?.name ?? action.serverId}” was removed from that client again.`,
           },
           refreshWarning,
         ),
@@ -1012,6 +1043,7 @@ async function submitForm() {
     .map((entry) => ({
       key: entry.key,
       value: entry.value === '' || entry.value === null ? null : entry.value,
+      previousKey: entry.originalKey && entry.originalKey !== entry.key ? entry.originalKey : null,
     }));
   const draft = { ...sheet.draft, env };
 
@@ -1334,19 +1366,23 @@ root.addEventListener('pointerdown', (event) => {
   const startWidth = getState().settings?.sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
   const widthAt = (pointer) => clampSidebarWidth(startWidth + (pointer.clientX - startX));
 
+  // On the window, not the handle: any render during the drag (a notice
+  // timing out, a health-progress push) replaces the handle element, which
+  // takes its pointer capture and listeners with it and freezes the drag.
   target.classList.add('dragging');
-  target.setPointerCapture(event.pointerId);
+  document.body.classList.add('resizing-sidebar');
   const move = (pointer) => applySidebarWidth(widthAt(pointer));
   const finish = (pointer) => {
-    target.removeEventListener('pointermove', move);
-    target.removeEventListener('pointerup', finish);
-    target.removeEventListener('pointercancel', finish);
-    target.classList.remove('dragging');
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+    document.body.classList.remove('resizing-sidebar');
+    root.querySelector('[data-action="resize-sidebar"]')?.classList.remove('dragging');
     void commitSidebarWidth(widthAt(pointer));
   };
-  target.addEventListener('pointermove', move);
-  target.addEventListener('pointerup', finish);
-  target.addEventListener('pointercancel', finish);
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
 });
 
 root.addEventListener('dblclick', (event) => {
@@ -1558,7 +1594,10 @@ root.addEventListener('click', async (event) => {
       if (state.acknowledgingContract) break;
       setState({ acknowledgingContract: target.dataset.serverId });
       try {
-        applyState(await invoke('contract.acknowledge', { serverID: target.dataset.serverId }));
+        applyState(await invoke('contract.acknowledge', {
+          serverID: target.dataset.serverId,
+          reviewToken: target.dataset.reviewToken || null,
+        }));
         setState({
           notice: {
             kind: 'info',
@@ -1879,7 +1918,8 @@ root.addEventListener('input', (event) => {
       sheet.name = value;
       break;
     case 'profile-budget':
-      sheet.tokenBudget = value === '' ? null : Number(value);
+      // Whole, non-negative tokens; the native payload is an integer.
+      sheet.tokenBudget = value === '' || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.round(Number(value)));
       break;
   }
 });
@@ -1909,7 +1949,7 @@ root.addEventListener('change', (event) => {
   } else if (action === 'import-target') {
     const state = getState();
     const clientID = event.target.dataset.clientId;
-    const current = state.importTargetIDs?.length ? state.importTargetIDs : defaultImportTargets(state);
+    const current = state.importTargetIDs ?? defaultImportTargets(state);
     const importTargetIDs = event.target.checked
       ? [...new Set([...current, clientID])]
       : current.filter((id) => id !== clientID);
@@ -2019,7 +2059,10 @@ on('menu.find', () => {
 });
 
 // A watched file changed, whoever changed it (§6.4).
-on('configs.changed', applyState);
+on('configs.changed', (state) => {
+  applyState(state);
+  reloadActivePanel().catch(() => {});
+});
 
 // Settings live in the native window, so reflect a saved choice in the open
 // web view instead of waiting for its next navigation or app launch (§7.6).

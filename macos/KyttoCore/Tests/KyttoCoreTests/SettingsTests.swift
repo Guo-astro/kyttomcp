@@ -203,3 +203,15 @@ struct PathOverrideTests {
         #expect(xcode.enabledIn[.claudeCode] == .disabled)
     }
 }
+
+@Suite("Settings — forward compatibility")
+struct SettingsForwardCompatibilityTests {
+    @Test("an unknown menu-bar client from a newer version resets only that field")
+    func unknownClientKeepsTheRest() throws {
+        let json = #"{"menuBarClient":"a-client-from-the-future","theme":"light","hasCompletedOnboarding":true,"backupRetention":7}"#
+        let settings = try JSONDecoder().decode(KyttoSettings.self, from: Data(json.utf8))
+        #expect(settings.menuBarClient == nil)
+        #expect(settings.hasCompletedOnboarding)
+        #expect(settings.backupRetention == 7)
+    }
+}

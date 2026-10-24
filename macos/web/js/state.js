@@ -101,7 +101,9 @@ const state = {
   libraryBusy: false,
   importPrompt: null,
   importText: '',
-  importTargetIDs: [],
+  // null until the user picks: an empty list is a real choice (none), not
+  // "use the defaults".
+  importTargetIDs: null,
   importPreview: null,
   importBusy: false,
   importError: null,
@@ -146,7 +148,8 @@ export function draftFromServer(server) {
     args: [...server.args],
     // Values are deliberately absent — they never left the native side. An
     // untouched field sends null, which means "keep what is there" (§6).
-    env: server.env.map((entry) => ({ key: entry.key, value: null, hasValue: entry.hasValue })),
+    // `originalKey` lets a renamed key carry its kept value along.
+    env: server.env.map((entry) => ({ key: entry.key, value: null, hasValue: entry.hasValue, originalKey: entry.key })),
     url: server.url ?? '',
   };
 }
