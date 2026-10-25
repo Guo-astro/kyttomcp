@@ -142,10 +142,59 @@ public sealed class ManagedProcess : IDisposable
         // server into a timeout and report the wrong problem.
         _process.ErrorDataReceived += (_, args) =>
         {
-            if (args.Data is null) return;
+            if (args.Data is null)
+            {
+                _stderrEnded.TrySetResult();
+                return;
+            }
             lock (_stderrLock) _stderr.AppendLine(args.Data);
         };
         _process.BeginErrorReadLine();
+    }
+
+    private readonly TaskCompletionSource _stderrEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private bool _terminated;
+    private bool _jobClosed;
+
+    /// <summary>How long a server whose input was closed gets to exit on its own.</summary>
+    internal static readonly TimeSpan ExitGrace = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>Ends the server and everything it started; afterwards <see cref="CapturedStderr"/> is complete.</summary>
+    /// <remarks>
+    /// The MCP stdio shutdown: close the server's input first — the portable "please
+    /// exit" — and give it a moment, then kill the tree. The job is closed whatever
+    /// happened, so descendants of a server that exited on its own are not left
+    /// behind. Only then is stderr read to its end: the last lines a crashing server
+    /// writes are the ones that explain it.
+    /// </remarks>
+    public void Terminate()
+    {
+        if (_terminated || _disposed) return;
+        _terminated = true;
+
+        try
+        {
+            _process.StandardInput.Close();
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            // Already closed by a server that went away, which is the point.
+        }
+
+        try
+        {
+            if (!_process.WaitForExit(ExitGrace)) _process.Kill(entireProcessTree: true);
+        }
+        catch (Exception error) when (error is InvalidOperationException or NotSupportedException or
+                                              System.ComponentModel.Win32Exception)
+        {
+            // Already gone, which is the outcome asked for.
+        }
+
+        CloseJob();
+        // Every holder of the stderr pipe is gone with the job, so its end arrives
+        // promptly; the bound only covers a handle something outside the job kept.
+        _stderrEnded.Task.Wait(TimeSpan.FromSeconds(1));
     }
 
     /// <summary>The server's own output so far, exactly as it wrote it (§6).</summary>
@@ -287,6 +336,8 @@ public sealed class ManagedProcess : IDisposable
 
     private void CloseJob()
     {
+        if (_jobClosed) return;
+        _jobClosed = true;
         if (_job != IntPtr.Zero) CloseHandle(_job);
     }
 

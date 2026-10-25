@@ -56,6 +56,15 @@ public interface IRemoteHttpTransport
 /// </remarks>
 public sealed class HttpClientRemoteTransport : IRemoteHttpTransport, IDisposable
 {
+    /// <summary>
+    /// A <c>responseId</c> meaning "return as soon as the first complete event has
+    /// arrived", for probing a stream that never ends on its own.
+    /// </summary>
+    public const int FirstEventOnly = -1;
+
+    /// <summary>How much of a 4xx body is read: enough for a JSON-RPC error code, no more.</summary>
+    internal const int ErrorBodyLimit = 16 * 1024;
+
     private readonly HttpClient _client;
 
     public HttpClientRemoteTransport()
@@ -99,8 +108,17 @@ public sealed class HttpClientRemoteTransport : IRemoteHttpTransport, IDisposabl
 
             var status = (int)response.StatusCode;
             var headers = Headers(response);
-            // A redirect, an error, a challenge: the status and headers are the whole
-            // answer, and a body Kytto will not use is not read.
+            if (status is >= 400 and < 500)
+            {
+                // A short error body says which era the server speaks (a modern JSON-RPC
+                // error code); read a little of it and no more.
+                var head = await ReadBodyAsync(
+                    response, Math.Min(limit, ErrorBodyLimit), null, eventStream: false, truncate: true, timeout.Token)
+                    .ConfigureAwait(false);
+                return new RemoteHttpReply(status, headers, head);
+            }
+            // A redirect, a server error: the status and headers are the whole answer,
+            // and a body Kytto will not use is not read.
             if (status >= 300) return new RemoteHttpReply(status, headers, []);
 
             if (response.Content.Headers.ContentLength is { } declared && declared > limit)
@@ -112,7 +130,8 @@ public sealed class HttpClientRemoteTransport : IRemoteHttpTransport, IDisposabl
                 response.Content.Headers.ContentType?.MediaType,
                 "text/event-stream",
                 StringComparison.OrdinalIgnoreCase);
-            var body = await ReadBodyAsync(response, limit, eventStream ? responseId : null, eventStream, timeout.Token)
+            var body = await ReadBodyAsync(
+                response, limit, eventStream ? responseId : null, eventStream, truncate: false, timeout.Token)
                 .ConfigureAwait(false);
             return new RemoteHttpReply(status, headers, body);
         }
@@ -144,22 +163,37 @@ public sealed class HttpClientRemoteTransport : IRemoteHttpTransport, IDisposabl
         int limit,
         int? responseId,
         bool eventStream,
+        bool truncate,
         CancellationToken cancellationToken)
     {
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var reader = eventStream && responseId is not null ? new ServerSentEventReader(responseId) : null;
+        var firstEventOnly = eventStream && responseId == FirstEventOnly;
+        var reader = eventStream && responseId is not null && !firstEventOnly ? new ServerSentEventReader(responseId) : null;
         using var body = new MemoryStream();
         var buffer = new byte[16 * 1024];
         while (true)
         {
             var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (read == 0) break;
-            if (body.Length + read > limit) throw new RemoteHttpException(RemoteHttpFailure.ResponseTooLarge);
+            if (body.Length + read > limit)
+            {
+                if (!truncate) throw new RemoteHttpException(RemoteHttpFailure.ResponseTooLarge);
+                body.Write(buffer, 0, (int)(limit - body.Length));
+                break;
+            }
             body.Write(buffer, 0, read);
             // A server may leave the stream open after the answer. Do not wait for EOF.
             if (reader?.Feed(buffer.AsSpan(0, read)) == true) break;
+            if (firstEventOnly && EndsAnEvent(body)) break;
         }
         return body.ToArray();
+    }
+
+    /// <summary>Whether a complete event — a blank line, however the lines end — has arrived.</summary>
+    private static bool EndsAnEvent(MemoryStream body)
+    {
+        var text = System.Text.Encoding.UTF8.GetString(body.GetBuffer(), 0, (int)body.Length);
+        return text.Replace("\r\n", "\n").Replace('\r', '\n').Contains("\n\n", StringComparison.Ordinal);
     }
 
     private static HttpRequestMessage Build(RemoteHttpRequest request)

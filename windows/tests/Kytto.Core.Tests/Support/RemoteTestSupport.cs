@@ -59,7 +59,12 @@ public sealed class ScriptedTransport : IRemoteHttpTransport
         "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}";
 
     public const string Initialize =
-        """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{"tools":{}},"serverInfo":{"name":"remote-fixture","version":"1"}}}""";
+        """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"remote-fixture","version":"1"}}}""";
+
+    /// <summary>What a handshake-era TypeScript server answers the modern probe: a request without a session.</summary>
+    public static RemoteHttpReply LegacyRejection => Reply(
+        """{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}""",
+        400);
 
     public const string EmptyTools = """{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}""";
 }
@@ -97,7 +102,7 @@ public sealed class FakeRemoteMcp : IDisposable
                 case "initialize":
                     return Json(
                         root.GetProperty("id").GetInt32(),
-                        """{"protocolVersion":"2026-07-28","capabilities":{"tools":{}},"serverInfo":{"name":"loopback","version":"1"}}""",
+                        """{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"loopback","version":"1"}}""",
                         new Dictionary<string, string>
                         {
                             ["MCP-Session-Id"] = sessionId,

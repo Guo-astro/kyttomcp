@@ -15,7 +15,11 @@ public sealed class HealthChecker(
 {
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(10);
 
-    private readonly ShellEnvironment _shell = shell ?? ShellEnvironment.Current;
+    /// <summary>
+    /// The PATH servers are found on, read on the first check rather than when the
+    /// checker is made: the app builds its checker at launch, before anything was asked.
+    /// </summary>
+    private ShellEnvironment Shell => shell ?? ShellEnvironment.Current;
     private readonly TimeSpan _timeout = timeout ?? DefaultTimeout;
     private readonly McpStdioClient _client = client ?? new McpStdioClient();
     private readonly McpHttpClient _httpClient = httpClient ?? new McpHttpClient();
@@ -99,7 +103,7 @@ public sealed class HealthChecker(
         try
         {
             var (listing, stderr) = _client.ListTools(
-                command, arguments, _shell.With(extra), _timeout, server.WorkingDirectory);
+                command, arguments, Shell.With(extra), _timeout, server.WorkingDirectory);
 
             return (new HealthResult(
                 Status: HealthStatus.Passed,
@@ -121,7 +125,8 @@ public sealed class HealthChecker(
                     ResourceCount = listing.ResourceCount,
                     InspectionNotes = listing.InspectionNotes,
                     ResolvedCommand = listing.ResolvedCommand,
-                    EnvironmentSource = _shell.SourceDisplay,
+                    EnvironmentSource = Shell.SourceDisplay,
+                    DeprecatedFeatures = NonEmpty(listing.DeprecatedFeatures),
                 },
                 TokenWeight.Measuring(listing.RawToolsJson));
         }
@@ -140,7 +145,7 @@ public sealed class HealthChecker(
             return (Failure(reason, stderr, started, status, authorizationURL) with
                 {
                     ResolvedCommand = failure.ResolvedCommand,
-                    EnvironmentSource = _shell.SourceDisplay,
+                    EnvironmentSource = Shell.SourceDisplay,
                 }, null);
         }
         catch (Exception error)
@@ -177,7 +182,7 @@ public sealed class HealthChecker(
             }
             var configured = RemoteHttpHeaders.Resolve(
                 server.DefinitionSource,
-                _shell.With(extra),
+                Shell.With(extra),
                 omitAuthorization: overrides?.Keys.Any(name =>
                     string.Equals(name, "Authorization", StringComparison.OrdinalIgnoreCase)) == true);
             var headers = RemoteHttpHeaders.Merge(configured, overrides);
@@ -204,14 +209,25 @@ public sealed class HealthChecker(
                     ResourceCount = listing.ResourceCount,
                     InspectionNotes = listing.InspectionNotes,
                     EnvironmentSource = RemoteEnvironmentSource,
+                    DeprecatedFeatures = NonEmpty(listing.DeprecatedFeatures),
                 },
                 weight);
         }
+        catch (RemoteHttpException failure) when (failure.Failure == RemoteHttpFailure.LegacySse)
+        {
+            // Deprecated, but its client may well run it: not Kytto's to call broken.
+            return (RemoteFailure(HealthFailureReason.RemoteTransport("sse"), started, HealthStatus.Unsupported), null);
+        }
         catch (RemoteHttpException failure)
         {
-            var status = failure.Failure == RemoteHttpFailure.AuthorizationRequired
-                ? HealthStatus.NeedsAuthorization
-                : HealthStatus.Failed;
+            var status = failure.Failure switch
+            {
+                RemoteHttpFailure.AuthorizationRequired => HealthStatus.NeedsAuthorization,
+                // Plain HTTP to an address off this machine: Kytto will not send it, but
+                // the client that owns the entry may reach it fine.
+                RemoteHttpFailure.InvalidEndpoint => HealthStatus.Unsupported,
+                _ => HealthStatus.Failed,
+            };
             return (RemoteFailure(
                 HealthFailureReason.RemoteHttp(failure.Failure, failure.Status, failure.Detail),
                 started,
@@ -231,6 +247,9 @@ public sealed class HealthChecker(
             return (RemoteFailure(HealthFailureReason.Other("The remote check could not be completed."), started), null);
         }
     }
+
+    private static IReadOnlyList<string>? NonEmpty(IReadOnlyList<string> features) =>
+        features.Count == 0 ? null : features;
 
     /// <summary>What the detail view shows as the "environment" of a remote check.</summary>
     internal const string RemoteEnvironmentSource = "Streamable HTTP";
@@ -266,7 +285,7 @@ public sealed class HealthChecker(
         if (error is ProcessException process)
         {
             return process.Failure.Reason == "commandNotFound"
-                ? process.Failure with { SearchedPreferredPATH = _shell.PreferredPathAvailable }
+                ? process.Failure with { SearchedPreferredPATH = Shell.PreferredPathAvailable }
                 : process.Failure;
         }
         if (error is McpException mcp) return mcp.Failure;

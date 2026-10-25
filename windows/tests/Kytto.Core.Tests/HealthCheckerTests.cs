@@ -244,6 +244,86 @@ public class HealthCheckerTests
     }
 
     [Fact]
+    public void AServerThatSpeaksOnlyTheModernRevisionIsCheckedWithoutAHandshake()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, _) = Checker(seconds: 20).Check(Fake("modern"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal(McpStdioClient.ModernProtocolVersion, health.ProtocolVersion);
+        Assert.Equal("modern-server", health.ServerName);
+        Assert.Equal("2.0.0", health.ServerVersion);
+        Assert.Equal(1, health.ToolCount);
+    }
+
+    /// <summary>
+    /// The probe must not cost a handshake-era server its check: one that ignores
+    /// <c>server/discover</c> waits out the probe, one that dies on it is started again.
+    /// </summary>
+    [Theory]
+    [InlineData("silent")]
+    [InlineData("exitearly")]
+    public void HandshakeServersThatIgnoreOrDieOnTheProbeStillPass(string mode)
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, _) = Checker(seconds: 8).Check(Fake(mode));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal(McpStdioClient.PreferredProtocolVersion, health.ProtocolVersion);
+        Assert.Equal(3, health.ToolCount);
+    }
+
+    [Fact]
+    public void AServerThatNamesTheOneRevisionItAcceptsGetsASecondHandshake()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, _) = Checker(seconds: 20).Check(Fake("strict"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal("2024-11-05", health.ProtocolVersion);
+    }
+
+    [Fact]
+    public void APromptsOnlyServerIsHealthyWithNoTools()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, weight) = Checker(seconds: 20).Check(Fake("promptsonly"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal(0, health.ToolCount);
+        Assert.Equal(2, health.PromptCount);
+        Assert.Contains(health.InspectionNotes, note => note.Contains("does not offer tools", StringComparison.Ordinal));
+        Assert.NotNull(weight);
+    }
+
+    [Fact]
+    public void AServerRequestIsAnsweredSoAServerWaitingOnItDoesNotTimeOut()
+    {
+        Assert.True(Python is not null, "These tests need python.exe on PATH.");
+
+        var (health, _) = Checker(seconds: 20).Check(Fake("roots"));
+
+        Assert.True(health.Status == HealthStatus.Passed, health.CurrentMessage);
+        Assert.Equal([DeprecatedFeature.Roots], health.DeprecatedFeatures);
+    }
+
+    [Fact]
+    public void TheProbeCarriesModernMetadataAndTheHandshakeNeverOffersIt()
+    {
+        var discover = McpStdioClient.Request(9, "server/discover", null, modern: true);
+        Assert.Contains("\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"", discover, StringComparison.Ordinal);
+        Assert.Contains("\"io.modelcontextprotocol/clientInfo\"", discover, StringComparison.Ordinal);
+        Assert.Contains("\"io.modelcontextprotocol/clientCapabilities\"", discover, StringComparison.Ordinal);
+
+        Assert.DoesNotContain(McpStdioClient.ModernProtocolVersion, McpStdioClient.HandshakeProtocolVersions);
+        Assert.Equal(McpStdioClient.PreferredProtocolVersion, McpStdioClient.HandshakeProtocolVersions[0]);
+    }
+
+    [Fact]
     public void EveryPageOfToolsListIsRead()
     {
         Assert.True(Python is not null, "These tests need python.exe on PATH.");

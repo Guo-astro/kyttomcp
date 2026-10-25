@@ -12,6 +12,11 @@ public enum RemoteHttpFailure
     HttpStatus,
     AuthorizationRequired,
     Protocol,
+    /// <summary>
+    /// The endpoint speaks the deprecated HTTP+SSE transport, which Kytto does not
+    /// inspect — not a broken server. Last, because stored results keep the number.
+    /// </summary>
+    LegacySse,
 }
 
 /// <summary>
@@ -70,6 +75,9 @@ public sealed class RemoteHttpException : Exception
                 "The remote response exceeded Kytto's inspection size limit.",
             RemoteHttpFailure.HttpStatus =>
                 $"The remote server returned HTTP {status ?? 0}.",
+            RemoteHttpFailure.LegacySse =>
+                "This endpoint uses the legacy HTTP+SSE transport, which Kytto does not inspect. " +
+                "It is deprecated; the server's Streamable HTTP endpoint can be checked instead.",
             RemoteHttpFailure.AuthorizationRequired =>
                 "The remote server requires authorization. Sign in or check its configured credentials and permissions.",
             _ => $"The remote server did not speak MCP as expected: {detail ?? "unexpected response"}",

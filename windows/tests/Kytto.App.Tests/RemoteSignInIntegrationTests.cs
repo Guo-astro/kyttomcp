@@ -805,7 +805,7 @@ public sealed class RemoteSignInIntegrationTests : IDisposable
             return method switch
             {
                 "notifications/initialized" => new RemoteHttpReply(202, new Dictionary<string, string>(), []),
-                "initialize" => Json(Rpc(id, """{"protocolVersion":"2026-07-28","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}""")),
+                "initialize" => Json(Rpc(id, """{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}""")),
                 "tools/list" => Json(Rpc(id, """{"tools":[{"name":"remote_tool","description":"A tool.","inputSchema":{"type":"object"}}]}""")),
                 _ => new RemoteHttpReply(400, new Dictionary<string, string>(), []),
             };

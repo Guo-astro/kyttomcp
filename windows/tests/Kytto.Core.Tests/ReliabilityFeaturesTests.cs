@@ -84,6 +84,49 @@ public sealed class ReliabilityFeaturesTests : IDisposable
         Assert.Equal(DoctorAction.RunHealthCheck, finding.Action);
     }
 
+    /// <summary>
+    /// What the check ran into decides before the words do: "Method not found" is a
+    /// refusal, not a missing executable, and a timeout whose stderr mentions a missing
+    /// file is still a timeout.
+    /// </summary>
+    [Fact]
+    public void DoctorClassifiesAFailureByWhatTheCheckRanIntoFirst()
+    {
+        string Classify(HealthFailureReason reason, string? stderr = null)
+        {
+            var server = Server(command: "npx");
+            server.Health = new HealthResult(
+                HealthStatus.Failed, Timestamp.Now, null, [], reason.CurrentMessage(), stderr, 1, null, null)
+            {
+                Failure = reason,
+            };
+            return Assert.Single(McpDoctor.Analyze(server).Findings, item => item.Severity == DoctorSeverity.Error).Code;
+        }
+
+        Assert.Equal("server-refused", Classify(HealthFailureReason.ServerRefused(-32601, "Method not found")));
+        Assert.Equal("timeout", Classify(HealthFailureReason.TimedOut(10), "warning: config.json not found"));
+        Assert.Equal("executable-not-found", Classify(HealthFailureReason.CommandNotFound("npx", "C:\\bin")));
+        Assert.Equal("protocol-output", Classify(HealthFailureReason.ProtocolError("tools/list did not return a tools array")));
+        // Where the server's own output is the evidence, the words still decide.
+        Assert.Equal("executable-not-found", Classify(HealthFailureReason.Exited(1), "Error: Cannot find module 'x' (ENOENT)"));
+    }
+
+    [Fact]
+    public void DoctorNotesFeaturesTheModernRevisionDeprecates()
+    {
+        var server = Server(command: "npx");
+        server.Health = Passing([], Path.Combine(_root, "npx.cmd")) with
+        {
+            DeprecatedFeatures = [DeprecatedFeature.Logging, DeprecatedFeature.Roots, DeprecatedFeature.Sampling],
+        };
+
+        var findings = McpDoctor.Analyze(server).Findings.Where(item => item.Code.StartsWith("deprecated-", StringComparison.Ordinal)).ToArray();
+
+        Assert.Equal(["deprecated-logging", "deprecated-roots", "deprecated-sampling"], findings.Select(item => item.Code));
+        Assert.All(findings, item => Assert.Equal(DoctorSeverity.Info, item.Severity));
+        Assert.All(findings, item => Assert.Contains("2026-07-28", item.Title, StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ContractGuardClassifiesEveryModelFacingChange()
     {

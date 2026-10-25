@@ -28,6 +28,7 @@ public class RemoteDoctorTests
         const string second =
             """{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"write","inputSchema":{"type":"object"}}]}}""";
         var transport = new ScriptedTransport(
+            LegacyRejection,
             Reply(Initialize, headers: new Dictionary<string, string> { ["mcp-session-id"] = "session-secret" }),
             Reply(status: 202),
             Reply(first),
@@ -44,28 +45,34 @@ public class RemoteDoctorTests
         Assert.Equal("""{"type":"object"}""", listing.Tools[0].InputSchemaJSON);
         Assert.True(listing.Tools[0].Annotations?.ReadOnlyHint);
         Assert.Equal("remote-fixture", listing.ServerName);
-        Assert.Equal("2026-07-28", listing.NegotiatedProtocolVersion);
+        Assert.Equal("2025-11-25", listing.NegotiatedProtocolVersion);
 
         var requests = transport.Requests;
-        Assert.Equal(5, requests.Count);
-        Assert.DoesNotContain(requests[0].Headers, header => header.Key == "MCP-Session-Id");
-        foreach (var request in requests.Skip(1))
+        Assert.Equal(6, requests.Count);
+        // The modern probe carries the 2026-07-28 metadata and no session.
+        Assert.Contains(new KeyValuePair<string, string>("MCP-Protocol-Version", "2026-07-28"), requests[0].Headers);
+        Assert.Contains(new KeyValuePair<string, string>("Mcp-Method", "server/discover"), requests[0].Headers);
+        Assert.DoesNotContain(requests[1].Headers, header => header.Key == "MCP-Session-Id");
+        Assert.DoesNotContain(requests[1].Headers, header => header.Key == "MCP-Protocol-Version");
+        foreach (var request in requests.Skip(2))
         {
             Assert.Contains(new KeyValuePair<string, string>("MCP-Session-Id", "session-secret"), request.Headers);
-            Assert.Contains(new KeyValuePair<string, string>("MCP-Protocol-Version", "2026-07-28"), request.Headers);
+            Assert.Contains(new KeyValuePair<string, string>("MCP-Protocol-Version", "2025-11-25"), request.Headers);
+            Assert.DoesNotContain(request.Headers, header => header.Key == "Mcp-Method");
             Assert.Contains(new KeyValuePair<string, string>("Authorization", "Bearer fixture-secret"), request.Headers);
         }
         Assert.Equal(HttpMethod.Delete, requests[^1].Method);
-        Assert.Contains("two", Encoding.UTF8.GetString(requests[3].Body!), StringComparison.Ordinal);
+        Assert.Contains("two", Encoding.UTF8.GetString(requests[4].Body!), StringComparison.Ordinal);
         Assert.Equal(
-            ["initialize", "notifications/initialized", "tools/list", "tools/list"],
-            requests.Take(4).Select(request => JsonDocument.Parse(request.Body!).RootElement.GetProperty("method").GetString()));
+            ["server/discover", "initialize", "notifications/initialized", "tools/list", "tools/list"],
+            requests.Take(5).Select(request => JsonDocument.Parse(request.Body!).RootElement.GetProperty("method").GetString()));
     }
 
     [Fact]
     public async Task ARepeatedCursorFailsInsteadOfReportingPartialToolsAsPassed()
     {
         var transport = new ScriptedTransport(
+            LegacyRejection,
             Reply(Initialize),
             Reply(status: 202),
             Reply("""{"jsonrpc":"2.0","id":2,"result":{"tools":[],"nextCursor":"same"}}"""),
@@ -76,6 +83,7 @@ public class RemoteDoctorTests
         Assert.Equal(RemoteHttpFailure.Protocol, failure.Failure);
 
         var (health, weight) = Checker(new ScriptedTransport(
+            LegacyRejection,
             Reply(Initialize), Reply(status: 202),
             Reply("""{"jsonrpc":"2.0","id":2,"result":{"tools":[],"nextCursor":"same"}}"""),
             Reply("""{"jsonrpc":"2.0","id":3,"result":{"tools":[],"nextCursor":"same"}}"""),
@@ -88,7 +96,7 @@ public class RemoteDoctorTests
     [Fact]
     public async Task APageLimitAndAToolLimitStopTheWalk()
     {
-        var replies = new List<RemoteHttpReply> { Reply(Initialize), Reply(status: 202) };
+        var replies = new List<RemoteHttpReply> { LegacyRejection, Reply(Initialize), Reply(status: 202) };
         for (var page = 0; page < 60; page++)
         {
             replies.Add(Reply(Rpc(2 + page, "{\"tools\":[],\"nextCursor\":\"c" + page + "\"}")));
@@ -98,6 +106,7 @@ public class RemoteDoctorTests
 
         var tools = string.Join(",", Enumerable.Range(0, 10_001).Select(index => "{\"name\":\"t" + index + "\",\"inputSchema\":{}}"));
         var failure = await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(new ScriptedTransport(
+            LegacyRejection,
             Reply(Initialize), Reply(status: 202),
             Reply(Rpc(2, "{\"tools\":[" + tools + "]}")))).ListToolsAsync(Endpoint));
         Assert.Equal(RemoteHttpFailure.ResponseTooLarge, failure.Failure);
@@ -112,6 +121,7 @@ public class RemoteDoctorTests
 
         // A server's own notification and request in the stream are skipped, not answered.
         var transport = new ScriptedTransport(
+            LegacyRejection,
             Reply(
                 """data: {"jsonrpc":"2.0","method":"notifications/message","params":{}}""" + "\n\n" +
                 """data: {"jsonrpc":"2.0","id":7,"method":"ping"}""" + "\n\n" +
@@ -121,18 +131,19 @@ public class RemoteDoctorTests
             Reply(EmptyTools));
         var listing = await new McpHttpClient(transport).ListToolsAsync(Endpoint);
         Assert.Empty(listing.Tools);
-        Assert.Equal(3, transport.Requests.Count);
+        Assert.Equal(4, transport.Requests.Count);
     }
 
     [Fact]
     public async Task AJsonRpcErrorFailsWithoutEchoingItsText()
     {
-        var transport = new ScriptedTransport(Reply(
+        var transport = new ScriptedTransport(LegacyRejection, Reply(
             """{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"bad Authorization: Bearer leaked-secret https://x/?sig=abc"}}"""));
 
         var failure = await Assert.ThrowsAsync<RemoteHttpException>(
             () => new McpHttpClient(transport).ListToolsAsync(Endpoint));
 
+        Assert.Equal(RemoteHttpFailure.Protocol, failure.Failure);
         Assert.DoesNotContain("leaked-secret", failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("sig=abc", failure.Message, StringComparison.Ordinal);
     }
@@ -141,17 +152,19 @@ public class RemoteDoctorTests
     [InlineData(200, "")]
     [InlineData(204, "")]
     [InlineData(202, "")]
-    public async Task ANotificationMayBeAcknowledgedWithNoBodyOnly(int status, string body)
+    [InlineData(200, """{"jsonrpc":"2.0"}""")]
+    public async Task ANotificationIsAcceptedWithAny2xx(int status, string body)
     {
-        var transport = new ScriptedTransport(Reply(Initialize), Reply(body, status), Reply(EmptyTools), Reply(status: 204));
+        var transport = new ScriptedTransport(LegacyRejection, Reply(Initialize), Reply(body, status), Reply(EmptyTools), Reply(status: 204));
         Assert.Empty((await new McpHttpClient(transport).ListToolsAsync(Endpoint)).Tools);
     }
 
     [Fact]
-    public async Task ANotificationAnsweredWithABodyIsRefused()
+    public async Task ANotificationRefusedWithAnErrorStatusFailsTheCheck()
     {
-        var transport = new ScriptedTransport(Reply(Initialize), Reply("""{"jsonrpc":"2.0"}""", 200));
-        await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
+        var transport = new ScriptedTransport(LegacyRejection, Reply(Initialize), Reply("", 400));
+        var failure = await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
+        Assert.Equal(RemoteHttpFailure.Protocol, failure.Failure);
     }
 
     [Fact]
@@ -160,11 +173,13 @@ public class RemoteDoctorTests
         foreach (var result in new[]
         {
             """{"protocolVersion":"1999-01-01","capabilities":{}}""",
-            """{"protocolVersion":"2026-07-28"}""",
-            """{"protocolVersion":"2026-07-28","capabilities":[]}""",
+            """{"protocolVersion":"2025-11-25"}""",
+            """{"protocolVersion":"2025-11-25","capabilities":[]}""",
+            // The modern revision has no handshake, so answering one with it is wrong.
+            """{"protocolVersion":"2026-07-28","capabilities":{}}""",
         })
         {
-            var transport = new ScriptedTransport(Reply($$"""{"jsonrpc":"2.0","id":1,"result":{{result}}}"""));
+            var transport = new ScriptedTransport(LegacyRejection, Reply($$"""{"jsonrpc":"2.0","id":1,"result":{{result}}}"""));
             await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
         }
     }
@@ -173,6 +188,7 @@ public class RemoteDoctorTests
     public async Task AToolWithoutANameOrSchemaIsNotAValidDefinition()
     {
         var transport = new ScriptedTransport(
+            LegacyRejection,
             Reply(Initialize), Reply(status: 202),
             Reply("""{"jsonrpc":"2.0","id":2,"result":{"tools":[{"description":"nameless","inputSchema":{}}]}}"""));
         await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
@@ -182,6 +198,7 @@ public class RemoteDoctorTests
     public async Task ToolsCallIsNeverSent()
     {
         var transport = new ScriptedTransport(
+            LegacyRejection,
             Reply(Initialize), Reply(status: 202),
             Reply("""{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"delete_everything","inputSchema":{}}]}}"""),
             Reply(status: 204));
@@ -190,6 +207,103 @@ public class RemoteDoctorTests
         Assert.DoesNotContain(
             transport.Requests,
             request => request.Body is { } body && Encoding.UTF8.GetString(body).Contains("tools/call", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TheModernRevisionIsSpokenWithoutAHandshake()
+    {
+        const string discover =
+            """{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{},"logging":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-remote","version":"3"}}}}""";
+        const string tools = """{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}}""";
+        var transport = new ScriptedTransport(
+            Reply(discover, headers: new Dictionary<string, string> { ["mcp-session-id"] = "ignored" }),
+            Reply(tools));
+
+        var listing = await new McpHttpClient(transport).ListToolsAsync(Endpoint);
+
+        Assert.Equal("2026-07-28", listing.NegotiatedProtocolVersion);
+        Assert.Equal("modern-remote", listing.ServerName);
+        Assert.Equal(["read"], listing.Tools.Select(tool => tool.Name));
+        Assert.Equal([DeprecatedFeature.Logging], listing.DeprecatedFeatures);
+        // Two requests, no DELETE: a modern server has no session to end.
+        Assert.Equal(2, transport.Requests.Count);
+        var list = transport.Requests[1];
+        Assert.Contains(new KeyValuePair<string, string>("Mcp-Method", "tools/list"), list.Headers);
+        Assert.Contains(new KeyValuePair<string, string>("MCP-Protocol-Version", "2026-07-28"), list.Headers);
+        Assert.DoesNotContain(list.Headers, header => header.Key == "MCP-Session-Id");
+        Assert.Contains("io.modelcontextprotocol/protocolVersion", Encoding.UTF8.GetString(list.Body!), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AModernVersionRefusalIsNotMistakenForAHandshakeServer()
+    {
+        const string refusal =
+            """{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"Unsupported","data":{"supported":["2027-01-01"],"requested":"2026-07-28"}}}""";
+        var transport = new ScriptedTransport(Reply(refusal, 400));
+
+        var failure = await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
+
+        Assert.Equal(RemoteHttpFailure.Protocol, failure.Failure);
+        Assert.Contains("2027-01-01", failure.Message, StringComparison.Ordinal);
+        Assert.Single(transport.Requests);
+    }
+
+    [Theory]
+    [InlineData(403)]
+    [InlineData(429)]
+    [InlineData(307)]
+    public async Task AForbiddenRateLimitedOrRedirectedProbeIsNotRetriedAsAHandshake(int status)
+    {
+        var transport = new ScriptedTransport(Reply("", status));
+
+        var failure = await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
+
+        Assert.Equal(RemoteHttpFailure.HttpStatus, failure.Failure);
+        Assert.Equal(status, failure.Status);
+        Assert.Single(transport.Requests);
+    }
+
+    [Fact]
+    public void ALegacySseEndpointIsUnsupportedNotFailed()
+    {
+        var transport = new ScriptedTransport(
+            Reply(status: 405),
+            Reply(status: 405),
+            Reply(
+                "event: endpoint\ndata: /messages?session=1\n\n",
+                headers: new Dictionary<string, string> { ["content-type"] = "text/event-stream" }));
+        var server = RemoteTestServers.Http("https://mcp.example/events");
+
+        var (health, weight) = Checker(transport).Check(server);
+
+        Assert.Equal(HealthStatus.Unsupported, health.Status);
+        Assert.Null(weight);
+        Assert.Equal("remoteTransport", health.Failure?.Reason);
+        Assert.Equal("sse", health.Failure?.Transport);
+        Assert.Equal(HttpMethod.Get, transport.Requests[^1].Method);
+        Assert.Contains(new KeyValuePair<string, string>("Accept", "text/event-stream"), transport.Requests[^1].Headers);
+
+        server.Health = health;
+        Assert.Contains(McpDoctor.Analyze(server).Findings, finding => finding.Code == "deprecated-http-sse");
+    }
+
+    [Fact]
+    public void AnEndpointThatRefusesTheHandshakeAndIsNoEventStreamStaysFailed()
+    {
+        var transport = new ScriptedTransport(Reply(status: 404), Reply(status: 404), Reply(status: 404));
+
+        var health = Checker(transport).Check(RemoteTestServers.Http(Endpoint)).Health;
+
+        Assert.Equal(HealthStatus.Failed, health.Status);
+        Assert.Contains("404", health.CurrentMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlainHttpToAnAddressOffThisMachineIsUnsupportedNotFailed()
+    {
+        var health = Checker(new ScriptedTransport()).Check(RemoteTestServers.Http("http://192.168.1.20:8080/mcp")).Health;
+
+        Assert.Equal(HealthStatus.Unsupported, health.Status);
     }
 
     // MARK: - Authorization states
@@ -227,7 +341,8 @@ public class RemoteDoctorTests
     {
         foreach (var status in new[] { 404, 500, 502 })
         {
-            var transport = new ScriptedTransport(Reply("token=abc123 body", status));
+            var transport = new ScriptedTransport(
+                Reply("token=abc123 body", status), Reply("token=abc123 body", status), Reply("token=abc123 body", status));
             var health = Checker(transport).Check(RemoteTestServers.Http("https://mcp.example/mcp?sig=secretsig")).Health;
             Assert.Equal(HealthStatus.Failed, health.Status);
             Assert.DoesNotContain("secretsig", health.CurrentMessage, StringComparison.Ordinal);
@@ -241,7 +356,7 @@ public class RemoteDoctorTests
     [Fact]
     public void ACheckMergesTheOAuthOverrideOverTheConfiguredAuthorizationOnly()
     {
-        var transport = new ScriptedTransport(Reply(Initialize), Reply(status: 202), Reply(EmptyTools), Reply(status: 204));
+        var transport = new ScriptedTransport(LegacyRejection, Reply(Initialize), Reply(status: 202), Reply(EmptyTools), Reply(status: 204));
         var server = RemoteTestServers.Http(
             Endpoint,
             """{"headers":{"authorization":"Bearer ${MISSING}","X-Version":"2026"}}""");
@@ -268,7 +383,7 @@ public class RemoteDoctorTests
         var server = RemoteTestServers.Http(Endpoint);
         Assert.Contains(McpDoctor.Analyze(server).Findings, finding => finding.Code == "not-checked");
 
-        var transport = new ScriptedTransport(Reply(Initialize), Reply(status: 202), Reply(EmptyTools), Reply(status: 204));
+        var transport = new ScriptedTransport(LegacyRejection, Reply(Initialize), Reply(status: 202), Reply(EmptyTools), Reply(status: 204));
         server.Health = Checker(transport).Check(server).Health;
         Assert.Empty(McpDoctor.Analyze(server).Findings);
 
@@ -289,7 +404,8 @@ public class RemoteDoctorTests
         Assert.Equal(HealthStatus.Unsupported, health.Status);
         Assert.Null(weight);
         Assert.Contains("legacy", health.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(McpDoctor.Analyze(sse).Findings, finding => finding.Title.Contains("Legacy SSE", StringComparison.Ordinal));
+        var deprecated = Assert.Single(McpDoctor.Analyze(sse).Findings, finding => finding.Code == "deprecated-http-sse");
+        Assert.Equal(DoctorSeverity.Warning, deprecated.Severity);
     }
 
     [Fact]
@@ -448,8 +564,8 @@ public class RemoteDoctorTests
     [Fact]
     public async Task ADuplicatedKeyInAResponseIsRefusedNotResolved()
     {
-        var transport = new ScriptedTransport(Reply(
-            """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2026-07-28","capabilities":{},"capabilities":{"tools":{}}}}"""));
+        var transport = new ScriptedTransport(LegacyRejection, Reply(
+            """{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"capabilities":{"tools":{}}}}"""));
         await Assert.ThrowsAsync<RemoteHttpException>(() => new McpHttpClient(transport).ListToolsAsync(Endpoint));
     }
 
@@ -466,7 +582,7 @@ public class RemoteDoctorTests
         var page = (int id, bool more) =>
             Reply(Rpc(id, "{\"tools\":[{\"name\":\"t" + id + "\",\"description\":\"" + filler + "\",\"inputSchema\":{}}]" +
                 (more ? ",\"nextCursor\":\"c" + id + "\"" : "") + "}"));
-        var total = new ScriptedTransport(Reply(Initialize), Reply(status: 202), page(2, true), page(3, true), page(4, true), page(5, false));
+        var total = new ScriptedTransport(LegacyRejection, Reply(Initialize), Reply(status: 202), page(2, true), page(3, true), page(4, true), page(5, false));
         var overTotal = await Assert.ThrowsAsync<RemoteHttpException>(
             () => new McpHttpClient(total).ListToolsAsync(Endpoint, timeout: TimeSpan.FromSeconds(30)));
         Assert.Equal(RemoteHttpFailure.ResponseTooLarge, overTotal.Failure);
@@ -504,7 +620,7 @@ public class RemoteDoctorTests
         _ = BpeTokenizer.Cl100kBase;
         var huge = new string('a', 3_400_000);
         var response = Rpc(2, "{\"tools\":[{\"name\":\"huge\",\"description\":\"" + huge + "\",\"inputSchema\":{\"type\":\"object\"}}]}");
-        var transport = new ScriptedTransport(Reply(Initialize), Reply(status: 202), Reply(response), Reply(status: 204));
+        var transport = new ScriptedTransport(LegacyRejection, Reply(Initialize), Reply(status: 202), Reply(response), Reply(status: 204));
         var checker = Checker(transport, seconds: 0.25);
 
         var watch = Stopwatch.StartNew();
@@ -566,7 +682,7 @@ public class RemoteDoctorTests
 
         Assert.Equal(["fixture_read_0", "fixture_read_1", "fixture_read_2"], listing.Tools.Select(tool => tool.Name));
         Assert.Equal(
-            ["initialize", "notifications/initialized", "tools/list", "tools/list", "tools/list"],
+            ["server/discover", "initialize", "notifications/initialized", "tools/list", "tools/list", "tools/list"],
             server.Methods);
         Assert.DoesNotContain("tools/call", server.Methods);
 
@@ -579,11 +695,15 @@ public class RemoteDoctorTests
             // A cookie the server set must never be played back.
             Assert.Null(request.Header("Cookie"));
         });
+        Assert.Equal("2026-07-28", posts[0].Header("MCP-Protocol-Version"));
+        Assert.Equal("server/discover", posts[0].Header("Mcp-Method"));
         Assert.Null(posts[0].Header("MCP-Session-Id"));
-        Assert.All(posts.Skip(1), request =>
+        Assert.Null(posts[1].Header("MCP-Session-Id"));
+        Assert.All(posts.Skip(2), request =>
         {
             Assert.Equal("session-fixture", request.Header("MCP-Session-Id"));
-            Assert.Equal("2026-07-28", request.Header("MCP-Protocol-Version"));
+            Assert.Equal("2025-11-25", request.Header("MCP-Protocol-Version"));
+            Assert.Null(request.Header("Mcp-Method"));
         });
 
         var delete = Assert.Single(server.Requests, request => request.Method == "DELETE");

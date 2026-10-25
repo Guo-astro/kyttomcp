@@ -19,6 +19,16 @@ Modes are chosen by the first argument:
     paged     splits tools/list over two pages with a nextCursor
     loop      answers every tools/list page with the same nextCursor
     dupkey    lists a tool whose JSON object repeats "description"
+    modern    speaks only 2026-07-28: answers server/discover, refuses initialize
+    silent    a handshake-era server that ignores requests it does not know
+    exitearly a handshake-era server that exits on any request before initialize
+    strict    refuses any protocol version but 2024-11-05, naming the one it takes
+    promptsonly  offers prompts, no tools, and refuses tools/list
+    roots     asks Kytto for roots/list and waits for the answer before listing tools
+
+Every other mode answers a request it does not know with -32601, as the
+reference SDKs do — which is also how a handshake-era server answers Kytto's
+server/discover probe.
 
 `children` exists to prove Kytto kills the whole process tree (a Job Object on
 Windows): `npx` spawning `node` is the real-world shape, and killing only the
@@ -112,20 +122,57 @@ def main():
             continue
 
         method = message.get("method")
+        meta = (message.get("params") or {}).get("_meta") or {}
+        modern_request = meta.get("io.modelcontextprotocol/protocolVersion") == "2026-07-28"
+
+        if MODE == "modern":
+            if method == "server/discover":
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {}},
+                    "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "modern-server", "version": "2.0.0"}},
+                }})
+            elif method == "tools/list" and modern_request:
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"tools": TOOLS[:1]}})
+            elif "id" in message:
+                send({"jsonrpc": "2.0", "id": message["id"],
+                      "error": {"code": -32601, "message": "Method not found"}})
+            continue
+
+        if method == "server/discover":
+            if MODE == "silent":
+                continue
+            if MODE == "exitearly":
+                sys.exit(3)
+
+        if MODE == "strict" and method == "initialize" and message["params"]["protocolVersion"] != "2024-11-05":
+            send({"jsonrpc": "2.0", "id": message["id"], "error": {
+                "code": -32602, "message": "Unsupported protocol version",
+                "data": {"supported": ["2024-11-05"], "requested": message["params"]["protocolVersion"]},
+            }})
+            continue
         if method == "initialize":
             send({
                 "jsonrpc": "2.0",
                 "id": message["id"],
                 "result": {
                     "protocolVersion": message["params"]["protocolVersion"],
-                    "capabilities": {"tools": {}, "prompts": {}, "resources": {}},
+                    "capabilities": {"prompts": {}} if MODE == "promptsonly" else {"tools": {}, "prompts": {}, "resources": {}},
                     "serverInfo": {"name": "fake-mcp-server", "version": "0.1.0"},
                 },
             })
         elif method == "notifications/initialized":
             continue
         elif method == "tools/list":
-            if MODE in ("slow", "children"):
+            if MODE == "roots":
+                send({"jsonrpc": "2.0", "id": "srv-1", "method": "roots/list"})
+                reply = json.loads(sys.stdin.readline())
+                assert reply.get("id") == "srv-1"
+            if MODE == "promptsonly":
+                send({"jsonrpc": "2.0", "id": message["id"],
+                      "error": {"code": -32601, "message": "Method not found"}})
+            elif MODE in ("slow", "children"):
                 time.sleep(120)
             elif MODE == "error":
                 send({
@@ -196,6 +243,10 @@ def main():
                 "id": message["id"],
                 "result": {"content": [{"type": "text", "text": "fixture result"}]},
             })
+        elif "id" in message:
+            # What the reference SDKs do with a method they do not know.
+            send({"jsonrpc": "2.0", "id": message["id"],
+                  "error": {"code": -32601, "message": "Method not found"}})
 
 
 if __name__ == "__main__":

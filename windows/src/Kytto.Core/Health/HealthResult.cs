@@ -223,7 +223,25 @@ public sealed record ToolAnnotations(
     bool? ReadOnlyHint = null,
     bool? DestructiveHint = null,
     bool? IdempotentHint = null,
-    bool? OpenWorldHint = null);
+    bool? OpenWorldHint = null)
+{
+    /// <summary>The four hints a tool listing may carry.</summary>
+    /// <remarks>
+    /// Shared by the stdio and HTTP clients so the same server reached either way
+    /// records the same contract: no annotations, <c>{}</c> and a title alone all
+    /// read as "no hints".
+    /// </remarks>
+    internal static ToolAnnotations From(Json.JsonNode? node) => new(
+        node?.LastValue("readOnlyHint")?.BoolValue,
+        node?.LastValue("destructiveHint")?.BoolValue,
+        node?.LastValue("idempotentHint")?.BoolValue,
+        node?.LastValue("openWorldHint")?.BoolValue);
+
+    /// <summary>Whether no hint is set, which is what a missing annotations object means too.</summary>
+    [JsonIgnore]
+    public bool IsEmpty =>
+        ReadOnlyHint is null && DestructiveHint is null && IdempotentHint is null && OpenWorldHint is null;
+}
 
 /// <param name="TokenCount">
 /// What this one tool's entry costs, measured on the exact bytes the server sent
@@ -282,6 +300,11 @@ public sealed record HealthResult(
     public HealthFailureReason? Failure { get; init; }
     /// <summary>A validated browser page captured from server stderr, if any.</summary>
     public string? AuthorizationURL { get; init; }
+    /// <summary>
+    /// Features the 2026-07-28 revision deprecates that this server used
+    /// (<see cref="DeprecatedFeature"/>); null when there were none.
+    /// </summary>
+    public IReadOnlyList<string>? DeprecatedFeatures { get; init; }
 
     [JsonIgnore]
     public string? CurrentMessage => Failure?.CurrentMessage() ?? Message;

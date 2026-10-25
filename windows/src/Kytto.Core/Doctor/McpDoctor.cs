@@ -186,6 +186,7 @@ public static class McpDoctor
         // that healthy (§7.10). The last passing contract, not this check's: a failed
         // check lists no tools, and failing must not be a way to make a finding go away.
         findings.AddRange(ToolSafetyScanner.Scan(server.KnownTools).Select(Finding));
+        findings.AddRange(DeprecatedFeatureFindings(health));
 
         if (health.Status == HealthStatus.Passed &&
             // A plugin or extension ships its own command; there is no editable definition to pin (§4).
@@ -210,7 +211,8 @@ public static class McpDoctor
 
     /// <summary>Findings for a remote server, from what its last check measured (§7.3).</summary>
     /// <remarks>
-    /// Legacy SSE is the one transport Kytto cannot inspect, and says so plainly.
+    /// Legacy HTTP+SSE is the one transport Kytto cannot inspect, and it is deprecated —
+    /// whether the definition says so or a check found the endpoint speaking it.
     /// Streamable HTTP is read from the stored outcome only: nothing here makes a
     /// request. The tools a remote server offered are scanned like any other
     /// contract — a description is no safer for having arrived over HTTPS.
@@ -218,14 +220,17 @@ public static class McpDoctor
     private static List<DoctorFinding> AnalyzeRemote(Server server)
     {
         var findings = new List<DoctorFinding>();
-        if (server.Transport == Transport.Sse)
+        var detectedSse = server.Health?.Failure is { Reason: "remoteTransport", Transport: "sse" };
+        if (server.Transport == Transport.Sse || detectedSse)
         {
             findings.Add(new DoctorFinding(
-                "remote-check-unavailable",
-                DoctorSeverity.Info,
-                "Legacy SSE inspection is not supported",
-                "Remote Doctor supports Streamable HTTP endpoints.",
-                "Use the server's Streamable HTTP endpoint if available; otherwise verify the legacy endpoint in its client."));
+                "deprecated-http-sse",
+                DoctorSeverity.Warning,
+                "This server uses the deprecated HTTP+SSE transport",
+                "HTTP+SSE has been superseded since MCP 2025-03-26 and is formally deprecated in " +
+                "2026-07-28, eligible for removal after at least twelve months' notice. Kytto does " +
+                "not inspect it.",
+                "Move to the server's Streamable HTTP endpoint if it has one; until then, verify it in its client."));
         }
         else if (server.Health is not { } health)
         {
@@ -258,9 +263,33 @@ public static class McpDoctor
                 DoctorAction.RunHealthCheck));
         }
 
+        findings.AddRange(DeprecatedFeatureFindings(server.Health));
         findings.AddRange(ToolSafetyScanner.Scan(server.KnownTools).Select(Finding));
         return findings;
     }
+
+    /// <summary>Features the 2026-07-28 revision deprecates, seen during the last check.</summary>
+    /// <remarks>Information only: nothing is broken yet, but clients will drop them.</remarks>
+    private static IEnumerable<DoctorFinding> DeprecatedFeatureFindings(HealthResult? health) =>
+        (health?.DeprecatedFeatures ?? []).Select(feature =>
+        {
+            var (name, replacement) = feature switch
+            {
+                DeprecatedFeature.Logging =>
+                    ("MCP logging", "Servers are expected to log to stderr or through OpenTelemetry instead."),
+                DeprecatedFeature.Roots =>
+                    ("Roots", "The server asked Kytto for roots during the check; future clients may not answer."),
+                DeprecatedFeature.Sampling =>
+                    ("Sampling", "The server asked for sampling during the check; future clients may not answer."),
+                _ => (feature, "A later client may not support it."),
+            };
+            return new DoctorFinding(
+                $"deprecated-{feature}",
+                DoctorSeverity.Info,
+                $"Uses {name}, deprecated in MCP 2026-07-28",
+                $"{replacement} Deprecated features stay available for at least twelve months.",
+                "Nothing to change now. Prefer an updated release of the server when one drops this dependency.");
+        });
 
     /// <summary>A package fetched by name with no exact version (§7.10).</summary>
     /// <remarks>
@@ -352,6 +381,40 @@ public static class McpDoctor
 
     private static DoctorFinding ClassifyFailure(HealthResult health)
     {
+        // What the check actually ran into decides first. Matching words over the
+        // message and stderr comes after, and only for failures where the server's own
+        // output is the evidence — otherwise "Method not found" reads as a missing
+        // executable, and a timeout whose stderr mentions a missing optional file reads
+        // as one too.
+        switch (health.Failure?.Reason)
+        {
+            case "commandNotFound" or "executableMissing" or "relativeCommand":
+                return Failure(
+                    "executable-not-found",
+                    "The executable or one of its files was not found",
+                    "Check the command, use an absolute path, and verify that the client can see the same Node, Python or uv installation as your terminal.");
+            case "notExecutable":
+                return Failure(
+                    "permission-denied",
+                    "The operating system denied access",
+                    "Check file permissions and Windows security controls before trying again.");
+            case "timedOut":
+                return Failure(
+                    "timeout",
+                    "The server did not complete the MCP handshake in time",
+                    "Run the command directly to check for an install prompt, slow package download, blocked network request or server output written to stdout.");
+            case "protocolError":
+                return Failure(
+                    "protocol-output",
+                    "The server returned invalid MCP/JSON output",
+                    "Run it directly and ensure diagnostic messages go to stderr while stdout contains only MCP JSON-RPC messages.");
+            case "serverRefused":
+                return Failure(
+                    "server-refused",
+                    "The server refused Kytto's MCP request",
+                    "Open the server detail for the error it returned. A server that only speaks a newer MCP revision than Kytto, or needs configuration it lacks, refuses this way.");
+        }
+
         var evidence = string.Join('\n', new[] { health.Message, health.Stderr }.OfType<string>());
 
         if (ContainsAny(evidence, "enoent", "not found", "no such file", "cannot find the file"))
