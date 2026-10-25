@@ -163,7 +163,7 @@ public sealed class GatewayMaskingEndToEndTests
             ]);
 
         var refused = Reply(replies, 2);
-        Assert.Equal(-32_601, refused.GetProperty("error").GetProperty("code").GetInt32());
+        Assert.Equal(-32_602, refused.GetProperty("error").GetProperty("code").GetInt32());
         // The fixture answers every call with "fixture result", so a result here
         // would mean the refusal never happened.
         Assert.False(refused.TryGetProperty("result", out _));

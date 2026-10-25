@@ -82,13 +82,13 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
         public sealed record Refuse(byte[] Response) : ClientDecision;
     }
 
-    /// <summary>JSON-RPC "method not found".</summary>
+    /// <summary>JSON-RPC "invalid params".</summary>
     /// <remarks>
-    /// The closest standard code for a tool the client cannot see. It is also what a
-    /// client gets from a server that genuinely does not have the tool, which is the
-    /// behaviour being imitated.
+    /// What MCP servers answer for a tool they do not have, which is the behaviour
+    /// being imitated. "Method not found" would tell the client the server has no
+    /// <c>tools/call</c> at all.
     /// </remarks>
-    internal const int MethodNotFound = -32_601;
+    internal const int UnknownTool = -32_602;
 
     private readonly HashSet<string> _exposed = new(exposedTools, StringComparer.Ordinal);
     private readonly Lock _lock = new();
@@ -107,12 +107,14 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
 
     public ClientDecision InspectClientLine(ReadOnlySpan<byte> line)
     {
-        if (Parse(line) is not { } message) return new ClientDecision.Forward();
+        var parsed = Parse(line);
+        if (parsed is JsonArray batch) return InspectBatch(batch);
+        if (parsed is not JsonObject message) return new ClientDecision.Forward();
 
         switch (StringAt(message, "method"))
         {
             case "tools/list":
-                if (RequestId(message["id"]) is { } listId)
+                if (RequestKey(message["id"]) is { } listId)
                 {
                     lock (_lock) _pendingListRequests.Add(listId);
                 }
@@ -131,6 +133,47 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
         }
     }
 
+    /// <summary>A JSON-RPC batch, inspected element by element.</summary>
+    /// <remarks>
+    /// Letting a batch through unread would let a hidden tool be called by wrapping
+    /// it in <c>[…]</c>. One hidden call refuses the whole batch, answered as a batch.
+    /// </remarks>
+    private ClientDecision InspectBatch(JsonArray batch)
+    {
+        var objects = batch.OfType<JsonObject>().ToArray();
+        var hidden = objects.Any(item =>
+            StringAt(item, "method") == "tools/call" &&
+            StringAt(item["params"], "name") is { } name && !Allows(name));
+        if (!hidden)
+        {
+            foreach (var item in objects.Where(item => StringAt(item, "method") == "tools/list"))
+            {
+                if (RequestKey(item["id"]) is { } listId)
+                {
+                    lock (_lock) _pendingListRequests.Add(listId);
+                }
+            }
+            return new ClientDecision.Forward();
+        }
+
+        var replies = new JsonArray();
+        foreach (var item in objects)
+        {
+            if (RequestId(item["id"]) is null) continue;
+            replies.Add(new JsonObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = item["id"]?.DeepClone(),
+                ["error"] = new JsonObject
+                {
+                    ["code"] = UnknownTool,
+                    ["message"] = "Kytto refused this batch: it calls a tool this route does not expose.",
+                },
+            });
+        }
+        return new ClientDecision.Refuse(replies.Count == 0 ? [] : Encoding.UTF8.GetBytes(replies.ToJsonString()));
+    }
+
     private static byte[] Refusal(JsonNode? id, string toolName)
     {
         // The id goes back exactly as it arrived — a client that sent a number and
@@ -141,7 +184,7 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
             ["id"] = id?.DeepClone(),
             ["error"] = new JsonObject
             {
-                ["code"] = MethodNotFound,
+                ["code"] = UnknownTool,
                 ["message"] =
                     $"{toolName} is not available: Kytto is not exposing this tool on this route.",
             },
@@ -157,30 +200,56 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
     /// </summary>
     public byte[] RewriteServerLine(byte[] line)
     {
-        if (Parse(line) is not { } message) return line;
+        var parsed = Parse(line);
+        if (parsed is JsonArray batch)
+        {
+            // A batched response: each element answers on its own.
+            var changed = false;
+            var rewritten = new JsonArray();
+            foreach (var element in batch)
+            {
+                if (element is JsonObject item && Rewrite(item) is { } filtered)
+                {
+                    rewritten.Add(filtered.DeepClone());
+                    changed = true;
+                }
+                else
+                {
+                    rewritten.Add(element?.DeepClone());
+                }
+            }
+            return changed ? Encoding.UTF8.GetBytes(rewritten.ToJsonString()) : line;
+        }
+        if (parsed is not JsonObject message) return line;
+        return Rewrite(message) is { } result ? Encoding.UTF8.GetBytes(result.ToJsonString()) : line;
+    }
+
+    /// <summary>The message with hidden tools removed, or null when it is not one to change.</summary>
+    private JsonObject? Rewrite(JsonObject message)
+    {
         // Only a response can answer a pending request. The server numbers its own
         // requests (`roots/list`, `sampling/createMessage`) from its own id space,
         // and one that happens to reuse a pending id must not use it up — the real
         // tool list would then pass through unfiltered.
         if (message.ContainsKey("method") ||
-            !(message.ContainsKey("result") || message.ContainsKey("error"))) return line;
-        if (RequestId(message["id"]) is not { } id) return line;
+            !(message.ContainsKey("result") || message.ContainsKey("error"))) return null;
+        if (RequestKey(message["id"]) is not { } id) return null;
 
         bool isListResponse;
         lock (_lock) isListResponse = _pendingListRequests.Remove(id);
-        if (!isListResponse) return line;
+        if (!isListResponse) return null;
 
-        if (message["result"] is not JsonObject result) return line;
-        if (result["tools"] is not JsonArray tools) return line;
+        if (message["result"] is not JsonObject result) return null;
+        if (result["tools"] is not JsonArray tools) return null;
 
         var kept = tools
             .Where(tool => StringAt(tool, "name") is { } name && Allows(name))
             .Select(tool => tool!.DeepClone())
             .ToArray();
-        if (kept.Length == tools.Count) return line;
+        if (kept.Length == tools.Count) return null;
 
         result["tools"] = new JsonArray(kept);
-        return Encoding.UTF8.GetBytes(message.ToJsonString());
+        return message;
     }
 
     /// <remarks>
@@ -190,12 +259,12 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
     /// the same way is what stops <c>{"name":"read_file","name":"delete_all"}</c> from
     /// meaning one tool to the filter and another to the server.
     /// </remarks>
-    private static JsonObject? Parse(ReadOnlySpan<byte> line)
+    private static JsonNode? Parse(ReadOnlySpan<byte> line)
     {
         try
         {
             using var document = JsonDocument.Parse(line.ToArray());
-            return Build(document.RootElement) as JsonObject;
+            return Build(document.RootElement);
         }
         catch (JsonException)
         {
@@ -232,6 +301,16 @@ public sealed class GatewayToolFilter(IReadOnlyList<string> exposedTools)
     private static string? StringAt(JsonNode? node, string key) =>
         node is JsonObject json && json[key] is JsonValue value && value.TryGetValue<string>(out var text)
             ? text
+            : null;
+
+    /// <summary>The id as a correlation key, kind included.</summary>
+    /// <remarks>
+    /// <c>1</c> and <c>"1"</c> are different requests, and matching them up would
+    /// filter — or skip — the wrong reply.
+    /// </remarks>
+    private static string? RequestKey(JsonNode? value) =>
+        RequestId(value) is { } id
+            ? (value is JsonValue json && json.TryGetValue<string>(out _) ? "s:" : "n:") + id
             : null;
 
     /// <summary>JSON-RPC ids are strings or numbers; booleans are neither.</summary>

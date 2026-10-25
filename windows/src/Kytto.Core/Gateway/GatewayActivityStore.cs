@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kytto.Core.Settings;
@@ -34,21 +35,53 @@ public sealed class GatewayActivityStore(KyttoPaths paths)
         Converters = { new JsonStringEnumConverter() },
     };
 
+    /// <summary>How much of the journal's end is read.</summary>
+    /// <remarks>
+    /// The panel shows the last few hundred events; reading a journal of any size
+    /// whole, on every refresh, is how a long-lived install grows a stutter.
+    /// </remarks>
+    internal const int TailBytes = 2 * 1024 * 1024;
+
     public GatewayActivitySummary Summary(int limit = 500)
     {
-        string text;
-        try { text = File.ReadAllText(paths.GatewayEventsFile); }
+        byte[] data;
+        long start;
+        try
+        {
+            using var stream = new FileStream(
+                paths.GatewayEventsFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            start = Math.Max(0, stream.Length - TailBytes);
+            stream.Seek(start, SeekOrigin.Begin);
+            using var tail = new MemoryStream();
+            stream.CopyTo(tail);
+            data = tail.ToArray();
+        }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             return GatewayActivitySummary.From([]);
         }
 
-        var events = text
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+        // Decoded line by line and lossily: one line cut by a short write must cost
+        // that line, not every event in the file.
+        var lines = new List<string>();
+        var lineStart = 0;
+        for (var index = 0; index <= data.Length; index++)
+        {
+            if (index < data.Length && data[index] != (byte)'\n') continue;
+            if (index > lineStart) lines.Add(Encoding.UTF8.GetString(data, lineStart, index - lineStart));
+            lineStart = index + 1;
+        }
+        if (start > 0 && lines.Count > 0) lines.RemoveAt(0); // began mid-line
+
+        var events = lines
             .TakeLast(Math.Max(1, limit))
-            .Select(Parse)
-            .OfType<GatewayEvent>()
-            .OrderByDescending(item => item.Timestamp)
+            .Select((line, index) => (Event: Parse(line), Index: index))
+            .Where(item => item.Event is not null)
+            // Timestamps have whole seconds; within one, the journal's own order keeps
+            // "started" before "completed".
+            .OrderByDescending(item => item.Event!.Timestamp)
+            .ThenByDescending(item => item.Index)
+            .Select(item => item.Event!)
             .ToArray();
         return GatewayActivitySummary.From(events);
     }

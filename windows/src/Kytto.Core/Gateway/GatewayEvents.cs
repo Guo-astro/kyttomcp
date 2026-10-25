@@ -47,17 +47,33 @@ public sealed class JsonLinesGatewayEventSink : IGatewayEventSink, IDisposable
         Converters = { new JsonStringEnumConverter() },
     };
 
-    private readonly FileStream _stream;
+    /// <summary>
+    /// Past this size the journal is moved to <c>&lt;name&gt;.1</c> (replacing the one
+    /// before) and a new one is started, so it never grows without bound.
+    /// </summary>
+    internal const long RotationBytes = 5 * 1024 * 1024;
+
+    private readonly string _path;
     private readonly Mutex _mutex;
 
+    /// <remarks>
+    /// The file is opened for each event and closed after it, under a mutex every
+    /// helper sharing the journal takes: no helper holds it open, so whichever notices
+    /// the size first can rename it while other sessions keep running. Opened once
+    /// here, so a journal that cannot be written fails now — the helper then runs
+    /// unlogged — rather than on every event.
+    /// </remarks>
     public JsonLinesGatewayEventSink(string path)
     {
-        var fullPath = Path.GetFullPath(path);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        _stream = new FileStream(fullPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fullPath))).ToLowerInvariant();
+        _path = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+        using (Open()) { }
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(_path))).ToLowerInvariant();
         _mutex = new Mutex(false, $"Local\\KyttoGatewayEvents-{hash}");
     }
+
+    private FileStream Open() =>
+        new(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
 
     public void Record(GatewayEvent item)
     {
@@ -68,10 +84,12 @@ public sealed class JsonLinesGatewayEventSink : IGatewayEventSink, IDisposable
             try { held = _mutex.WaitOne(TimeSpan.FromSeconds(2)); }
             catch (AbandonedMutexException) { held = true; }
             if (!held) return;
-            _stream.Write(bytes);
-            _stream.Flush();
+            RotateIfDue();
+            using var stream = Open();
+            stream.Write(bytes);
+            stream.Flush();
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             // Observability-only logging must never interrupt an MCP session.
         }
@@ -81,11 +99,22 @@ public sealed class JsonLinesGatewayEventSink : IGatewayEventSink, IDisposable
         }
     }
 
-    public void Dispose()
+    private void RotateIfDue()
     {
-        _stream.Dispose();
-        _mutex.Dispose();
+        try
+        {
+            if (new FileInfo(_path) is { Exists: true, Length: > RotationBytes })
+            {
+                File.Move(_path, _path + ".1", overwrite: true);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // A reader holding the file without delete sharing; the next event tries again.
+        }
     }
+
+    public void Dispose() => _mutex.Dispose();
 }
 
 /// <summary>

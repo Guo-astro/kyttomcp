@@ -178,6 +178,122 @@ public sealed class GatewayTests
         Assert.Equal(original, harness.Text(@".codex\config.toml"));
     }
 
+    /// <summary>
+    /// Codex's own docs show an inline env. Missed, the server would start without it
+    /// and its values would be shown in the preview.
+    /// </summary>
+    [Fact]
+    public void ACodexInlineEnvIsCarriedIntoTheRouteAndNeverShownInThePreview()
+    {
+        using var harness = new GatewayHarness();
+        harness.Write("""
+            [mcp_servers.github]
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-github"]
+            env = { GITHUB_TOKEN = "ghp_inlinesecret" }
+            env.EXTRA = "dotted-secret"
+            startup_timeout_sec = 30
+            """, @".codex\config.toml");
+        var github = Assert.Single(harness.Discover().Servers, server => server.Id == "github");
+        const string RouteID = "8f6a2f30-6a49-4d3c-9f43-6f2f3b6e8f10";
+
+        var preview = harness.Service().Preview(github, ClientId.Codex, RouteID);
+        Assert.Equal(["EXTRA", "GITHUB_TOKEN"], preview.EnvironmentKeys);
+        Assert.DoesNotContain("ghp_inlinesecret", preview.DirectDefinitionPreview, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotted-secret", preview.DirectDefinitionPreview, StringComparison.Ordinal);
+
+        harness.Service().Enable(github, ClientId.Codex, RouteID);
+        var launch = harness.Routes.Resolve(RouteID, harness.Secrets);
+        Assert.Equal("ghp_inlinesecret", launch.Environment["GITHUB_TOKEN"]);
+        Assert.Equal("dotted-secret", launch.Environment["EXTRA"]);
+        // How Codex treats the entry applies to the helper just the same.
+        var migrated = TomlDocument.Parse(harness.Text(@".codex\config.toml"));
+        Assert.Equal(30, migrated.Table("mcp_servers", "github")?.Value("startup_timeout_sec")?.IntegerValue);
+    }
+
+    [Fact]
+    public void SettingsTheGatewayCannotCarryAndClientPlaceholdersAreRefused()
+    {
+        using var harness = new GatewayHarness();
+        harness.Write(
+            """{"mcpServers": {"app": {"command": "node", "args": ["dist/index.js"], "cwd": "C:\\work\\app"}, "tok": {"command": "npx", "args": ["pkg"], "env": {"T": "${env:TOKEN}"}}}}""",
+            @".cursor\mcp.json");
+        var servers = harness.Discover().Servers;
+
+        var cwd = Assert.Throws<GatewayMigrationException>(() =>
+            harness.Service().Preview(servers.Single(server => server.Id == "app"), ClientId.Cursor, Guid.NewGuid().ToString("D")));
+        Assert.Contains("cwd", cwd.Message, StringComparison.Ordinal);
+        var placeholder = Assert.Throws<GatewayMigrationException>(() =>
+            harness.Service().Preview(servers.Single(server => server.Id == "tok"), ClientId.Cursor, Guid.NewGuid().ToString("D")));
+        Assert.Contains("placeholders", placeholder.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Restore puts the text back as one block, so a neighbour between two tables would be written twice.</summary>
+    [Fact]
+    public void CodexTablesThatAreNotTogetherAreRefused()
+    {
+        using var harness = new GatewayHarness();
+        harness.Write("""
+            [mcp_servers.github]
+            command = "npx"
+
+            [mcp_servers.other]
+            command = "x"
+
+            [mcp_servers.github.env]
+            TOKEN = "t"
+            """, @".codex\config.toml");
+        var github = Assert.Single(harness.Discover().Servers, server => server.Id == "github");
+
+        var error = Assert.Throws<GatewayMigrationException>(() =>
+            harness.Service().Preview(github, ClientId.Codex, Guid.NewGuid().ToString("D")));
+        Assert.Contains("next to each other", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true, @"Temp1_Kytto-1.0.9.zip\Kytto\kytto-mcp-proxy.exe")]
+    [InlineData(false, @"kytto-gateway-tests\Kytto\kytto-mcp-proxy.exe")]
+    public void AHelperRunFromInsideAZipIsNotWrittenIntoAConfig(bool temporary, string relative) =>
+        Assert.Equal(temporary, GatewayMigrationService.IsTemporaryZipExtraction(Path.Combine(Path.GetTempPath(), relative)));
+
+    [Fact]
+    public void TheJournalIsRotatedAndOnlyItsEndIsRead()
+    {
+        using var harness = new GatewayHarness();
+        var path = harness.Paths.GatewayEventsFile;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, new string('x', (int)JsonLinesGatewayEventSink.RotationBytes + 10) + "\n");
+
+        using (var sink = new JsonLinesGatewayEventSink(path))
+        {
+            sink.Record(Event(GatewayEventKind.SessionStarted));
+        }
+
+        Assert.True(File.Exists(path + ".1"));
+        Assert.Single(File.ReadAllLines(path));
+        Assert.Single(new GatewayActivityStore(harness.Paths).Summary().Events);
+    }
+
+    [Fact]
+    public void ACutLineCostsThatLineAndEqualTimestampsKeepJournalOrder()
+    {
+        using var harness = new GatewayHarness();
+        var path = harness.Paths.GatewayEventsFile;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var started = Event(GatewayEventKind.ToolCallStarted);
+        var completed = Event(GatewayEventKind.ToolCallCompleted) with { Timestamp = started.Timestamp };
+        using (var sink = new JsonLinesGatewayEventSink(path))
+        {
+            sink.Record(started);
+            File.AppendAllText(path, "{\"kind\":\"tool.call.co\n");
+            sink.Record(completed);
+        }
+
+        var events = new GatewayActivityStore(harness.Paths).Summary().Events;
+
+        Assert.Equal([GatewayEventKind.ToolCallCompleted, GatewayEventKind.ToolCallStarted], events.Select(item => item.Kind));
+    }
+
     [Fact]
     public void DriftIsRefusedBeforeRouteOrCredentialWrites()
     {

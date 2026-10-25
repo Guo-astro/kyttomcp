@@ -61,6 +61,50 @@ public sealed class GatewayToolFilterTests
         Assert.IsType<GatewayToolFilter.ClientDecision.Forward>(Filter().InspectClientLine(line));
     }
 
+    /// <summary>A hidden tool cannot be called by wrapping the call in a JSON-RPC batch.</summary>
+    [Fact]
+    public void ABatchHidingACallIsRefusedWholeAndAnsweredAsABatch()
+    {
+        var line = Json("""[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file"}},{"jsonrpc":"2.0","id":"two","method":"tools/call","params":{"name":"write_file"}},{"jsonrpc":"2.0","method":"notifications/x"}]""");
+
+        var refusal = Assert.IsType<GatewayToolFilter.ClientDecision.Refuse>(Filter().InspectClientLine(line));
+
+        var replies = Object(refusal.Response).EnumerateArray().ToArray();
+        Assert.Equal(2, replies.Length);
+        Assert.All(replies, reply => Assert.Equal(-32_602, reply.GetProperty("error").GetProperty("code").GetInt32()));
+        Assert.Equal(1, replies[0].GetProperty("id").GetInt32());
+        Assert.Equal("two", replies[1].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public void ABatchedToolsListResponseIsFiltered()
+    {
+        var filter = Filter();
+        Assert.IsType<GatewayToolFilter.ClientDecision.Forward>(filter.InspectClientLine(
+            Json("""[{"jsonrpc":"2.0","id":4,"method":"tools/list"},{"jsonrpc":"2.0","id":5,"method":"ping"}]""")));
+
+        var rewritten = filter.RewriteServerLine(Json(
+            """[{"jsonrpc":"2.0","id":5,"result":{}},{"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"read_file"},{"name":"write_file"}]}}]"""));
+
+        var batch = Object(rewritten).EnumerateArray().ToArray();
+        Assert.Equal(["read_file"], ToolNames(batch[1]));
+        Assert.Equal(5, batch[0].GetProperty("id").GetInt32());
+    }
+
+    /// <summary><c>1</c> and <c>"1"</c> are different requests; matching them would filter the wrong reply.</summary>
+    [Fact]
+    public void AStringIdAndANumberIdAreDifferentRequests()
+    {
+        var filter = Filter();
+        filter.InspectClientLine(Json("""{"jsonrpc":"2.0","id":"1","method":"tools/list"}"""));
+
+        var unrelated = Json("""{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"write_file"}]}}""");
+        Assert.Same(unrelated, filter.RewriteServerLine(unrelated));
+
+        var answer = filter.RewriteServerLine(Json("""{"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"write_file"}]}}"""));
+        Assert.Empty(ToolNames(Object(answer)));
+    }
+
     [Fact]
     public void ACallToAHiddenToolIsRefusedHereAndNeverReachesTheServer()
     {
@@ -70,7 +114,7 @@ public sealed class GatewayToolFilterTests
 
         var reply = Object(refusal.Response);
         var error = reply.GetProperty("error");
-        Assert.Equal(-32_601, error.GetProperty("code").GetInt32());
+        Assert.Equal(-32_602, error.GetProperty("code").GetInt32());
         Assert.Contains("write_file", error.GetProperty("message").GetString()!, StringComparison.Ordinal);
         // The id has to come back in the type it arrived in, or the client cannot
         // match the reply to its own request.

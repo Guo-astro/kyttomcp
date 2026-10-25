@@ -51,7 +51,9 @@ try
         eventLogPath = invocation.EventLogPath;
     }
 
-    using var eventSink = eventLogPath is null ? null : new JsonLinesGatewayEventSink(eventLogPath);
+    // Losing the event log must not interrupt the client's session (docs/gateway.md):
+    // if it cannot be opened, the session runs unlogged.
+    using var eventSink = OpenEventLog(eventLogPath);
     IGatewayEventSink sink = eventSink is not null ? eventSink : new NullGatewayEventSink();
     var observer = new GatewayMessageObserver(serverId, clientId, sink);
 
@@ -133,6 +135,17 @@ try
         closeDestination: false,
         cancellation.Token);
 
+    // The client closing its end (a crash, a force quit) is the only notice the helper
+    // gets. The upstream's input is closed with it; a server that does not exit on that
+    // gets a grace period, then is ended with everything it started.
+    _ = clientToServer.ContinueWith(
+        async _ =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            TryKill(process);
+        },
+        TaskScheduler.Default);
+
     try
     {
         await process.WaitForExitAsync(cancellation.Token);
@@ -146,7 +159,12 @@ try
         TryKill(process);
         await process.WaitForExitAsync();
     }
-    await Task.WhenAll(IgnoreClosure(serverToClient), IgnoreClosure(stderr));
+    // Whatever the upstream started outlives it unless the job is closed too — and a
+    // descendant still holding its stdout would keep the relays below waiting forever.
+    job.Dispose();
+    await Task.WhenAny(
+        Task.WhenAll(IgnoreClosure(serverToClient), IgnoreClosure(stderr)),
+        Task.Delay(TimeSpan.FromSeconds(1)));
     observer.Finish(process.ExitCode);
     return process.ExitCode;
 }
@@ -154,6 +172,19 @@ catch (Exception error)
 {
     await Console.Error.WriteLineAsync($"Kytto gateway: {error.Message}\n\n{usage}");
     return 64;
+}
+
+static JsonLinesGatewayEventSink? OpenEventLog(string? path)
+{
+    if (path is null) return null;
+    try
+    {
+        return new JsonLinesGatewayEventSink(path);
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    {
+        return null;
+    }
 }
 
 /// <summary>Byte-for-byte forwarding — the §3.3 path, used whenever nothing is masked.</summary>
@@ -224,8 +255,13 @@ static async Task RelayMessagesAsync(
     }
     finally
     {
-        // A trailing partial message still belongs to the other side.
-        framer.Flush(tail => destination.Write(tail));
+        // A trailing partial message still belongs to the other side, and still goes
+        // through the filter: servers that read line by line act on a final line
+        // without its newline too.
+        framer.Flush(tail =>
+        {
+            if (transform(tail) is { } forwarded) destination.Write(forwarded);
+        });
         if (closeDestination) destination.Close();
     }
 }

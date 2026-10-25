@@ -52,6 +52,19 @@ public sealed class GatewayMigrationException(string message) : Exception(messag
 
     public static GatewayMigrationException OrphanedRouteInBackup(string id) =>
         new($"That backup points at gateway route {id}, but its credentials no longer exist. Restore a Direct backup instead.");
+
+    /// <summary>
+    /// Kytto is running from a place that will not exist later — the temporary folder
+    /// Windows extracts to when an app is started from inside a ZIP.
+    /// </summary>
+    public static GatewayMigrationException HelperLocationUnstable(string path) =>
+        new($"Kytto is running from {path}, a temporary copy Windows made while opening a ZIP file. " +
+            "Extract Kytto to a permanent folder, open it from there, then turn on Gateway mode.");
+
+    internal static GatewayMigrationException Unmodelled(IReadOnlyList<string> keys) =>
+        InvalidDefinition(
+            $"it uses {string.Join(", ", keys)}, which the gateway does not carry over. " +
+            $"Remove {(keys.Count == 1 ? "it" : "them")} or keep this server Direct");
 }
 
 /// <summary>Opt-in Direct ↔ Gateway migration through the §6 write path.</summary>
@@ -214,6 +227,12 @@ public sealed class GatewayMigrationService
     private Target TargetFor(Server server, ClientId clientId, bool requireNoRoute)
     {
         if (!File.Exists(_helperPath)) throw GatewayMigrationException.HelperUnavailable(_helperPath);
+        // The helper's path is written into the client's config, so it has to outlive
+        // this launch.
+        if (IsTemporaryZipExtraction(_helperPath))
+        {
+            throw GatewayMigrationException.HelperLocationUnstable(Path.GetDirectoryName(_helperPath) ?? _helperPath);
+        }
         if (server.Transport != Transport.Stdio) throw GatewayMigrationException.UnsupportedTransport();
         // Per client as well as per row: a name that is a plugin's in this client is
         // installed software here whatever it is elsewhere (§4).
@@ -253,6 +272,38 @@ public sealed class GatewayMigrationService
         return new Target(clientId, source, path, display, text);
     }
 
+    /// <summary>Whether a path lies in the folder Explorer extracts a ZIP to when an app inside it is opened.</summary>
+    /// <remarks>
+    /// <c>%TEMP%\Temp1_Kytto.zip\…</c>: deleted when Explorer is done with it, after
+    /// which every client pointed at the helper would fail to start the server.
+    /// </remarks>
+    internal static bool IsTemporaryZipExtraction(string path)
+    {
+        var temp = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var full = Path.GetFullPath(path);
+        if (!full.StartsWith(temp, StringComparison.OrdinalIgnoreCase)) return false;
+        return full[temp.Length..].Split(Path.DirectorySeparatorChar).Any(segment =>
+            System.Text.RegularExpressions.Regex.IsMatch(segment, @"^Temp\d+_.+\.zip$", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+    }
+
+    /// <summary>Codex keys about the entry rather than the process it launches.</summary>
+    private static readonly string[] CodexClientKeys =
+        ["enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools"];
+
+    /// <summary>
+    /// <c>${…}</c> is expanded by the client that launches a definition. Behind the
+    /// gateway the client launches the helper instead, so the server would receive the
+    /// placeholder text itself.
+    /// </summary>
+    private static void RefusePlaceholders(string command, IReadOnlyList<string> arguments, IReadOnlyList<EnvEntry> environment)
+    {
+        if (new[] { command }.Concat(arguments).Concat(environment.Select(entry => entry.Value ?? ""))
+            .Any(value => value.Contains("${", StringComparison.Ordinal)))
+        {
+            throw GatewayMigrationException.InvalidDefinition("it uses ${…} placeholders, which only its client can expand");
+        }
+    }
+
     private DirectDefinition Direct(Target target, string serverId, string routeId) =>
         target.Source.Format == ConfigFormat.Json
             ? DirectJson(target, serverId, routeId)
@@ -265,6 +316,14 @@ public sealed class GatewayMigrationService
         var member = map?.Members?.FirstOrDefault(candidate => Server.Identity(candidate.Key) == serverId)
             ?? throw GatewayMigrationException.DefinitionMissing();
         var node = member.Value;
+        // The route carries command, args and env; anything else would be lost behind
+        // the helper — a working directory, headers, an envFile.
+        var extra = node.Keys.Where(key => key is not ("command" or "args" or "env" or "type")).ToArray();
+        if (extra.Length > 0) throw GatewayMigrationException.Unmodelled(extra);
+        if (node["type"] is { } type && type.StringValue != "stdio")
+        {
+            throw GatewayMigrationException.InvalidDefinition("it is not a stdio server");
+        }
         var command = node["command"]?.StringValue;
         if (string.IsNullOrEmpty(command))
         {
@@ -272,6 +331,7 @@ public sealed class GatewayMigrationService
         }
         var arguments = StringElements(node["args"], "one of its arguments is not a string");
         var environment = JsonEnvironment(node["env"]);
+        RefusePlaceholders(command, arguments, environment);
         var unit = IndentStyle.Detect(document.SourceText).Text;
         var replacement = new ServerDraft
         {
@@ -298,21 +358,62 @@ public sealed class GatewayMigrationService
             ?? throw GatewayMigrationException.DefinitionMissing();
         var sourceText = document.ServerDefinitionText(name, target.Source.ServersKey)
             ?? throw GatewayMigrationException.DefinitionMissing();
+
+        // Restore puts this text back as one block, so it must be this server's tables
+        // and nothing else — not a neighbour sitting between two of them, which would
+        // then be written twice.
+        string[] ownPath = [target.Source.ServersKey, name];
+        TomlDocument slice;
+        try
+        {
+            slice = TomlDocument.Parse(sourceText);
+        }
+        catch (TomlParseException)
+        {
+            throw GatewayMigrationException.InvalidDefinition(
+                "its tables are not next to each other in config.toml; move them together first");
+        }
+        if (!slice.Tables.All(candidate => candidate.Path.Count >= ownPath.Length && candidate.Path.Take(ownPath.Length).SequenceEqual(ownPath)))
+        {
+            throw GatewayMigrationException.InvalidDefinition(
+                "its tables are not next to each other in config.toml; move them together first");
+        }
+        if (slice.Tables.Select(candidate => candidate.Path)
+                .FirstOrDefault(path => path.Count > ownPath.Length && !path.SequenceEqual([.. ownPath, "env"])) is { } other)
+        {
+            throw GatewayMigrationException.Unmodelled([other[ownPath.Length]]);
+        }
+
+        // Launch settings move into the route; settings that tell Codex how to treat
+        // the entry (timeouts, which tools to show) apply to the helper just the same
+        // and stay in the block, spelled as they were.
+        var clientSide = table.Pairs.Where(pair => CodexClientKeys.Contains(pair.Key[0])).ToArray();
+        var extra = table.Pairs.Select(pair => pair.Key[0])
+            .Where(key => key is not ("command" or "args" or "env") && !CodexClientKeys.Contains(key))
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (extra.Length > 0) throw GatewayMigrationException.Unmodelled(extra);
+
         var command = table.Value("command")?.StringValue;
         if (string.IsNullOrEmpty(command))
         {
             throw GatewayMigrationException.InvalidDefinition("its command is missing or is not a string");
         }
         var arguments = TomlStringElements(table.Value("args"), "one of its arguments is not a string");
-        var environment = TomlEnvironment(document.Table(target.Source.ServersKey, name, "env"));
-        var replacement = TomlBuilder.ServerBlock(
-            name,
-            target.Source.ServersKey,
-            _helperPath,
-            ["--route", routeId],
-            null,
-            [],
-            null);
+        var environment = TomlEnvironment(table, document.Table(target.Source.ServersKey, name, "env"));
+        RefusePlaceholders(command, arguments, environment);
+        var replacement = string.Join("\n", new[]
+        {
+            TomlBuilder.ServerBlock(
+                name,
+                target.Source.ServersKey,
+                _helperPath,
+                ["--route", routeId],
+                null,
+                [],
+                null),
+        }.Concat(clientSide.Select(pair => document.Slice(pair.Span))));
         return new DirectDefinition(name, sourceText, command, arguments, environment, replacement);
     }
 
@@ -345,12 +446,30 @@ public sealed class GatewayMigrationService
                 $"environment value {member.Key} is not a string"))).ToArray();
     }
 
-    private static IReadOnlyList<EnvEntry> TomlEnvironment(TomlTable? table) =>
-        (table?.Pairs ?? []).Select(pair => new EnvEntry(
+    /// <summary>Every way Codex accepts an environment.</summary>
+    /// <remarks>
+    /// An <c>[….env]</c> sub-table, an inline <c>env = { … }</c> (what Codex's own docs
+    /// show), or dotted <c>env.K = …</c>. Missing one would start the server without it
+    /// — and leave its values unredacted in the preview.
+    /// </remarks>
+    private static IReadOnlyList<EnvEntry> TomlEnvironment(TomlTable table, TomlTable? subtable)
+    {
+        var pairs = (subtable?.Pairs ?? []).Select(pair => (pair.Name, pair.Value)).ToList();
+        if (table.Value("env") is { } env)
+        {
+            var inline = env.InlinePairs
+                ?? throw GatewayMigrationException.InvalidDefinition("its environment is not a table");
+            pairs.AddRange(inline.Select(pair => (pair.Name, pair.Value)));
+        }
+        pairs.AddRange(table.Pairs
+            .Where(pair => pair.Key.Count == 2 && pair.Key[0] == "env")
+            .Select(pair => ((string?)pair.Key[1], pair.Value)));
+        return pairs.Select(pair => new EnvEntry(
             pair.Name ?? throw GatewayMigrationException.InvalidDefinition(
                 "one of its environment values is not a simple key"),
             pair.Value.StringValue ?? throw GatewayMigrationException.InvalidDefinition(
                 "one of its environment values is not a string"))).ToArray();
+    }
 
     private IReadOnlyList<string> RouteIDs(string text, ClientId clientId)
     {
@@ -450,12 +569,31 @@ public sealed class GatewayMigrationService
                     (member.Value.Span, JsonText.String("<stored in credentials>"))));
         }
 
-        var toml = TomlDocument.Parse(direct.SourceText);
-        var environment = toml.Tables.FirstOrDefault(table => table.Path.LastOrDefault() == "env");
-        return environment is null
+        const string Withheld = "<preview withheld: the definition could not be redacted>";
+        TomlDocument toml;
+        try
+        {
+            toml = TomlDocument.Parse(direct.SourceText);
+        }
+        catch (TomlParseException)
+        {
+            return direct.Environment.Count == 0 ? direct.SourceText : Withheld;
+        }
+        var spans = new List<TomlSpan>();
+        foreach (var table in toml.Tables)
+        {
+            if (table.Path.LastOrDefault() == "env") spans.AddRange(table.Pairs.Select(pair => pair.Value.Span));
+            foreach (var pair in table.Pairs.Where(pair => pair.Key[0] == "env"))
+            {
+                if (pair.Key.Count == 2) spans.Add(pair.Value.Span);
+                spans.AddRange((pair.Value.InlinePairs ?? []).Select(inner => inner.Value.Span));
+            }
+        }
+        // Every value the route stores has to be covered, or the preview shows one.
+        if (spans.Count < direct.Environment.Count) return Withheld;
+        return spans.Count == 0
             ? direct.SourceText
-            : toml.Replacing(environment.Pairs.Select(pair =>
-                (pair.Value.Span, TomlText.String("<stored in credentials>"))));
+            : toml.Replacing(spans.Select(span => (span, TomlText.String("<stored in credentials>"))));
     }
 
     private static string NormalizeRouteID(string routeId) =>
