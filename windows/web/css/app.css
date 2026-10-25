@@ -54,11 +54,11 @@
   --unchecked: light-dark(#c4c4cc, #4a4a55);
   --auth: light-dark(#0969da, #58a6ff);
 
-  --shadow-sheet: light-dark(
-    0 24px 56px -16px rgb(0 0 0 / 25%),
-    0 32px 64px -16px rgb(0 0 0 / 65%)
-  ),
-  light-dark(0 2px 8px rgb(0 0 0 / 8%), 0 2px 8px rgb(0 0 0 / 35%));
+  /* light-dark() takes colours only; a whole shadow list inside it is an
+     invalid value, and the sheet silently lost its shadow. */
+  --shadow-sheet:
+    0 24px 56px -16px light-dark(rgb(0 0 0 / 25%), rgb(0 0 0 / 65%)),
+    0 2px 8px light-dark(rgb(0 0 0 / 8%), rgb(0 0 0 / 35%));
   --scrim: light-dark(rgb(0 0 0 / 20%), rgb(0 0 0 / 45%));
   --skeleton: light-dark(rgb(0 0 0 / 5%), rgb(255 255 255 / 6%));
   --skeleton-sheen: light-dark(rgb(0 0 0 / 9%), rgb(255 255 255 / 12%));
@@ -296,9 +296,17 @@ img {
   touch-action: none;
 }
 
-.side-resize:focus-visible {
+.side-resize:focus-visible,
+.resizing-sidebar .side-resize {
   outline: none;
   background: color-mix(in srgb, AccentColor 34%, transparent);
+}
+
+/* The drag is tracked on the window, so the cursor and selection follow it there
+   too rather than flickering whenever the pointer leaves the handle. */
+.resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .side-brand {
@@ -1719,6 +1727,10 @@ th.col-client.idle .app-icon {
   align-items: center;
   justify-content: center;
   text-decoration: none;
+  /* Inside a muted placeholder it would otherwise inherit the muted grey and read
+     as disabled next to "Try again". */
+  color: var(--text);
+  opacity: 1;
 }
 
 /* Retry and both report links on the startup failure screen: one row when it
@@ -3943,10 +3955,9 @@ body[data-stubbed='true'] .statusbar::after {
   font-weight: 600;
 }
 
+/* Ordinary buttons, as everywhere else; they only must not shrink. */
 .inspector-header .button {
-  min-height: 26px;
-  padding: 4px 9px;
-  font-size: 11px;
+  flex: 0 0 auto;
 }
 
 .inspector-body {
@@ -4099,11 +4110,12 @@ body[data-stubbed='true'] .statusbar::after {
   text-underline-offset: 2px;
 }
 
-/* The verdict in words, and where the row came from. Wrapping rather than
-   truncating the pair keeps a long plugin name from pushing the verdict away. */
+/* The verdict in words, and where the row came from. Indented like the command
+   line above it, past the status dot, and kept to one line so every row is the
+   same height: the source label gives way first, so the verdict stays. */
 .server-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 1px 8px;
   min-width: 0;
   margin: 3px 0 0 15px;
@@ -4111,12 +4123,16 @@ body[data-stubbed='true'] .statusbar::after {
   font-size: 10px;
 }
 
-.server-source-label {
+.server-meta > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.server-meta > .server-source-label {
+  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .server-health-label {
@@ -4180,9 +4196,11 @@ body[data-stubbed='true'] .statusbar::after {
   overflow-wrap: anywhere;
 }
 
-/* Below this the inspector no longer fits beside a useful matrix, so it moves
-   under it. The matrix keeps its own scroll; nothing widens the page. */
-@media (max-width: 1100px) {
+/* Below this the inspector no longer fits beside a useful matrix — a fixed
+   inspector column left it two or three client columns wide — so it moves under
+   it. The matrix keeps its own scroll; nothing widens the page. With nothing
+   selected the inspector has nothing to say, so it does not take room to say it. */
+@media (max-width: 1280px) {
   /* Matrix, then inspector: taller than most windows, so it is the page that
      scrolls and not the diagnostics bar that gets painted over. */
   .matrix-workspace {
@@ -4208,7 +4226,7 @@ body[data-stubbed='true'] .statusbar::after {
   }
 
   .server-inspector:has(.inspector-empty) {
-    min-height: 145px;
+    display: none;
   }
 
   .inspector-body {

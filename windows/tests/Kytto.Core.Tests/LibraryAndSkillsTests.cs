@@ -155,6 +155,39 @@ public sealed class LibraryAndSkillsTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Skills kept in dotfiles are linked into place — the root, or one skill folder —
+    /// and the clients follow the links, so the inventory does too.
+    /// </summary>
+    [Fact]
+    public void ASkillsRootOrSkillFolderThatIsAJunctionIsFollowed()
+    {
+        var dotfiles = Path.Combine(_root, "dotfiles");
+        Directory.CreateDirectory(Path.Combine(dotfiles, "skills", "linked-root"));
+        File.WriteAllText(Path.Combine(dotfiles, "skills", "linked-root", "SKILL.md"), "---\nname: Linked root\ndescription: d\n---\n");
+        Directory.CreateDirectory(Path.Combine(dotfiles, "one"));
+        File.WriteAllText(Path.Combine(dotfiles, "one", "SKILL.md"), "---\nname: Linked folder\ndescription: d\n---\n");
+
+        Directory.CreateDirectory(Path.Combine(_root, ".claude"));
+        Directory.CreateDirectory(Path.Combine(_root, ".codex", "skills"));
+        Assert.True(Kytto.Core.Tests.Support.PortableTestSupport.TryMakeJunction(Path.Combine(_root, ".claude", "skills"), Path.Combine(dotfiles, "skills")));
+        Assert.True(Kytto.Core.Tests.Support.PortableTestSupport.TryMakeJunction(Path.Combine(_root, ".codex", "skills", "one"), Path.Combine(dotfiles, "one")));
+
+        try
+        {
+            var result = new SkillsInventory().Scan(_root);
+
+            Assert.Contains(result.Skills, skill => skill.Name == "Linked root");
+            Assert.Contains(result.Skills, skill => skill.Name == "Linked folder");
+        }
+        finally
+        {
+            // A junction is removed on its own, never recursed through.
+            Directory.Delete(Path.Combine(_root, ".claude", "skills"));
+            Directory.Delete(Path.Combine(_root, ".codex", "skills", "one"));
+        }
+    }
+
     public void Dispose()
     {
         try

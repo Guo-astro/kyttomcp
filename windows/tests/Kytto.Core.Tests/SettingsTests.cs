@@ -136,6 +136,27 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(196, settings.SidebarWidth);
     }
 
+    /// <summary>
+    /// One value this build does not understand — written by a newer version — resets
+    /// only itself; the next save would otherwise make the loss permanent.
+    /// </summary>
+    [Fact]
+    public void AnUnknownValueFromANewerVersionResetsOnlyThatField()
+    {
+        var paths = new KyttoPaths(_root);
+        Directory.CreateDirectory(_root);
+        File.WriteAllText(paths.SettingsFile, """
+            { "theme": "a-theme-from-the-future", "backupRetention": 7, "hasCompletedOnboarding": true, "sidebarWidth": "wide" }
+            """);
+
+        var settings = new SettingsStore(paths).Current;
+
+        Assert.Equal(new KyttoSettings().Theme, settings.Theme);
+        Assert.Equal(7, settings.BackupRetention);
+        Assert.True(settings.HasCompletedOnboarding);
+        Assert.Equal(196, settings.SidebarWidth);
+    }
+
     [Fact]
     public void CustomSourceVisibilityPersistsWhenFolded()
     {

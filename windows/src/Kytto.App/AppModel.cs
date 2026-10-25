@@ -214,10 +214,18 @@ internal sealed partial class AppModel : IDisposable
     {
         var session = LibrarySessionFor(sessionId);
         var servers = _current.Servers;
+        var generation = ++_libraryScanGeneration;
         var result = await Task.Run(() => _libraryScanner.Scan(session.Root, servers));
-        _librarySessions[sessionId] = session with { Candidates = result.Candidates };
+        // A slower, older scan finishing last must not replace the candidates of the
+        // one the window is showing.
+        if (generation == _libraryScanGeneration)
+        {
+            _librarySessions[sessionId] = session with { Candidates = result.Candidates };
+        }
         return result;
     }
+
+    private int _libraryScanGeneration;
 
     internal McpLibraryCandidate LibraryCandidate(string sessionId, string candidateId) =>
         LibrarySessionFor(sessionId).Candidates?.FirstOrDefault(candidate => candidate.ID == candidateId)
@@ -1011,18 +1019,51 @@ internal sealed partial class AppModel : IDisposable
     /// </remarks>
     internal async Task CheckAllHealthAsync(Action<string, int, int> onProgress)
     {
-        var servers = _current.Servers
-            .Where(server => server.Transport == Transport.Http ||
-                             (server.Transport == Transport.Stdio &&
-                              server.Health?.Status != HealthStatus.NeedsAuthorization))
-            .ToArray();
-
-        for (var index = 0; index < servers.Length; index++)
+        // One run at a time: two would start every server twice, in parallel, which is
+        // what "sequential on purpose" is for.
+        if (Interlocked.CompareExchange(ref _checkingAll, 1, 0) != 0)
         {
-            onProgress(servers[index].Name, index, servers.Length);
-            await CheckHealthAsync(servers[index].Id);
+            throw new Ipc.IpcException("appState", "Kytto is already checking every server. Wait for that run to finish.");
+        }
+        try
+        {
+            var servers = _current.Servers
+                .Where(server => server.Transport == Transport.Http ||
+                                 (server.Transport == Transport.Stdio &&
+                                  server.Health?.Status != HealthStatus.NeedsAuthorization))
+                .ToArray();
+
+            var interrupted = 0;
+            for (var index = 0; index < servers.Length; index++)
+            {
+                onProgress(servers[index].Name, index, servers.Length);
+                try
+                {
+                    await CheckHealthAsync(servers[index].Id);
+                }
+                catch (AuthorizationChangedException)
+                {
+                    // A sign-in during the run: that server is simply not recorded, and
+                    // the rest are still checked.
+                    interrupted++;
+                }
+            }
+            if (interrupted > 0)
+            {
+                throw new Ipc.IpcException(
+                    "appState",
+                    $"{interrupted} server{(interrupted == 1 ? " was" : "s were")} not recorded because " +
+                    $"{(interrupted == 1 ? "its" : "their")} sign-in or saved authorization changed during the run. " +
+                    $"Check {(interrupted == 1 ? "it" : "them")} again.");
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _checkingAll, 0);
         }
     }
+
+    private int _checkingAll;
 
     // MARK: - Secrets (§6)
 

@@ -361,15 +361,51 @@ public sealed class SettingsStore
     {
         try
         {
-            var text = File.ReadAllText(_paths.SettingsFile);
-            return (JsonSerializer.Deserialize<KyttoSettings>(text, Options) ?? new KyttoSettings())
-                .Sanitized();
+            return Decode(File.ReadAllText(_paths.SettingsFile)).Sanitized();
         }
         catch (Exception error) when (
             error is IOException or UnauthorizedAccessException or JsonException)
         {
             return new KyttoSettings();
         }
+    }
+
+    /// <summary>The settings a file holds, field by field.</summary>
+    /// <remarks>
+    /// Each field falls back alone: one value this build does not understand — a theme
+    /// or a setting written by a newer version — must not reset every other setting,
+    /// which the next save would then make permanent.
+    /// </remarks>
+    internal static KyttoSettings Decode(string text)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<KyttoSettings>(text, Options) ?? new KyttoSettings();
+        }
+        catch (JsonException)
+        {
+            // Not every field reads; keep the ones that do.
+        }
+
+        if (System.Text.Json.Nodes.JsonNode.Parse(text) is not System.Text.Json.Nodes.JsonObject root)
+        {
+            return new KyttoSettings();
+        }
+        var kept = new System.Text.Json.Nodes.JsonObject();
+        foreach (var (key, value) in root)
+        {
+            var single = new System.Text.Json.Nodes.JsonObject { [key] = value?.DeepClone() };
+            try
+            {
+                JsonSerializer.Deserialize<KyttoSettings>(single.ToJsonString(), Options);
+                kept[key] = value?.DeepClone();
+            }
+            catch (JsonException)
+            {
+                // This field alone falls back to its default.
+            }
+        }
+        return JsonSerializer.Deserialize<KyttoSettings>(kept.ToJsonString(), Options) ?? new KyttoSettings();
     }
 
     public KyttoSettings Update(

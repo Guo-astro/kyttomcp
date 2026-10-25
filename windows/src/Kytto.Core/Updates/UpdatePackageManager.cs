@@ -103,6 +103,7 @@ public sealed class UpdatePackageManager : IDisposable
             throw new UpdatePackageException("The update staging directory is not private app data.");
         }
         KyttoStorage.EnsurePrivate(root, staging);
+        RemoveAbandonedDownloads(staging);
         var token = $"stage.{Guid.NewGuid():N}";
         var part = Path.Combine(staging, token + ".part");
         var final = Path.Combine(staging, token + ".exe");
@@ -206,6 +207,39 @@ public sealed class UpdatePackageManager : IDisposable
     public void Cancel()
     {
         lock (_lock) _downloadCancellation?.Cancel();
+    }
+
+    /// <summary>Installers downloaded and never installed, and partial downloads, from earlier sessions.</summary>
+    /// <remarks>A stage this session may still install is kept.</remarks>
+    private void RemoveAbandonedDownloads(string staging)
+    {
+        string[] entries;
+        try
+        {
+            entries = Directory.GetFiles(staging, "stage.*");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+        HashSet<string> kept;
+        lock (_lock)
+        {
+            kept = _readyPackages.Values
+                .Select(package => Path.GetFullPath(package.Path))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        foreach (var entry in entries)
+        {
+            var extension = Path.GetExtension(entry);
+            if (!extension.Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
+                !extension.Equals(".part", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (kept.Contains(Path.GetFullPath(entry))) continue;
+            DeleteQuietly(entry);
+        }
     }
 
     /// <summary>Installs the stage named by the opaque token after revalidation.</summary>

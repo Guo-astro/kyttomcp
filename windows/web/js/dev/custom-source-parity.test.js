@@ -19,7 +19,9 @@ test('sidebar separates the writable clients from read-only workspace and custom
   // heading: workspaces nest under the client that owns them, and everything
   // else keeps the read-only disclosure.
   assert.match(sidebar, /Clients & sources/);
-  assert.match(sidebar, /Custom sources · read-only/);
+  assert.match(sidebar, /'Custom sources'/);
+  // With every source nested under its client, the heading is only the switch.
+  assert.match(sidebar, /'Hide read-only sources' : 'Show read-only sources'/);
   assert.match(sidebar, /state\.clients\.filter\(\(client\) => !client\.isReadOnly\)/);
   assert.match(sidebar, /state\.clients\.filter\(\(client\) => client\.isReadOnly\)/);
   assert.match(sidebar, /source\.iconAsset === client\.iconAsset/);

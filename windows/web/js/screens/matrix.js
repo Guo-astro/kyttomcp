@@ -512,7 +512,9 @@ function filterSelect(label, action, selected, options, icon) {
   const field = el('label', 'matrix-filter');
   // Accent when it is narrowing something, so a filter left on is visible from
   // across the room and not only on reading its value.
-  if (selected !== options[0]?.id) field.classList.add('is-active');
+  // Highlighted when it narrows what is shown. Row density narrows nothing, so
+  // choosing Compact must not look like an active filter.
+  if (action !== 'row-density' && selected !== options[0]?.id) field.classList.add('is-active');
 
   const control = el('span', 'filter-control');
   const leading = glyph(icon);
@@ -888,7 +890,7 @@ function emptyState(clients) {
   const box = el('div', 'placeholder');
   box.append(el('p', null, 'No MCP servers found in any client configuration.'));
   const detail = clients.length
-    ? 'The clients below were detected, but none of them has a server configured yet.'
+    ? 'The clients in the sidebar were detected, but none of them has a server configured yet.'
     : 'No supported clients were detected on this machine.';
   box.append(el('p', 'muted', detail));
   return box;

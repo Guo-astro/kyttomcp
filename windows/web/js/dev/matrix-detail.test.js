@@ -310,16 +310,20 @@ test('matrix and inspector share the window and the page never scrolls sideways'
   // What a config file or a server wrote wraps inside the column.
   assert.match(css, /\.inspector-body :is\(code, pre, dd, li, p\)\s*\{[^}]*overflow-wrap:\s*anywhere/);
   assert.match(rule(css, '.server-name'), /text-overflow:\s*ellipsis/);
-  assert.match(rule(css, '.server-source-label'), /text-overflow:\s*ellipsis/);
+  assert.match(rule(css, '.server-meta > .server-source-label'), /text-overflow:\s*ellipsis/);
+  // One line per row, so every row is the same height.
+  assert.match(rule(css, '.server-meta'), /flex-wrap:\s*nowrap/);
 });
 
-test('at 1100px the inspector moves under the matrix', async () => {
+test('at 1280px the inspector moves under the matrix', async () => {
   const css = await source('css/app.css');
-  const block = css.match(/@media \(max-width: 1100px\)\s*\{([\s\S]*?)\r?\n\}\r?\n/)?.[1] ?? '';
+  const block = css.match(/@media \(max-width: 1280px\)\s*\{([\s\S]*?)\r?\n\}\r?\n/)?.[1] ?? '';
   assert.notEqual(block, '');
   assert.match(block, /\.matrix-split\s*\{[^}]*flex-direction:\s*column/);
   assert.match(block, /\.server-inspector\s*\{[^}]*max-height:\s*420px/);
   assert.match(block, /\.matrix-workspace\s*\{[^}]*flex:\s*0 0 auto/);
+  // With nothing selected, stacked, the inspector takes no room.
+  assert.match(block, /\.server-inspector:has\(\.inspector-empty\)\s*\{[^}]*display:\s*none/);
   // And above it the workspace takes what is left and never fewer than its parts.
   assert.match(rule(css, '.matrix-workspace'), /flex:\s*1 1 0/);
   assert.match(rule(css, '.matrix-workspace'), /min-height:\s*440px/);
@@ -405,7 +409,9 @@ test('the sidebar groups the places and keeps what Windows already had', async (
   // Read-only sources keep their padlock and their words.
   assert.match(sidebar, /source-lock/);
   assert.match(sidebar, /'Read-only'/);
-  assert.match(sidebar, /Custom sources · read-only/);
+  assert.match(sidebar, /'Custom sources'/);
+  // With every source nested under its client, the heading is only the switch.
+  assert.match(sidebar, /'Hide read-only sources' : 'Show read-only sources'/);
   // The Settings row names no shortcut: the shell owns that.
   assert.match(sidebar, /item\.title = 'Open Settings';/);
   assert.match(await source('css/app.css'), /\.side-resize\s*\{[^}]*left:\s*calc\(var\(--sidebar-width\) - 3px\)/);

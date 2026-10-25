@@ -202,7 +202,7 @@ export function serverOpener(state, server, settled) {
   // inside the detail sheet, which meant finding it required already suspecting
   // it — the one thing a rug pull relies on you not doing.
   if ((state.contractAlerts ?? []).some((entry) => entry.serverID === server.id)) {
-    const badge = el('span', 'badge contract-changed', 'contract changed');
+    const badge = el('span', 'badge contract-changed', 'changed');
     badge.title =
       'The tools this server offers, or what it says about them, changed since the last check. Open it to review.';
     title.append(badge);

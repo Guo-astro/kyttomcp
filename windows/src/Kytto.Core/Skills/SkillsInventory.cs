@@ -136,8 +136,10 @@ public sealed class SkillsInventory
             DirectoryInfo rootInfo;
             try
             {
-                rootInfo = new DirectoryInfo(root);
-                if (IsReparse(rootInfo)) return;
+                // A root kept in dotfiles (`.claude\skills` → a junction or a symbolic
+                // link into another folder) is followed, as the clients follow it.
+                if (Followed(new DirectoryInfo(root)) is not { } followed) return;
+                rootInfo = followed;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
@@ -148,10 +150,23 @@ public sealed class SkillsInventory
             IEnumerable<DirectoryInfo> skillDirectories;
             try
             {
-                skillDirectories = rootInfo.EnumerateDirectories()
-                    .Where(directory => !IsReparse(directory))
-                    .OrderBy(directory => directory.Name, StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
+                var found = new List<DirectoryInfo>();
+                foreach (var child in rootInfo.EnumerateDirectories()
+                             .OrderBy(directory => directory.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    // Skill installers link skill folders into place; a link to a folder
+                    // is read like the folder it names.
+                    if (Followed(child) is { } directory)
+                    {
+                        found.Add(directory);
+                    }
+                    else
+                    {
+                        warnings.Add(
+                            $"Skipped {child.Name} in the skills directory {Display(root)}: its link does not lead to a folder.");
+                    }
+                }
+                skillDirectories = found;
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
@@ -420,4 +435,20 @@ public sealed class SkillsInventory
 
     private static bool IsReparse(FileSystemInfo info) =>
         info.Attributes.HasFlag(FileAttributes.ReparsePoint) || info.LinkTarget is not null;
+
+    /// <summary>The folder itself, or the folder a junction or symbolic link leads to; null when it leads nowhere.</summary>
+    private static DirectoryInfo? Followed(DirectoryInfo directory)
+    {
+        if (!IsReparse(directory)) return directory;
+        try
+        {
+            return directory.ResolveLinkTarget(returnFinalTarget: true) is DirectoryInfo { Exists: true } target
+                ? target
+                : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 }

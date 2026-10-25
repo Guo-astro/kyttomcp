@@ -89,7 +89,9 @@ export function renderSidebar(state, selectionChanged = false) {
     // Everything else — explicitly attached files with no owning client — keeps
     // the disclosure that folds them away, as before.
     if (customSources.length > 0) {
-      sidebar.append(customHeading(customSources.length, shown));
+      // Grouped sources sit under their client, so with none left over the heading
+      // only offers the show/hide switch, and says so.
+      sidebar.append(customHeading(customSources.length, shown, customSources.some((source) => !nested.has(source.id))));
       if (shown) {
         for (const client of customSources.filter((source) => !nested.has(source.id))) {
           sidebar.append(clientItem(state, client, selectionChanged));
@@ -162,7 +164,7 @@ function discoverItem({ action, label, paths }) {
   return item;
 }
 
-function customHeading(count, shown) {
+function customHeading(count, shown, hasUngrouped = true) {
   const heading = el(
     'button',
     `side-heading side-disclosure${shown ? '' : ' collapsed'}`,
@@ -173,7 +175,7 @@ function customHeading(count, shown) {
   heading.setAttribute('aria-expanded', String(shown));
   heading.append(
     glyph(GLYPH.disclosure),
-    el('span', 'side-label', 'Custom sources · read-only'),
+    el('span', 'side-label', hasUngrouped ? 'Custom sources' : shown ? 'Hide read-only sources' : 'Show read-only sources'),
     el('span', 'side-count', String(count)),
   );
   return heading;

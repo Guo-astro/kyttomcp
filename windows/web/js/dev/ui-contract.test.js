@@ -186,7 +186,9 @@ test('sidebar resize supports pointer, keyboard, reset and native persistence', 
   assert.match(sidebar, /role', 'separator'/);
   assert.match(sidebar, /resize-sidebar/);
   assert.match(matrix, /body\.append\(sidebarResizeHandle/);
-  assert.match(main, /setPointerCapture/);
+  // The drag listens on the window: a render mid-drag replaces the handle element.
+  assert.match(main, /window\.addEventListener\('pointermove', move\)/);
+  assert.match(main, /resizing-sidebar/);
   assert.match(main, /ArrowLeft/);
   assert.match(main, /ArrowRight/);
   assert.match(main, /commitSidebarWidth\(SIDEBAR_DEFAULT\)/);

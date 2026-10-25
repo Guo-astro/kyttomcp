@@ -37,6 +37,34 @@ public sealed class UpdatePackageManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task InstallersAndPartialDownloadsAbandonedByEarlierSessionsAreRemoved()
+    {
+        var staging = Path.Combine(_root, "Updates");
+        Directory.CreateDirectory(staging);
+        var abandoned = Path.Combine(staging, "stage.0123456789abcdef0123456789abcdef.exe");
+        var partial = Path.Combine(staging, "stage.fedcba9876543210fedcba9876543210.part");
+        var unrelated = Path.Combine(staging, "notes.txt");
+        File.WriteAllText(abandoned, "old");
+        File.WriteAllText(partial, "half");
+        File.WriteAllText(unrelated, "keep");
+        var bytes = Encoding.UTF8.GetBytes("signed installer fixture");
+        using var client = new HttpClient(new PackageHandler(bytes));
+        using var manager = new UpdatePackageManager(new KyttoPaths(_root), client);
+
+        var package = await manager.DownloadAsync(Release(bytes));
+
+        Assert.False(File.Exists(abandoned));
+        Assert.False(File.Exists(partial));
+        Assert.True(File.Exists(unrelated));
+        Assert.True(File.Exists(package.Path));
+
+        // This session's stage is the one it may still install, so a second download keeps it.
+        var second = await manager.DownloadAsync(Release(bytes));
+        Assert.True(File.Exists(package.Path));
+        Assert.True(File.Exists(second.Path));
+    }
+
+    [Fact]
     public async Task AForeignFinalRedirectIsRejectedAndLeavesNoPartialStage()
     {
         var bytes = Encoding.UTF8.GetBytes("installer");

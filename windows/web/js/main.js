@@ -113,6 +113,9 @@ function focusSnapshot() {
 
 function restoreFocus(snapshot) {
   if (!snapshot?.dataset.action) return false;
+  // With a dialog open, focus belongs inside it: a control behind the backdrop is
+  // not somewhere keyboard focus may land.
+  if (!snapshot.insideSheet && root.querySelector('.sheet')) return false;
   const entries = Object.entries(snapshot.dataset);
   // The inspector and the detail sheet render the same controls for one server
   // (§7.1.2), so a bare `[data-action]` search can land on the inert copy behind
@@ -230,14 +233,37 @@ async function refresh() {
       invoke('backups.list', { clientID: null }),
     ]);
     setState({ backups, ...state });
+    await reloadActivePanel();
   } catch (error) {
     setState({ notice: { kind: 'error', message: error.message } });
   }
 }
 
+/**
+ * Panels whose data is not part of the state reply. Without this, Refresh (or a
+ * config changed on disk) left Secrets, Profiles and Activity showing what was
+ * true before — and acting on a row that no longer exists fails natively.
+ */
+async function reloadActivePanel() {
+  switch (getState().panel) {
+    case 'secrets': return reloadSecrets();
+    case 'profiles': return reloadProfiles();
+    case 'activity': return reloadActivity();
+    default: return undefined;
+  }
+}
+
 /** Applies whatever the native side says the world now looks like. */
 function applyState(state) {
-  if (state) setState(state);
+  if (!state) return;
+  setState(state);
+  // A sheet about a server that just disappeared (removed in its client, or
+  // renamed elsewhere) renders nothing; left in state it would swallow Escape and
+  // keep focus "in a sheet" that is not on screen.
+  const { sheet, servers } = getState();
+  if (sheet && !sheet.busy && sheet.serverId && !servers.some((server) => server.id === sheet.serverId)) {
+    setState({ sheet: null });
+  }
 }
 
 async function reloadBackups() {
@@ -589,7 +615,16 @@ async function applySetupImport() {
       message: 'Setup imported. New server definitions are disabled; review each server before enabling it.',
     });
   } catch (error) {
-    failSheetRequest(request, error);
+    // The native plan is single-use and is spent even when applying fails, so a
+    // retry button here could only ever answer "stale preview".
+    if (getState().sheet?.kind === 'portableImport') {
+      setState({
+        sheet: null,
+        notice: { kind: 'error', message: `${error.message} Nothing was imported. Choose the setup file again to retry.` },
+      });
+    } else {
+      failSheetRequest(request, error);
+    }
   }
 }
 
@@ -1923,24 +1958,27 @@ root.addEventListener('pointerdown', (event) => {
   event.preventDefault();
   const startX = event.clientX;
   const startWidth = currentSidebarWidth();
-  handle.setPointerCapture(event.pointerId);
 
+  // On the window, not the handle: any render during the drag (a notice timing
+  // out, a health-progress push) replaces the handle element, which takes its
+  // pointer capture and listeners with it and freezes the drag.
+  document.body.classList.add('resizing-sidebar');
   const move = (moveEvent) => {
     if (moveEvent.pointerId !== event.pointerId) return;
     applySidebarWidth(startWidth + moveEvent.clientX - startX);
   };
   const finish = async (upEvent) => {
     if (upEvent.pointerId !== event.pointerId) return;
-    handle.removeEventListener('pointermove', move);
-    handle.removeEventListener('pointerup', finish);
-    handle.removeEventListener('pointercancel', finish);
-    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    window.removeEventListener('pointercancel', finish);
+    document.body.classList.remove('resizing-sidebar');
     await commitSidebarWidth(currentSidebarWidth());
   };
 
-  handle.addEventListener('pointermove', move);
-  handle.addEventListener('pointerup', finish);
-  handle.addEventListener('pointercancel', finish);
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+  window.addEventListener('pointercancel', finish);
 });
 
 root.addEventListener('dblclick', async (event) => {
@@ -1995,7 +2033,8 @@ root.addEventListener('input', (event) => {
       updateSheet({ name: value });
       break;
     case 'profile-budget':
-      updateSheet({ tokenBudget: value === '' ? null : Number(value) });
+      // Whole, non-negative tokens; the native payload is an integer.
+      updateSheet({ tokenBudget: value === '' || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.round(Number(value))) });
       break;
     case 'agent-import-json':
       updateSheet({ json: value, preview: null, error: null });
@@ -2114,7 +2153,10 @@ on('menu.find', () => {
 });
 
 // A watched file changed, whoever changed it (§6.4).
-on('configs.changed', applyState);
+on('configs.changed', (state) => {
+  applyState(state);
+  reloadActivePanel().catch(() => {});
+});
 
 // Settings live in the native window, so reflect a saved choice in the open
 // web view instead of waiting for its next navigation or app launch (§7.6).

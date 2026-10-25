@@ -509,8 +509,9 @@ added to one is in the other, and the disclosure state of a tool row is shared
 between them. Focus is restored within the half of the page it left, because the
 two surfaces draw the same controls and the one behind an open sheet is inert.
 
-Below 1100 px the inspector moves under the matrix (at most 420 px tall, its body
-scrolling). In both layouts nothing widens the page: the matrix scrolls itself in
+Below 1280 px the inspector moves under the matrix (at most 420 px tall, its body
+scrolling), and with nothing selected it is not shown at all: beside the table a
+fixed inspector column left the matrix only two or three client columns wide. In both layouts nothing widens the page: the matrix scrolls itself in
 both directions with its server column pinned, the inspector scrolls its own
 body, and what a config file or a server wrote — a name, a path, a schema —
 wraps or is ellipsised inside its column. The workspace takes the height the
