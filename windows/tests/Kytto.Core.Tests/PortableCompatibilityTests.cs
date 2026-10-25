@@ -36,8 +36,8 @@ public sealed class PortableCompatibilityTests
             requirement => requirement.Id,
             requirement => requirement.Label switch
             {
-                var label when label.EndsWith("argument 3", StringComparison.Ordinal) => "--root",
-                var label when label.EndsWith("remote URL", StringComparison.Ordinal) => "https://example.test/mcp",
+                var label when label.Contains(": argument 3", StringComparison.Ordinal) => "--root",
+                var label when label.Contains(": remote URL", StringComparison.Ordinal) => "https://example.test/mcp",
                 _ when requirement.Kind == PortableRequirementKind.Path => @"C:\Users\example\workspace",
                 _ => "replacement-value",
             });

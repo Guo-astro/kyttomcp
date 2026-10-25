@@ -32,7 +32,7 @@ internal static class PortableTestSupport
             requirement =>
             {
                 if (requirement.Kind == PortableRequirementKind.Path) return @"C:\mapped\portable-path";
-                if (requirement.Label.EndsWith("remote URL", StringComparison.Ordinal)) return "https://example.test/mcp";
+                if (requirement.Label.Contains(": remote URL", StringComparison.Ordinal)) return "https://example.test/mcp";
                 if (requirement.Label.Contains("argument", StringComparison.Ordinal)) return "@modelcontextprotocol/server-memory";
                 return "replacement-value";
             });

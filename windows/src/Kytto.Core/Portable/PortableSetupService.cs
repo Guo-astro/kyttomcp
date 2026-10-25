@@ -209,12 +209,16 @@ public sealed partial class PortableSetupService
             {
                 throw PortableSetupException.Invalid("unknown required input");
             }
-            foreach (var requirement in setup.Requirements)
+            // Only the copies that will actually be written need their inputs:
+            // importing into Cursor alone must not demand the Codex copy's secrets.
+            var needed = SelectedCopies(setup, targetClients).SelectMany(RequirementIDs).ToHashSet(StringComparer.Ordinal);
+            var described = DescribedRequirements(setup).ToDictionary(requirement => requirement.Id, requirement => requirement.Label);
+            foreach (var requirement in setup.Requirements.Where(requirement => needed.Contains(requirement.Id)))
             {
                 if (!values.TryGetValue(requirement.Id, out var value) || value.Length == 0 ||
                     Encoding.UTF8.GetByteCount(value) > 16_384 || value.Contains('\0'))
                 {
-                    throw PortableSetupException.MissingInput(requirement.Label);
+                    throw PortableSetupException.MissingInput(described.GetValueOrDefault(requirement.Id) ?? requirement.Label);
                 }
                 // A relative path would silently change meaning on another machine,
                 // and a drive-relative one (`C:tool`) on another working directory.
@@ -337,6 +341,17 @@ public sealed partial class PortableSetupService
 
                 if (text != original)
                 {
+                    // Checked now, as the write will check it, so a preview never
+                    // promises an import that apply then refuses.
+                    try
+                    {
+                        if (map.Format == ConfigFormat.Json) JsonDocument.Parse(text);
+                        else TomlDocument.Parse(text);
+                    }
+                    catch (Exception error) when (error is JsonParseException or TomlParseException)
+                    {
+                        throw ConfigWriteException.Unreadable(display, error.Message);
+                    }
                     edits.Add(new FileEdit(snapshot, clientId, map.Format, text));
                 }
 
@@ -374,7 +389,8 @@ public sealed partial class PortableSetupService
                 : "All imported servers start switched off. Review their commands before enabling them.");
             var preview = new PortableImportPreview(
                 id,
-                grouped.Keys.Order(StringComparer.Ordinal).ToArray(),
+                // Spelled as the file spells them, not as the identity they are grouped by.
+                grouped.Values.Select(copies => copies[0].Name).Order(StringComparer.Ordinal).ToArray(),
                 setup.Profiles.Select(profile => profile.Name).ToArray(),
                 targetClients.ToArray(),
                 edits.Select(edit => edit.Snapshot.Display).ToArray(),
@@ -693,10 +709,63 @@ public sealed partial class PortableSetupService
                 "Each destination uses its original client's copy when available; otherwise the first exported copy is used.");
         }
         return new PortableSetupSummary(
-            groups.Select(group => group.Key).Order(StringComparer.Ordinal).ToArray(),
+            groups.Select(group => group.First().Name).Order(StringComparer.Ordinal).ToArray(),
             setup.Profiles.Select(profile => profile.Name).ToArray(),
-            setup.Requirements,
+            DescribedRequirements(setup),
             setup.ReviewedContracts.Count,
             warnings);
+    }
+
+    /// <summary>The copy each target client receives: its own, else the first exported.</summary>
+    private static IEnumerable<PortableServer> SelectedCopies(PortableSetup setup, IReadOnlyList<ClientId> targets)
+    {
+        var grouped = setup.Servers
+            .GroupBy(server => Server.Identity(server.Name), StringComparer.Ordinal)
+            .Select(group => group.ToArray())
+            .ToArray();
+        return targets.SelectMany(client => grouped.Select(copies =>
+            copies.FirstOrDefault(copy => copy.SourceClient == client) ?? copies[0]));
+    }
+
+    private static IEnumerable<string> RequirementIDs(PortableServer server) =>
+        new[] { server.Command, server.Url, server.WorkingDirectory }
+            .Concat(server.Args)
+            .Concat(server.Environment.Values)
+            .Concat(server.Headers.Values)
+            .Select(value => value?.RequirementID)
+            .OfType<string>();
+
+    /// <summary>Requirement labels written from the file's structure, never its text.</summary>
+    /// <remarks>
+    /// A shared setup file is untrusted: its own label could ask for "your GitHub
+    /// token" on an input that feeds someone else's package. What the user is shown is
+    /// where the value goes — which server, which field, and the public launcher it is
+    /// handed to.
+    /// </remarks>
+    internal static IReadOnlyList<PortableRequirement> DescribedRequirements(PortableSetup setup)
+    {
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var server in setup.Servers)
+        {
+            var launcher = string.Join(' ', new[] { server.Command?.Literal }
+                .Concat(server.Args.Select(argument => argument.Literal))
+                .OfType<string>());
+            var feeds = launcher.Length == 0 ? "" : $" — for {launcher}";
+            var label = $"{server.Name} ({server.SourceClient.Raw()})";
+            void Note(PortableValue? value, string field)
+            {
+                if (value?.RequirementID is { } id) labels[id] = $"{label}: {field}{feeds}";
+            }
+
+            Note(server.Command, "command");
+            for (var index = 0; index < server.Args.Count; index++) Note(server.Args[index], $"argument {index + 1}");
+            foreach (var (key, value) in server.Environment) Note(value, $"environment {key}");
+            foreach (var (key, value) in server.Headers) Note(value, $"header {key}");
+            Note(server.Url, "remote URL");
+            Note(server.WorkingDirectory, "working directory");
+        }
+        return setup.Requirements
+            .Select(requirement => requirement with { Label = labels.GetValueOrDefault(requirement.Id) ?? "Unused input" })
+            .ToArray();
     }
 }

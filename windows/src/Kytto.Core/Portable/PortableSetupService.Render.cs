@@ -76,12 +76,9 @@ public sealed partial class PortableSetupService
         string serversKey,
         bool enabled)
     {
-        // Codex reads `url` as remote and `command` as local, and has no legacy-SSE
-        // spelling. Refusing beats quietly changing what the server is.
-        if (copy.Transport == Transport.Sse)
-        {
-            throw PortableSetupException.Invalid("legacy SSE cannot be imported into Codex");
-        }
+        // Codex tells transports apart by key, not by a `type`: a remote server is a
+        // `url`, as ServerAuthoring writes it too. A Codex URL that merely ends in /sse
+        // was inferred as SSE on export.
 
         // The definition is switched off on its own table: nothing is parked, and
         // switching it on later is one line.

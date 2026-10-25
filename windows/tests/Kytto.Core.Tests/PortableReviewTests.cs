@@ -177,8 +177,8 @@ public sealed class PortableReviewTests
             requirement => requirement.Id,
             requirement => requirement.Label switch
             {
-                var label when label.EndsWith("command", StringComparison.Ordinal) => command,
-                var label when label.EndsWith("argument 1", StringComparison.Ordinal) => script,
+                var label when label.Contains(": command", StringComparison.Ordinal) => command,
+                var label when label.Contains(": argument 1", StringComparison.Ordinal) => script,
                 _ => cwd,
             });
 
@@ -246,7 +246,7 @@ public sealed class PortableReviewTests
         var client = ClientIds.FromRaw(clientRaw)!.Value;
         var inputs = summary.Requirements.ToDictionary(
             requirement => requirement.Id,
-            requirement => requirement.Label.EndsWith("remote URL", StringComparison.Ordinal)
+            requirement => requirement.Label.Contains(": remote URL", StringComparison.Ordinal)
                 ? "https://remote.test/mcp?a=1&b=\"2\""
                 : "typed \"value\" with \\ and 'quotes'");
         var service = destination.Portable();

@@ -46,6 +46,79 @@ public sealed class PortableSetupTests
         Assert.DoesNotContain("opaque", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A shared setup file is untrusted: its own label could ask for "your GitHub token"
+    /// on an input that feeds someone else's package. The label shown says where the
+    /// value goes, whatever the file claims.
+    /// </summary>
+    [Fact]
+    public void LabelsSayWhereAValueGoesWhateverTheFileClaims()
+    {
+        using var source = new ToggleHarness();
+        source.Write(
+            """{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"env":{"KEY":"v"}}}}""",
+            ".cursor/mcp.json");
+        source.ExportTo();
+        var text = File.ReadAllText(source.PortableFile())
+            .Replace("memory (cursor): environment KEY", "Your GitHub personal access token", StringComparison.Ordinal);
+        File.WriteAllText(source.PortableFile(), text);
+
+        var summary = source.Portable().Inspect(source.PortableFile());
+
+        Assert.Equal(
+            "memory (cursor): environment KEY — for npx -y @modelcontextprotocol/server-memory",
+            Assert.Single(summary.Requirements).Label);
+    }
+
+    /// <summary>Importing into Cursor alone must not demand the Codex copy's secrets.</summary>
+    [Fact]
+    public void OnlyTheInputsOfCopiesThatGoSomewhereAreRequired()
+    {
+        using var source = new ToggleHarness();
+        using var destination = new ToggleHarness();
+        source.Write(
+            """{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]}}}""",
+            ".cursor/mcp.json");
+        source.Write("""
+            [mcp_servers.memory]
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-memory"]
+
+            [mcp_servers.memory.env]
+            CODEX_ONLY = "secret"
+            """, ".codex/config.toml");
+        var summary = source.ExportTo();
+        Assert.Single(summary.Requirements, requirement => requirement.Label.Contains("(codex)", StringComparison.Ordinal));
+
+        var preview = destination.Portable().Preview(source.PortableFile(), [ClientId.Cursor], new Dictionary<string, string>());
+
+        Assert.Equal(["memory"], preview.ServerNames);
+        var missing = Assert.Throws<PortableSetupException>(() =>
+            destination.Portable().Preview(source.PortableFile(), [ClientId.Codex], new Dictionary<string, string>()));
+        Assert.Contains("memory (codex): environment CODEX_ONLY", missing.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ACodexRemoteUrlEndingInSseImportsIntoCodexAsAUrlAndNamesKeepTheirSpelling()
+    {
+        using var source = new ToggleHarness();
+        using var destination = new ToggleHarness();
+        source.Write("""
+            [mcp_servers.DocsSearch]
+            url = "https://mcp.example/sse"
+            """, ".codex/config.toml");
+        var summary = source.ExportTo();
+        Assert.Equal(["DocsSearch"], summary.ServerNames);
+
+        var service = destination.Portable();
+        var preview = service.Preview(source.PortableFile(), [ClientId.Codex], PortableTestSupport.Inputs(summary));
+        Assert.Equal(["DocsSearch"], preview.ServerNames);
+        service.Apply(preview.Id);
+
+        var table = TomlDocument.Parse(destination.Text(".codex/config.toml")).Table("mcp_servers", "DocsSearch");
+        Assert.Equal("https://example.test/mcp", table?.Value("url")?.StringValue);
+    }
+
     [Fact]
     public void RoundTripKeepsDisabledPresenceCopiesParkedAndImportsProfilesWithoutApplyingThem()
     {
@@ -248,7 +321,7 @@ public sealed class PortableSetupTests
 
         bool Has(string server, string suffix) => summary.Requirements.Any(requirement =>
             requirement.Label.StartsWith(server, StringComparison.Ordinal) &&
-            requirement.Label.EndsWith(suffix, StringComparison.Ordinal));
+            requirement.Label.Contains(": " + suffix, StringComparison.Ordinal));
         Assert.True(Has("inline", "header Authorization"));
         Assert.True(Has("inline", "header X-Api-Key"));
         Assert.True(Has("remote", "header Authorization"));

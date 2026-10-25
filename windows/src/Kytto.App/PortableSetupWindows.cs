@@ -229,9 +229,10 @@ internal sealed class PortableImportWindow : Window
             Text = string.Create(
                 CultureInfo.CurrentCulture,
                 $"{summary.ServerNames.Count} servers · {summary.ProfileNames.Count} profiles. ") +
-                "Choose destinations and fill in what this setup could not carry. Nothing is written yet — the " +
-                "next screen previews the import. Imported servers start switched off, and existing names are " +
-                "never overwritten.",
+                "Choose destinations and fill in what this setup could not carry; inputs for a copy that goes " +
+                "to none of them can stay empty. Each label says where the value is used. Nothing is written " +
+                "yet — the next screen previews the import. Imported servers start switched off, and existing " +
+                "names are never overwritten.",
             TextWrapping = TextWrapping.Wrap,
         };
 
