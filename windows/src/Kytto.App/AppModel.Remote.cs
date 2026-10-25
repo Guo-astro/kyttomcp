@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using Kytto.App.Ipc;
@@ -58,6 +59,7 @@ internal sealed partial class AppModel
 {
     private readonly object _remoteLock = new();
     private readonly Dictionary<string, long> _remoteGenerations = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task<RemoteOAuthCredential>> _remoteRefreshes = new(StringComparer.Ordinal);
     private ISecretStore? _remoteStore;
     private int _signInActive;
 
@@ -105,7 +107,8 @@ internal sealed partial class AppModel
 
         string? resource = null;
         var generation = 0L;
-        IReadOnlyDictionary<string, string>? headers = null;
+        RemoteOAuthCredential? credential = null;
+        var refreshed = false;
         if (server.Transport == Transport.Http && server.Url is { } url)
         {
             resource = TryCanonicalResource(url);
@@ -116,7 +119,12 @@ internal sealed partial class AppModel
             generation = RemoteGeneration(resource);
             try
             {
-                headers = await SavedAuthorizationHeadersAsync(resource, generation).ConfigureAwait(true);
+                credential = RemoteVault.Load(resource);
+                if (credential is not null && credential.RequiresRefresh(DateTimeOffset.UtcNow))
+                {
+                    credential = await RefreshedCredentialAsync(credential, resource, generation).ConfigureAwait(true);
+                    refreshed = true;
+                }
             }
             catch (Exception error) when (error is RemoteOAuthException or SecretsException)
             {
@@ -131,7 +139,28 @@ internal sealed partial class AppModel
             }
         }
 
-        var (health, weight) = await checker.CheckAsync(server, headers).ConfigureAwait(true);
+        var checkedServer = DirectDefinitionForCheck(server);
+        var (health, weight) = await checker.CheckAsync(checkedServer, credential?.AuthorizationHeaders).ConfigureAwait(true);
+
+        // A token revoked early, or one issued without an expiry, shows up only as the
+        // server refusing it. One refresh and one retry, not a loop.
+        if (health.Status == HealthStatus.NeedsAuthorization && !refreshed && resource is not null &&
+            credential is { CanRefresh: true } saved)
+        {
+            RemoteOAuthCredential? renewed = null;
+            try
+            {
+                renewed = await RefreshedCredentialAsync(saved, resource, generation).ConfigureAwait(true);
+            }
+            catch (Exception error) when (error is RemoteOAuthException or SecretsException)
+            {
+                // The refusal stands as the result.
+            }
+            if (renewed is not null)
+            {
+                (health, weight) = await checker.CheckAsync(checkedServer, renewed.AuthorizationHeaders).ConfigureAwait(true);
+            }
+        }
 
         // The check can take ten seconds and the window stays usable meanwhile. A
         // server deleted, renamed or edited in that time — or signed in or out — must
@@ -142,25 +171,115 @@ internal sealed partial class AppModel
         return health;
     }
 
-    private async Task<IReadOnlyDictionary<string, string>?> SavedAuthorizationHeadersAsync(string resource, long generation)
+    /// <summary>One refresh per resource at a time.</summary>
+    /// <remarks>
+    /// Refresh tokens rotate, so two checks of the same remote refreshing in parallel
+    /// would spend the same token twice — and an authorization server that detects the
+    /// replay revokes the whole grant. A later caller waits for the running refresh.
+    /// </remarks>
+    private async Task<RemoteOAuthCredential> RefreshedCredentialAsync(
+        RemoteOAuthCredential saved,
+        string resource,
+        long generation)
     {
-        var credential = RemoteVault.Load(resource);
-        if (credential is null) return null;
-
-        if (credential.RequiresRefresh(DateTimeOffset.UtcNow))
+        Task<RemoteOAuthCredential> refresh;
+        var started = false;
+        lock (_remoteLock)
         {
-            var client = RemoteOAuthClientOverride ?? new RemoteOAuthClient();
-            var renewed = await client.RefreshAsync(credential).ConfigureAwait(true);
-            lock (_remoteLock)
+            if (!_remoteRefreshes.TryGetValue(resource, out refresh!))
             {
-                // A refresh that lost a race with Forget or a new sign-in must not
-                // put its tokens back.
-                if (RemoteGeneration(resource) != generation) throw new AuthorizationChangedException();
-                RemoteVault.Store(renewed);
+                var client = RemoteOAuthClientOverride ?? new RemoteOAuthClient();
+                refresh = client.RefreshAsync(saved);
+                _remoteRefreshes[resource] = refresh;
+                started = true;
             }
-            credential = renewed;
         }
-        return credential.AuthorizationHeaders;
+
+        RemoteOAuthCredential renewed;
+        try
+        {
+            renewed = await refresh.ConfigureAwait(true);
+        }
+        finally
+        {
+            if (started)
+            {
+                lock (_remoteLock) _remoteRefreshes.Remove(resource);
+            }
+        }
+
+        lock (_remoteLock)
+        {
+            // A refresh that lost a race with Forget or a new sign-in must not put its
+            // tokens back.
+            if (RemoteGeneration(resource) != generation) throw new AuthorizationChangedException();
+            if (started) RemoteVault.Store(renewed);
+        }
+        return renewed;
+    }
+
+    /// <summary>The server a Gateway route stands for, so a check measures the server rather than the helper.</summary>
+    /// <remarks>
+    /// Checked through the helper, <c>tools/list</c> comes back already masked: hidden
+    /// tools would vanish from the tool picker (and saving it unchanged would drop the
+    /// mask), Contract Guard would see tools removed, and every check would log a client
+    /// session in Live Activity that no client started.
+    /// </remarks>
+    private Server DirectDefinitionForCheck(Server server)
+    {
+        if (server.Transport != Transport.Stdio || server.Command is not { } command ||
+            !Path.GetFileNameWithoutExtension(command).Equals("kytto-mcp-proxy", StringComparison.OrdinalIgnoreCase))
+        {
+            return server;
+        }
+        var flag = server.Args.ToList().IndexOf("--route");
+        if (flag < 0 || flag + 1 >= server.Args.Count) return server;
+        try
+        {
+            var launch = _gatewayRoutes.Resolve(server.Args[flag + 1], _gatewaySecretStore);
+            return new Server
+            {
+                Id = server.Id,
+                Name = server.Name,
+                Transport = Transport.Stdio,
+                Command = launch.Route.Command,
+                Args = launch.Route.Arguments,
+                Env = launch.Environment
+                    .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                    .Select(pair => new EnvEntry(pair.Key, pair.Value))
+                    .ToArray(),
+                Url = null,
+                EnabledIn = server.EnabledIn,
+                Origin = server.Origin,
+                Fingerprint = server.Fingerprint,
+                IsBundled = server.IsBundled,
+                IsReadOnly = server.IsReadOnly,
+                DefinitionSource = server.DefinitionSource,
+                DefinitionsByClient = server.DefinitionsByClient,
+            };
+        }
+        catch (Exception error) when (error is Kytto.Core.Gateway.GatewayRouteException or SecretsException or
+                                              IOException or UnauthorizedAccessException)
+        {
+            // An unresolvable route is checked as configured, which reports the problem.
+            return server;
+        }
+    }
+
+    /// <summary>The saved credential's headers and scopes, for a step-up sign-in.</summary>
+    private (IReadOnlyDictionary<string, string> Headers, IReadOnlyList<string> Scopes)? RemoteAuthorizationContext(string url)
+    {
+        if (TryCanonicalResource(url) is not { } resource) return null;
+        try
+        {
+            return RemoteVault.Load(resource) is { } credential
+                ? (credential.AuthorizationHeaders, credential.Scopes)
+                : null;
+        }
+        catch (Exception error) when (error is RemoteOAuthException or SecretsException)
+        {
+            return null;
+        }
     }
 
     private static HealthResult AuthorizationUnusable() => new(
@@ -310,7 +429,14 @@ internal sealed partial class AppModel
             var token = DefinitionToken(server);
             var client = RemoteOAuthClientOverride ?? new RemoteOAuthClient();
 
-            var configuration = await client.DiscoverAsync(url, cancellationToken: cancellationToken).ConfigureAwait(true);
+            // Signing in again with a credential on file is how a server that answered
+            // 403 insufficient_scope gets the scope it asked for.
+            var saved = RemoteAuthorizationContext(url);
+            var configuration = await client.DiscoverAsync(
+                url,
+                cancellationToken: cancellationToken,
+                authorization: saved?.Headers,
+                previousScopes: saved?.Scopes).ConfigureAwait(true);
             if (!ui.ConfirmSignIn(server.Name, configuration.ResourceUrl, configuration.Issuer, configuration.Scopes)) return;
 
             // The listener exists from here until this method ends, however it ends.

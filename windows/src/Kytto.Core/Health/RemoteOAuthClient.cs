@@ -53,26 +53,65 @@ public sealed class RemoteOAuthClient
 
     /// <summary>The exact resource a credential belongs to.</summary>
     /// <remarks>
-    /// Lower-case scheme and host, a bare root path spelled as nothing, no fragment —
-    /// so two spellings of one endpoint share a sign-in and two endpoints never do.
+    /// Lower-case scheme and host, no default port, no trailing slash, no fragment — so
+    /// two spellings of one endpoint share a sign-in and two endpoints never do. The
+    /// query stays, because two servers on one path told apart by a query are two
+    /// sign-ins.
     /// </remarks>
     public static string CanonicalResource(string text)
     {
         var uri = RemoteHttpEndpoint.Validate(text);
-        var canonical = uri.GetComponents(UriComponents.SchemeAndServer | UriComponents.PathAndQuery, UriFormat.UriEscaped);
-        return uri.AbsolutePath == "/" && uri.Query.Length == 0 ? canonical.TrimEnd('/') : canonical;
+        var origin = uri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped);
+        var path = uri.GetComponents(UriComponents.Path | UriComponents.KeepDelimiter, UriFormat.UriEscaped).TrimEnd('/');
+        return origin + path + uri.Query;
+    }
+
+    /// <summary>Whether protected-resource metadata may speak for the endpoint.</summary>
+    /// <remarks>
+    /// Same origin, and a path that is the endpoint's or a parent of it on a segment
+    /// boundary. Root metadata describes the origin (RFC 9728 §3.3), so an exact match
+    /// would refuse every server found through the root fallback.
+    /// </remarks>
+    internal static bool ResourceCovers(string described, Uri endpoint)
+    {
+        Uri url;
+        try
+        {
+            url = RemoteHttpEndpoint.Validate(described);
+        }
+        catch (RemoteHttpException)
+        {
+            return false;
+        }
+        if (!SameOrigin(url, endpoint)) return false;
+        if (url.Query.Length > 0 && url.Query != endpoint.Query) return false;
+        var parent = url.AbsolutePath.TrimEnd('/');
+        var path = endpoint.AbsolutePath.TrimEnd('/');
+        return parent.Length == 0 || path == parent || path.StartsWith(parent + "/", StringComparison.Ordinal);
     }
 
     // MARK: - Discovery
 
+    /// <param name="authorization">
+    /// The saved credential's headers, when signing in again. The probe then carries
+    /// them, so a server that needs more scope says which in a 403
+    /// <c>insufficient_scope</c> challenge (step-up).
+    /// </param>
+    /// <param name="previousScopes">
+    /// What the saved credential was granted. A step-up asks for these and the
+    /// challenged ones together, so it gains scope rather than trading one for another.
+    /// </param>
     public async Task<RemoteOAuthConfiguration> DiscoverAsync(
         string resourceUrl,
         string? challenge = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? authorization = null,
+        IReadOnlyList<string>? previousScopes = null)
     {
         try
         {
-            return await DiscoverCoreAsync(resourceUrl, challenge, cancellationToken).ConfigureAwait(false);
+            return await DiscoverCoreAsync(resourceUrl, challenge, authorization, previousScopes ?? [], cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (RemoteHttpException failure)
         {
@@ -85,6 +124,8 @@ public sealed class RemoteOAuthClient
     private async Task<RemoteOAuthConfiguration> DiscoverCoreAsync(
         string resourceUrl,
         string? challenge,
+        IReadOnlyDictionary<string, string>? authorization,
+        IReadOnlyList<string> previousScopes,
         CancellationToken cancellationToken)
     {
         var canonical = CanonicalResource(resourceUrl);
@@ -94,6 +135,39 @@ public sealed class RemoteOAuthClient
         // URL's query string to a third party.
         if (resource.Query.Length > 0) throw new RemoteOAuthException(RemoteOAuthError.Discovery);
         var deadline = DateTimeOffset.UtcNow + StepBudget;
+
+        if (challenge is null && authorization is not null)
+        {
+            // Step-up: ask with the token on file. A server that wants more answers 403
+            // with the scope it needs; one that is content answers 2xx and the ordinary
+            // probe below finds its metadata.
+            List<KeyValuePair<string, string>> headers =
+            [
+                new("Accept", "application/json, text/event-stream"),
+                new("MCP-Protocol-Version", McpStdioClient.ModernProtocolVersion),
+                new("Mcp-Method", "tools/list"),
+                .. authorization,
+            ];
+            try
+            {
+                var stepUp = await _transport.SendAsync(
+                    new RemoteHttpRequest(
+                        HttpMethod.Post,
+                        resource,
+                        headers,
+                        Encoding.UTF8.GetBytes(McpStdioClient.Request(1, "tools/list", null, modern: true)),
+                        "application/json"),
+                    deadline,
+                    MetadataLimit,
+                    responseId: 1,
+                    cancellationToken).ConfigureAwait(false);
+                if (stepUp.Status is 401 or 403) challenge = stepUp.Header("www-authenticate");
+            }
+            catch (RemoteHttpException)
+            {
+                // The ordinary probe below decides.
+            }
+        }
 
         if (challenge is null)
         {
@@ -137,7 +211,7 @@ public sealed class RemoteOAuthClient
 
         var metadata = await FirstMetadataAsync(candidates, deadline, cancellationToken).ConfigureAwait(false);
         if (metadata.Root["resource"]?.StringValue is not { } described ||
-            !SafeCanonical(described, canonical))
+            !ResourceCovers(described, resource))
         {
             throw new RemoteOAuthException(RemoteOAuthError.ResourceMismatch);
         }
@@ -152,14 +226,14 @@ public sealed class RemoteOAuthClient
 
         var discovery = WellKnown(issuerUrl, "oauth-authorization-server", includeAppend: false);
         discovery.AddRange(WellKnown(issuerUrl, "openid-configuration", includeAppend: true));
-        var authorization = await FirstMetadataAsync(discovery, deadline, cancellationToken).ConfigureAwait(false);
+        var authorizationServer = await FirstMetadataAsync(discovery, deadline, cancellationToken).ConfigureAwait(false);
 
-        if (authorization.Root["issuer"]?.StringValue != issuer) throw new RemoteOAuthException(RemoteOAuthError.IssuerMismatch);
-        if (authorization.Root["code_challenge_methods_supported"]?.Elements?.Any(node => node.StringValue == "S256") != true)
+        if (authorizationServer.Root["issuer"]?.StringValue != issuer) throw new RemoteOAuthException(RemoteOAuthError.IssuerMismatch);
+        if (authorizationServer.Root["code_challenge_methods_supported"]?.Elements?.Any(node => node.StringValue == "S256") != true)
         {
             throw new RemoteOAuthException(RemoteOAuthError.PkceUnsupported);
         }
-        if (authorization.Root["response_types_supported"]?.Elements is { } modes &&
+        if (authorizationServer.Root["response_types_supported"]?.Elements is { } modes &&
             !modes.Any(node => node.StringValue == "code"))
         {
             throw new RemoteOAuthException(RemoteOAuthError.Discovery);
@@ -167,7 +241,7 @@ public sealed class RemoteOAuthClient
 
         string Endpoint(string key)
         {
-            var value = authorization.Root[key]?.StringValue ?? throw new RemoteOAuthException(RemoteOAuthError.Discovery);
+            var value = authorizationServer.Root[key]?.StringValue ?? throw new RemoteOAuthException(RemoteOAuthError.Discovery);
             ValidEndpoint(value);
             return value;
         }
@@ -183,8 +257,12 @@ public sealed class RemoteOAuthClient
             ParseScopes(string.Join(' ', scopes));
             scopes = scopes.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         }
+        if (previousScopes.Count > 0 && scopes.Count > 0)
+        {
+            scopes = ParseScopes(string.Join(' ', scopes.Concat(previousScopes)));
+        }
 
-        var registration = authorization.Root["registration_endpoint"]?.StringValue;
+        var registration = authorizationServer.Root["registration_endpoint"]?.StringValue;
         if (registration is not null) ValidEndpoint(registration);
 
         return new RemoteOAuthConfiguration(
@@ -194,7 +272,8 @@ public sealed class RemoteOAuthClient
             Endpoint("token_endpoint"),
             registration,
             scopes,
-            authorization.Root["authorization_response_iss_parameter_supported"]?.BoolValue == true);
+            authorizationServer.Root["authorization_response_iss_parameter_supported"]?.BoolValue == true,
+            described);
     }
 
     // MARK: - Registration
@@ -212,6 +291,8 @@ public sealed class RemoteOAuthClient
         {
             client_name = "Kytto MCP",
             redirect_uris = new[] { redirectUri },
+            // Required in registration requests since MCP 2026-07-28 (SEP-837).
+            application_type = "native",
             token_endpoint_auth_method = "none",
             grant_types = new[] { "authorization_code", "refresh_token" },
             response_types = new[] { "code" },
@@ -279,7 +360,7 @@ public sealed class RemoteOAuthClient
         Add("state", state);
         Add("code_challenge", challenge);
         Add("code_challenge_method", "S256");
-        Add("resource", configuration.ResourceUrl);
+        Add("resource", configuration.ResourceIndicator);
         if (configuration.Scopes.Count > 0) Add("scope", string.Join(' ', configuration.Scopes));
 
         var url = new UriBuilder(endpoint) { Query = query.ToString() }.Uri;
@@ -368,7 +449,7 @@ public sealed class RemoteOAuthClient
         CancellationToken cancellationToken)
     {
         fields["client_id"] = clientId;
-        fields["resource"] = configuration.ResourceUrl;
+        fields["resource"] = configuration.ResourceIndicator;
         var form = string.Join('&', fields
             .OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .Select(pair => Uri.EscapeDataString(pair.Key) + "=" + Uri.EscapeDataString(pair.Value)));
@@ -391,20 +472,24 @@ public sealed class RemoteOAuthClient
             throw new RemoteOAuthException(RemoteOAuthError.InvalidToken);
         }
 
+        // The authorization server may grant other scopes than requested (RFC 6749
+        // §3.3) — its default when none were asked for, or a normalised spelling. What
+        // it granted is what is recorded.
         var requested = previous?.Scopes ?? configuration.Scopes;
         var granted = document.Root["scope"]?.StringValue is { } scope ? ParseScopes(scope) : requested;
-        // A grant that is broader than what was asked for is not Kytto's to keep. When
-        // nothing was asked for there is nothing to be broader than.
-        if (requested.Count > 0 && !granted.All(requested.Contains)) throw new RemoteOAuthException(RemoteOAuthError.InvalidToken);
 
         DateTimeOffset? expiry = null;
-        if (document.Root["expires_in"] is { } lifetime)
+        if (document.Root["expires_in"] is { IsNull: false } lifetime)
         {
-            if (lifetime.NumberValue is not { } seconds || !double.IsFinite(seconds) || seconds <= 0 || seconds > 366 * 24 * 3600)
+            // Some servers send it as a string.
+            var seconds = lifetime.NumberValue ??
+                (double.TryParse(lifetime.StringValue, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : null);
+            if (seconds is not { } value || !double.IsFinite(value) || value <= 0 || value > 366 * 24 * 3600)
             {
                 throw new RemoteOAuthException(RemoteOAuthError.InvalidToken);
             }
-            expiry = DateTimeOffset.UtcNow.AddSeconds(seconds);
+            expiry = DateTimeOffset.UtcNow.AddSeconds(value);
         }
 
         // Rotation: a refresh token in the response replaces the saved one; none
@@ -484,6 +569,12 @@ public sealed class RemoteOAuthClient
 
     // MARK: - Metadata
 
+    /// <summary>The first candidate that answers with a JSON object.</summary>
+    /// <remarks>
+    /// Clients must try the well-known locations in order, so a 401 from auth
+    /// middleware, a redirect (never followed) or an HTML catch-all page moves on to
+    /// the next one rather than ending discovery.
+    /// </remarks>
     private async Task<JsonDocument> FirstMetadataAsync(
         IReadOnlyList<Uri> candidates,
         DateTimeOffset deadline,
@@ -497,12 +588,7 @@ public sealed class RemoteOAuthClient
                 MetadataLimit,
                 responseId: null,
                 cancellationToken).ConfigureAwait(false);
-            if (reply.Status is 404 or 405) continue;
-            if (reply.Status != 200 || RemoteJson.TryParseObject(reply.Body) is not { } document)
-            {
-                throw new RemoteOAuthException(RemoteOAuthError.Discovery);
-            }
-            return document;
+            if (reply.Status == 200 && RemoteJson.TryParseObject(reply.Body) is { } document) return document;
         }
         throw new RemoteOAuthException(RemoteOAuthError.Discovery);
     }
@@ -530,23 +616,12 @@ public sealed class RemoteOAuthClient
         return uri;
     }
 
-    private static bool SafeCanonical(string text, string expected)
-    {
-        try
-        {
-            return CanonicalResource(text) == expected;
-        }
-        catch (RemoteHttpException)
-        {
-            return false;
-        }
-    }
-
     /// <summary><c>/.well-known/&lt;suffix&gt;</c> inserted before the path, or appended after it.</summary>
+    /// <remarks>RFC 8414 §3.1: a trailing slash is removed before insertion.</remarks>
     internal static List<Uri> WellKnown(Uri url, string suffix, bool includeAppend)
     {
         var authority = url.GetLeftPart(UriPartial.Authority);
-        var path = url.AbsolutePath == "/" ? "" : url.AbsolutePath;
+        var path = url.AbsolutePath.TrimEnd('/');
         var result = new List<Uri> { new(authority + "/.well-known/" + suffix + path) };
         if (includeAppend && path.Length > 0)
         {

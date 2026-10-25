@@ -326,6 +326,50 @@ public sealed class RemoteSignInIntegrationTests : IDisposable
         Assert.Equal("refresh-2", _world.LastRefreshTokenPresented);
     }
 
+    /// <summary>
+    /// A token revoked early, or issued without an expiry, shows up only as the server
+    /// refusing it: one refresh and one retry, not a loop.
+    /// </summary>
+    [Fact]
+    public async Task ARefusedTokenIsRefreshedOnceAndTheCheckRetriedOnce()
+    {
+        using var model = NewModel();
+        await SignedIn(model);
+        _world.RevokeIssuedTokens();
+
+        var health = await model.CheckHealthAsync("remote");
+
+        Assert.Equal(HealthStatus.Passed, health.Status);
+        Assert.Equal(1, _world.Refreshes);
+
+        // Revoked again, and the provider will not renew: the refusal stands, once.
+        _world.RevokeIssuedTokens();
+        _world.RefuseRefresh = true;
+        Assert.Equal(HealthStatus.NeedsAuthorization, (await model.CheckHealthAsync("remote")).Status);
+        Assert.Equal(2, _world.Refreshes);
+    }
+
+    /// <summary>
+    /// Refresh tokens rotate: two checks refreshing in parallel would spend one token
+    /// twice, and a provider that detects the replay revokes the whole grant.
+    /// </summary>
+    [Fact]
+    public async Task TwoChecksOfOneRemoteShareASingleRefresh()
+    {
+        using var model = NewModel();
+        await SignedIn(model, dueSoon: true);
+        _world.HoldRefresh();
+
+        var first = model.CheckHealthAsync("remote");
+        await _world.RefreshStarted;
+        var second = model.CheckHealthAsync("remote");
+        _world.ReleaseRefresh();
+
+        Assert.Equal(HealthStatus.Passed, (await first).Status);
+        Assert.Equal(HealthStatus.Passed, (await second).Status);
+        Assert.Equal(1, _world.Refreshes);
+    }
+
     [Fact]
     public async Task ARefreshThatTheProviderRefusesBecomesAPlainSignInAgainState()
     {
@@ -698,6 +742,12 @@ public sealed class RemoteSignInIntegrationTests : IDisposable
         }
 
         public void HoldRefresh() => _refreshGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Every access token issued so far stops working, as an early revocation would.</summary>
+        public void RevokeIssuedTokens()
+        {
+            lock (_lock) _issued.Clear();
+        }
         public void ReleaseRefresh() => _refreshGate?.TrySetResult();
         public void HoldMcp() => _held = _mcpGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void ReleaseMcp() => _held?.TrySetResult();

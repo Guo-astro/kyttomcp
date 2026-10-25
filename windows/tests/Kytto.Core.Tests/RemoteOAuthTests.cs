@@ -127,6 +127,91 @@ public class RemoteOAuthTests
         Assert.Equal(expected, failure.Error);
     }
 
+    /// <summary>
+    /// Path-inserted metadata answers 401 from auth middleware; the root document
+    /// describes the origin, which RFC 9728 allows, and is what the token is for.
+    /// </summary>
+    [Fact]
+    public async Task RootMetadataForTheOriginCoversAPathEndpoint()
+    {
+        const string resource = """{"resource":"https://mcp.example","authorization_servers":["https://auth.example"]}""";
+        const string auth = """{"issuer":"https://auth.example","authorization_endpoint":"https://auth.example/authorize","token_endpoint":"https://auth.example/token","code_challenge_methods_supported":["S256"]}""";
+        var transport = new ScriptedTransport(Reply(status: 401), Reply(resource), Reply(auth));
+        var client = new RemoteOAuthClient(transport);
+
+        var config = await client.DiscoverAsync("https://mcp.example/mcp/", "Bearer");
+
+        Assert.Equal("https://mcp.example/mcp", config.ResourceUrl);
+        Assert.Equal("https://mcp.example", config.Resource);
+        Assert.Equal(
+            ["/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server"],
+            transport.Requests.Select(request => request.Url.AbsolutePath));
+        var pending = client.PrepareAuthorization(config, "c", Redirect);
+        Assert.Equal("https://mcp.example", Query(pending.AuthorizationUrl)["resource"]);
+
+        var endpoint = new Uri("https://mcp.example/mcp");
+        Assert.False(RemoteOAuthClient.ResourceCovers("https://mcp.example/other", endpoint));
+        Assert.False(RemoteOAuthClient.ResourceCovers("https://mcp.example/mc", endpoint));
+        Assert.False(RemoteOAuthClient.ResourceCovers("https://other.example", endpoint));
+        Assert.True(RemoteOAuthClient.ResourceCovers("https://mcp.example/mcp/", endpoint));
+    }
+
+    [Theory]
+    [InlineData("https://MCP.Example:443/mcp/", "https://mcp.example/mcp")]
+    [InlineData("https://mcp.example/", "https://mcp.example")]
+    [InlineData("https://mcp.example:8443/a/b//", "https://mcp.example:8443/a/b")]
+    [InlineData("https://mcp.example/mcp?workspace=a", "https://mcp.example/mcp?workspace=a")]
+    public void TheCanonicalEndpointDropsTheDefaultPortAndTrailingSlashAndKeepsTheQuery(string text, string expected) =>
+        Assert.Equal(expected, RemoteOAuthClient.CanonicalResource(text));
+
+    [Fact]
+    public async Task ADiscoveryUrlAnsweringWithAnErrorPageMovesOnToTheNextCandidate()
+    {
+        var transport = new ScriptedTransport(
+            Reply("<html>sign in</html>", 200, new Dictionary<string, string> { ["content-type"] = "text/html" }),
+            Reply(ResourceMetadata),
+            Reply(ServerMetadata));
+
+        var config = await new RemoteOAuthClient(transport).DiscoverAsync(Resource, "Bearer");
+
+        Assert.Equal("https://auth.example/tenant", config.Issuer);
+    }
+
+    [Fact]
+    public void TheWellKnownPathDropsATrailingSlashBeforeInsertion() =>
+        Assert.Equal(
+            "/.well-known/oauth-authorization-server/tenant",
+            RemoteOAuthClient.WellKnown(new Uri("https://auth.example/tenant/"), "oauth-authorization-server", includeAppend: false)[0].AbsolutePath);
+
+    /// <summary>
+    /// Signing in again probes with the saved token, so a server that wants more scope
+    /// says which, and the new request keeps what was already granted.
+    /// </summary>
+    [Fact]
+    public async Task ASignInAgainProbesWithTheSavedTokenAndAsksForTheUnionOfScopes()
+    {
+        var transport = new ScriptedTransport(
+            Reply("", 403, new Dictionary<string, string>
+            {
+                ["www-authenticate"] = """Bearer error="insufficient_scope", scope="write", resource_metadata="https://mcp.example/meta" """,
+            }),
+            Reply(ResourceMetadata),
+            Reply(ServerMetadata));
+
+        var config = await new RemoteOAuthClient(transport).DiscoverAsync(
+            Resource,
+            authorization: new Dictionary<string, string> { ["Authorization"] = "Bearer saved" },
+            previousScopes: ["read"]);
+
+        Assert.Equal(["read", "write"], config.Scopes);
+        var probe = transport.Requests[0];
+        Assert.Contains(new KeyValuePair<string, string>("Authorization", "Bearer saved"), probe.Headers);
+        Assert.Contains(new KeyValuePair<string, string>("Mcp-Method", "tools/list"), probe.Headers);
+        Assert.Contains(new KeyValuePair<string, string>("MCP-Protocol-Version", "2026-07-28"), probe.Headers);
+        // Discovery itself still carries nothing the user configured.
+        Assert.All(transport.Requests.Skip(1), request => Assert.DoesNotContain(request.Headers, h => h.Key == "Authorization"));
+    }
+
     [Fact]
     public async Task AResourceDescribedAsSomethingElseIsRefused()
     {
@@ -448,7 +533,6 @@ public class RemoteOAuthTests
     [InlineData("""{"access_token":"","token_type":"Bearer"}""")]
     [InlineData("""{"access_token":"has space","token_type":"Bearer"}""")]
     [InlineData("""{"token_type":"Bearer"}""")]
-    [InlineData("""{"access_token":"a","token_type":"Bearer","scope":"read admin"}""")]
     [InlineData("""{"access_token":"a","token_type":"Bearer","expires_in":-5}""")]
     [InlineData("""{"access_token":"a","token_type":"Bearer","expires_in":"soon"}""")]
     [InlineData("""{"access_token":"a","token_type":"Bearer","expires_in":999999999}""")]
@@ -463,6 +547,36 @@ public class RemoteOAuthTests
 
         Assert.Equal(RemoteOAuthError.InvalidToken, failure.Error);
         Assert.DoesNotContain("has space", failure.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// RFC 6749 §3.3: the server may grant other scopes than asked for. What it granted
+    /// is what is recorded; an expiry may arrive as text, and null means none.
+    /// </summary>
+    [Fact]
+    public async Task GrantedScopesAreRecordedAndAStringExpiryIsRead()
+    {
+        var client = new RemoteOAuthClient(new ScriptedTransport(
+            Reply("""{"access_token":"a","token_type":"bearer","expires_in":"3600","scope":"read default"}"""),
+            Reply("""{"access_token":"b","token_type":"Bearer","expires_in":null}""")));
+
+        var pending = client.PrepareAuthorization(Configuration(), "public-client", Redirect);
+        var credential = await client.ExchangeAsync(pending, Callback(pending));
+        Assert.Equal(["default", "read"], credential.Scopes);
+        Assert.NotNull(credential.ExpiresAt);
+
+        var second = client.PrepareAuthorization(Configuration(), "public-client", Redirect);
+        Assert.Null((await client.ExchangeAsync(second, Callback(second))).ExpiresAt);
+    }
+
+    [Fact]
+    public async Task ARegistrationNamesANativeApplication()
+    {
+        var transport = new ScriptedTransport(Reply("""{"client_id":"registered"}""", 201));
+
+        await new RemoteOAuthClient(transport).RegisterAsync(Configuration(registration: "https://auth.example/register"), Redirect);
+
+        Assert.Contains("\"application_type\":\"native\"", Encoding.UTF8.GetString(transport.Requests[0].Body!), StringComparison.Ordinal);
     }
 
     [Fact]

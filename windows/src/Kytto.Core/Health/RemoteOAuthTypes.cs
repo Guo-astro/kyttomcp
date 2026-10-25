@@ -51,6 +51,12 @@ public sealed class RemoteOAuthException(RemoteOAuthError error, Exception? inne
 }
 
 /// <summary>Validated metadata kept natively; never sent to web state (§6).</summary>
+/// <param name="ResourceUrl">The configured endpoint, canonicalised. Names the stored credential.</param>
+/// <param name="Resource">
+/// The protected resource the metadata described (RFC 9728), sent as the RFC 8707
+/// <c>resource</c> parameter. It may be the endpoint or a parent of it on the same
+/// origin. Absent in records saved before it was kept.
+/// </param>
 public sealed record RemoteOAuthConfiguration(
     string ResourceUrl,
     string Issuer,
@@ -58,7 +64,13 @@ public sealed record RemoteOAuthConfiguration(
     string TokenEndpoint,
     string? RegistrationEndpoint,
     IReadOnlyList<string> Scopes,
-    bool AuthorizationResponseIssuerSupported);
+    bool AuthorizationResponseIssuerSupported,
+    string? Resource = null)
+{
+    /// <summary>What the authorization and token requests name as their audience.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string ResourceIndicator => Resource ?? ResourceUrl;
+}
 
 /// <summary>
 /// A single-use, short-lived PKCE transaction: never persisted, never in IPC (§6).
@@ -158,6 +170,9 @@ public sealed class RemoteOAuthCredential
     /// token in the background.
     /// </remarks>
     public bool RequiresRefresh(DateTimeOffset now) => ExpiresAt is { } expiry && expiry - now < TimeSpan.FromSeconds(60);
+
+    /// <summary>Whether a refresh token is on file to renew this with.</summary>
+    public bool CanRefresh => !string.IsNullOrEmpty(RefreshToken);
 
     public override string ToString() => nameof(RemoteOAuthCredential);
 
