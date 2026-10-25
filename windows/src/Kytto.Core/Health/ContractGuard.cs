@@ -89,7 +89,9 @@ public static class ContractGuard
                     "Input schema changed — review compatibility and safeguards",
                     budget.Admit("inputSchema", ContractFieldDiff.SchemaDetails(left.InputSchemaJSON, right.InputSchemaJSON))));
             }
-            if (left.Annotations != right.Annotations)
+            // No annotations, `{}` and a title alone all mean "no hints", however a
+            // record from an older build or another route spells it.
+            if ((left.Annotations ?? NoHints) != (right.Annotations ?? NoHints))
             {
                 changes.Add(new ContractChange(
                     ContractChangeKind.AnnotationsChanged,
@@ -136,6 +138,26 @@ public static class ContractGuard
             _characters += size;
             return details;
         }
+    }
+
+    private static readonly ToolAnnotations NoHints = new();
+
+    private static readonly JsonSerializerOptions ReviewTokenOptions = new()
+    {
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
+    /// <summary>Names exactly these changes, opaquely.</summary>
+    /// <remarks>
+    /// The page sends it back when the user marks an alert reviewed, so a check that
+    /// recorded something newer in the meantime cannot be accepted along with what was
+    /// on screen. The first twelve bytes of a SHA-256 over the changes' serialized form:
+    /// enough to tell two lists apart, not a secret.
+    /// </remarks>
+    public static string ReviewToken(IReadOnlyList<ContractChange> changes)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(changes, ReviewTokenOptions);
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes).AsSpan(0, 12));
     }
 
     /// <remarks>

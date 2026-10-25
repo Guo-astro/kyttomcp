@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -16,9 +17,10 @@ namespace Kytto.Core.Health;
 /// schema above 1,000,000 UTF-8 bytes.
 /// </para>
 /// <para>
-/// Equality is decided on the parsed values, never on the display text: two
-/// different contracts whose first 800 characters agree are still different, and the
-/// entry says so rather than showing two identical excerpts without comment.
+/// Equality is decided on the parsed values, never on the display text. The display
+/// is built so that two different values never read the same: a long pair is cut to
+/// the same window around its first difference, and invisible characters are spelled
+/// out.
 /// </para>
 /// </remarks>
 internal static class ContractFieldDiff
@@ -41,13 +43,14 @@ internal static class ContractFieldDiff
     // MARK: - Descriptions and annotations
 
     internal static IReadOnlyList<ContractFieldChange> DescriptionDetails(string? before, string? after) =>
-    [
-        new ContractFieldChange(
-            "description",
-            Excerpt(before),
-            Excerpt(after),
-            HiddenBeyondExcerpt(before, after)),
-    ];
+        [Field("description", before, after)];
+
+    /// <summary>A field whose before and after are bounded, comparable excerpts.</summary>
+    private static ContractFieldChange Field(string path, string? before, string? after, string? explanation = null)
+    {
+        var (left, right) = Excerpts(before, after);
+        return new ContractFieldChange(path, left, right, explanation);
+    }
 
     internal static IReadOnlyList<ContractFieldChange> AnnotationDetails(
         ToolAnnotations? before,
@@ -119,15 +122,13 @@ internal static class ContractFieldDiff
         }
         if (walk.Result.Count == 0)
         {
-            walk.Result.Add(new ContractFieldChange("inputSchema", Excerpt(before), Excerpt(after)));
+            walk.Result.Add(Field("inputSchema", before, after));
         }
         return walk.Result;
     }
 
     private static IReadOnlyList<ContractFieldChange> RawSchema(string? before, string? after, string explanation) =>
-    [
-        new ContractFieldChange("inputSchema", Excerpt(before), Excerpt(after), explanation),
-    ];
+        [Field("inputSchema", before, after, explanation)];
 
     /// <summary>The one parser every comparison uses, so "parses" means the same everywhere.</summary>
     internal static JsonDocument Parse(string json) => JsonDocument.Parse(
@@ -195,10 +196,10 @@ internal static class ContractFieldDiff
                             Omitted = true;
                             break;
                         }
-                        Result.Add(new ContractFieldChange(
+                        Result.Add(Field(
                             "inputSchema/[long field path]",
-                            Excerpt(Show(leftValue)),
-                            Excerpt(Show(rightValue)),
+                            Show(leftValue),
+                            Show(rightValue),
                             "The schema field name or path is too long to display. Inspect the complete schema."));
                         continue;
                     }
@@ -207,13 +208,7 @@ internal static class ContractFieldDiff
                 return;
             }
 
-            var beforeText = Show(left);
-            var afterText = Show(right);
-            Result.Add(new ContractFieldChange(
-                path,
-                Excerpt(beforeText),
-                Excerpt(afterText),
-                Explain(path, left, right) ?? HiddenBeyondExcerpt(beforeText, afterText)));
+            Result.Add(Field(path, Show(left), Show(right), Explain(path, left, right)));
         }
     }
 
@@ -334,9 +329,10 @@ internal static class ContractFieldDiff
         return text.ToString();
     }
 
-    // Four UTF-16 units per scalar is the most an excerpt can need, plus slack for
-    // the marker. Past this the rest of a huge value is never looked at.
-    private const int DisplayCap = MaxExcerptScalars * 2 + 64;
+    // The window shown is placed around the first difference, which can be anywhere
+    // in a value, so the whole canonical text is needed. The schema it comes from is
+    // already bounded at a million bytes; this only stops a pathological expansion.
+    private const int DisplayCap = 8 * ContractGuard.MaxSchemaBytes;
 
     private static void AppendCanonical(JsonElement element, StringBuilder text)
     {
@@ -437,14 +433,66 @@ internal static class ContractFieldDiff
         return value;
     }
 
-    /// <summary>Said aloud when two excerpts read the same but the values do not.</summary>
-    private static string? HiddenBeyondExcerpt(string? before, string? after)
+    /// <summary>Bounded, comparable excerpts of a before/after pair.</summary>
+    /// <remarks>
+    /// A plain prefix would make two long texts that differ only near the end look
+    /// identical, which is exactly how an appended instruction would hide. When either
+    /// side is too long, both are cut to the same window around the first difference.
+    /// Invisible and format characters are spelled out, so a change made only of them
+    /// never renders as "no change".
+    /// </remarks>
+    internal static (string? Before, string? After) Excerpts(string? before, string? after)
     {
-        if (before is null || after is null || string.Equals(before, after, StringComparison.Ordinal)) return null;
-        return string.Equals(Excerpt(before), Excerpt(after), StringComparison.Ordinal)
-            ? "The visible excerpts are identical; the change is further into the text. " +
-              "Inspect the complete value in the server's tool list."
-            : null;
+        var left = before?.EnumerateRunes().ToArray();
+        var right = after?.EnumerateRunes().ToArray();
+        if (Math.Max(left?.Length ?? 0, right?.Length ?? 0) <= MaxExcerptScalars)
+        {
+            return (before is null ? null : Visible(before), after is null ? null : Visible(after));
+        }
+
+        var start = 0;
+        if (left is not null && right is not null)
+        {
+            var common = 0;
+            while (common < left.Length && common < right.Length && left[common] == right[common]) common++;
+            start = Math.Max(0, common - MaxExcerptScalars / 4);
+        }
+
+        string? Window(Rune[]? runes)
+        {
+            if (runes is null) return null;
+            var lower = Math.Min(start, runes.Length);
+            var upper = Math.Min(runes.Length, lower + MaxExcerptScalars);
+            var text = new StringBuilder();
+            if (lower > 0) text.Append(CultureInfo.InvariantCulture, $"[from character {lower + 1}] …");
+            text.Append(Visible(string.Concat(runes[lower..upper].Select(rune => rune.ToString()))));
+            if (upper < runes.Length) text.Append(TruncationMarker);
+            return text.ToString();
+        }
+
+        return (Window(left), Window(right));
+    }
+
+    /// <summary>The text with every invisible or format character spelled <c>⟨U+XXXX⟩</c>.</summary>
+    internal static string Visible(string text)
+    {
+        if (!text.EnumerateRunes().Any(IsInvisible)) return text;
+        var result = new StringBuilder(text.Length + 16);
+        foreach (var rune in text.EnumerateRunes())
+        {
+            if (IsInvisible(rune)) result.Append(CultureInfo.InvariantCulture, $"⟨U+{rune.Value:X4}⟩");
+            else result.Append(rune.ToString());
+        }
+        return result.ToString();
+    }
+
+    private static bool IsInvisible(Rune rune)
+    {
+        var value = rune.Value;
+        if (value is '\n' or '\t') return false;
+        return Rune.GetUnicodeCategory(rune) is UnicodeCategory.Format or UnicodeCategory.Control ||
+               value is (>= 0xFE00 and <= 0xFE0F) or (>= 0xE0100 and <= 0xE01EF) or 0x034F or
+                   0x115F or 0x1160 or 0x3164 or 0xFFA0 or 0x180E;
     }
 
     /// <summary>Unicode scalar order, which UTF-16 code unit order is not above U+E000.</summary>

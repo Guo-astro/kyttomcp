@@ -304,7 +304,9 @@ test('Contract Guard renders imported evidence and disables Mark as reviewed wit
   const source = await read('js', 'screens', 'serverDetail.js');
 
   assert.match(source, /pendingContractEvidence\(state, server\)/);
-  assert.match(source, /if \(!alert && !imported\.entry && !imported\.error\) return null;/);
+  // An unreadable store is one file for every server: its error is shown with a
+  // server that has something to review, never on every server's page.
+  assert.match(source, /if \(!alert && !imported\.entry\) return null;/);
   assert.match(source, /if \(imported\.blocked\) \{\s*review\.disabled = true;\s*review\.title = PENDING_REVIEW_HINT;/);
 });
 

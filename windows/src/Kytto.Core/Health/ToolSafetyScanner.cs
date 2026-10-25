@@ -249,7 +249,12 @@ public static class ToolSafetyScanner
         var lastWasSpace = false;
         foreach (var rune in text.ToLowerInvariant().EnumerateRunes())
         {
-            if (rune.Value is 0x00AD or (>= 0x200B and <= 0x200D) or 0x2060 or 0xFEFF) continue;
+            if (rune.Value is 0x00AD or 0x034F or 0x115F or 0x1160 or 0x180E or (>= 0x200B and <= 0x200D) or
+                (>= 0x2060 and <= 0x2064) or 0x3164 or 0xFEFF or 0xFFA0 or (>= 0xFE00 and <= 0xFE0F) or
+                (>= 0xE0000 and <= 0xE01EF))
+            {
+                continue;
+            }
             if (Rune.IsWhiteSpace(rune))
             {
                 if (!lastWasSpace) result.Append(' ');
@@ -336,6 +341,10 @@ public static class ToolSafetyScanner
                 // Word joiner, invisible operators, BOM.
                 (>= 0x2060 and <= 0x2064) or 0xFEFF => "invisible formatting character",
                 >= 0xE0000 and <= 0xE007F => "Unicode tag character",
+                // Supplementary variation selectors, used to smuggle payloads.
+                >= 0xE0100 and <= 0xE01EF => "variation selector",
+                // Grapheme joiner, Mongolian vowel separator, Hangul fillers.
+                0x034F or 0x180E or 0x115F or 0x1160 or 0x3164 or 0xFFA0 => "invisible formatting character",
                 _ => null,
             };
             if (description is not null)

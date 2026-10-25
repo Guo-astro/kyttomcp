@@ -486,8 +486,14 @@ The response is the `servers.unify` shape: `AuthoringResultDTO` plus
 ### `contract.acknowledge` → `StateDTO`
 
 ```json
-{ "serverID": "filesystem" }
+{ "serverID": "filesystem", "reviewToken": "3f0c9a1b2d4e5f60a7b8c9d0" }
 ```
+
+`reviewToken` is the opaque value the alert in `StateDTO.contractAlerts` carried
+when it was shown. If a check has recorded different changes since, the command
+fails (error code `appState`) and nothing is acknowledged: a review accepts what
+was read, not whatever arrived meanwhile. It is absent for an imported contract
+with no local alert.
 
 Records that a Contract Guard alert has been read, and makes the contract it
 showed the baseline the next change is measured against.

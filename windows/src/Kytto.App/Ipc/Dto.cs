@@ -465,11 +465,13 @@ internal sealed record ContractFieldChangeDto(
     string? After,
     string? Explanation);
 
+/// <param name="ReviewToken">Opaque; sent back with <c>contract.acknowledge</c>.</param>
 internal sealed record ContractAlertDto(
     string ServerID,
     string ServerName,
     double ChangedAt,
-    IReadOnlyList<ContractChangeDto> Changes);
+    IReadOnlyList<ContractChangeDto> Changes,
+    string ReviewToken);
 
 /// <param name="Action">Which repair this previews: <c>pinResolvedCommand</c> or <c>pinPackageVersion</c>.</param>
 /// <param name="PackageName"><c>pinPackageVersion</c> only.</param>

@@ -189,7 +189,8 @@ internal static class DtoMapping
                 field.Path,
                 field.Before,
                 field.After,
-                field.Explanation)).ToArray())).ToArray());
+                field.Explanation)).ToArray())).ToArray(),
+        alert.ReviewToken);
 
     internal static DoctorFixPreviewDto ToDto(this DoctorFixPreview preview) => new(
         preview.ServerID,

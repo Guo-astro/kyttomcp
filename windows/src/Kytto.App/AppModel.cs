@@ -437,11 +437,24 @@ internal sealed partial class AppModel : IDisposable
     }
 
     /// <summary>Records that a Contract Guard alert has been read (§7.10).</summary>
-    internal void AcknowledgeContract(string serverId)
+    /// <param name="reviewToken">
+    /// The alert's token as the page showed it; null for an imported contract with no
+    /// local alert. A review accepts what was read, not whatever arrived meanwhile.
+    /// </param>
+    internal void AcknowledgeContract(string serverId, string? reviewToken = null)
     {
         // Asking about a server that is not there is a mistake worth reporting,
         // rather than a no-op that looks like it worked.
         _ = ServerById(serverId);
+        if (reviewToken is not null &&
+            _metadata.For(serverId)?.ContractChanges is { Count: > 0 } changes &&
+            ContractGuard.ReviewToken(changes) != reviewToken)
+        {
+            throw new Ipc.IpcException(
+                "appState",
+                "The contract changed again while you were reviewing it. Kytto did not mark it " +
+                "reviewed; read the new changes first.");
+        }
         // An imported fingerprint for this server is retired in the same step, and
         // only after a local check that postdates it (§7.13).
         AcknowledgeWithPendingReview(serverId, () => _metadata.AcknowledgeContract(serverId));
@@ -1308,7 +1321,11 @@ internal sealed record ContractAlert(
     string ServerID,
     string ServerName,
     DateTimeOffset ChangedAt,
-    IReadOnlyList<ContractChange> Changes);
+    IReadOnlyList<ContractChange> Changes)
+{
+    /// <summary>Names exactly these changes; sent back with <c>contract.acknowledge</c>.</summary>
+    internal string ReviewToken => ContractGuard.ReviewToken(Changes);
+}
 
 internal sealed record DoctorFixPreview(
     string ServerID,

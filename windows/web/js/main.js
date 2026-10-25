@@ -1684,7 +1684,10 @@ root.addEventListener('click', async (event) => {
       if (state.acknowledgingContract) break;
       setState({ acknowledgingContract: target.dataset.serverId });
       try {
-        applyState(await invoke('contract.acknowledge', { serverID: target.dataset.serverId }));
+        applyState(await invoke('contract.acknowledge', {
+          serverID: target.dataset.serverId,
+          reviewToken: target.dataset.reviewToken || null,
+        }));
         setState({
           notice: {
             kind: 'info',

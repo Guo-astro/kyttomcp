@@ -228,9 +228,9 @@ internal static partial class CommandRegistry
         router.Register<DoctorFixPayload, DoctorFixPreviewDto>("doctor.previewFix", payload =>
             model.DoctorFixPreview(payload.ServerID, payload.RequestedAction()).ToDto());
 
-        router.Register<DoctorFixPayload, StateDto>("contract.acknowledge", payload =>
+        router.Register<AcknowledgeContractPayload, StateDto>("contract.acknowledge", payload =>
         {
-            model.AcknowledgeContract(payload.ServerID);
+            model.AcknowledgeContract(payload.ServerID, payload.ReviewToken);
             return model.ToStateDto();
         });
 
@@ -714,6 +714,12 @@ internal sealed record ExposedToolsPayload(string RouteID, IReadOnlyList<string>
 /// <c>pinPackageVersion</c> only: the release the preview showed. Native writes it
 /// only if it is still the version it looked up.
 /// </param>
+/// <param name="ReviewToken">
+/// The alert's <c>reviewToken</c> as displayed; absent for an imported contract with no
+/// local alert.
+/// </param>
+internal sealed record AcknowledgeContractPayload(string ServerID, string? ReviewToken = null);
+
 internal sealed record DoctorFixPayload(string ServerID, string? Action = null, string? Version = null)
 {
     internal Kytto.Core.Doctor.DoctorAction RequestedAction() => Action switch

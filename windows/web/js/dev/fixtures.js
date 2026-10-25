@@ -291,6 +291,7 @@ const world = {
       serverID: 'filesystem',
       serverName: 'Filesystem',
       changedAt: Date.now() / 1000 - 3600,
+      reviewToken: 'fixture-review-1',
       changes: [
         {
           kind: 'descriptionChanged', severity: 'warning', toolName: 'read_file', summary: 'Model-facing description changed',
@@ -796,6 +797,7 @@ const recheck = (target) => {
       serverID: target.id,
       serverName: target.name,
       changedAt: Date.now() / 1000,
+      reviewToken: `fixture-review-${Date.now()}`,
       changes: [
         { kind: 'descriptionChanged', severity: 'warning', toolName: tools[0].name, summary: 'Model-facing description changed' },
       ],
@@ -1346,7 +1348,12 @@ const HANDLERS = {
     return snapshot();
   },
 
-  'contract.acknowledge': ({ serverID }) => {
+  'contract.acknowledge': ({ serverID, reviewToken }) => {
+    // The native gate: a review accepts the changes that were on screen.
+    const alert = world.contractAlerts.find((entry) => entry.serverID === serverID);
+    if (alert && reviewToken != null && reviewToken !== alert.reviewToken) {
+      throw fixtureError('The contract changed again while you were reviewing it. Kytto did not mark it reviewed; read the new changes first.', 'appState');
+    }
     // The native gate: an imported reference is reviewed only after a check made
     // here has run, so a review before that changes nothing.
     const pending = world.pendingContractImports.entries.find((entry) => entry.serverID === serverID);

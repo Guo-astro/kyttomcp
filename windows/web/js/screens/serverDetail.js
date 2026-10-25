@@ -294,7 +294,9 @@ function contractSection(state, server) {
   const alert = (state.contractAlerts ?? []).find((entry) => entry.serverID === server.id);
   // Imported fingerprints are evidence waiting for a check made here (§7.13).
   const imported = pendingContractEvidence(state, server);
-  if (!alert && !imported.entry && !imported.error) return null;
+  // The pending-import store is one file for every server; its error belongs with a
+  // server that has something to review, not on every server's page.
+  if (!alert && !imported.entry) return null;
   const section = el('section', 'detail-section contract-alert');
   section.append(el('h3', null, 'Contract Guard'));
   section.append(...imported.notes);
@@ -319,7 +321,7 @@ function contractSection(state, server) {
   if (alert || imported.entry) {
     const review = busyButton(state.acknowledgingContract === server.id, 'Mark as reviewed', 'Marking…', 'acknowledge-contract', {
       className: 'button subtle',
-      dataset: { serverId: server.id },
+      dataset: { serverId: server.id, reviewToken: alert?.reviewToken ?? '' },
     });
     // An imported reference can be reviewed only against a passing check made here,
     // after it arrived; an unreadable store blocks it outright.

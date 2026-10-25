@@ -577,6 +577,8 @@ public class WireFormatTests
         var alert = new ContractAlert("write", "write", DateTimeOffset.UnixEpoch, changes);
 
         var encoded = Encode(alert.ToDto());
+        Assert.Equal(["serverID", "serverName", "changedAt", "changes", "reviewToken"], KeysOf(encoded));
+        Assert.Equal(ContractGuard.ReviewToken(changes), encoded.GetProperty("reviewToken").GetString());
         var wire = encoded.GetProperty("changes");
         Assert.Equal(["kind", "severity", "toolName", "summary", "details"], KeysOf(wire[0]));
 

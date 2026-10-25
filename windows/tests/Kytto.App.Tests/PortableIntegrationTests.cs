@@ -458,6 +458,56 @@ public sealed class PortableIntegrationTests : IDisposable
         Assert.DoesNotContain("malformed", message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// "Mark as reviewed" accepts the changes that were on screen: a check that recorded
+    /// something newer meanwhile refuses the acknowledgement and moves nothing.
+    /// </summary>
+    [Fact]
+    public async Task AReviewTokenFromAnOlderAlertCannotAcknowledgeNewerChanges()
+    {
+        var profile = NewProfile("local");
+        profile.Write(@".cursor\mcp.json", """{"mcpServers":{"memory":{"command":"node"}}}""");
+        var metadata = new MetadataStore(new KyttoPaths(profile.Data));
+        void Check(string description) => metadata.Record(
+            "memory",
+            new HealthResult(
+                HealthStatus.Passed, Timestamp.Now, 1, [new ToolSummary("read", description)],
+                null, null, 0, null, null),
+            null);
+        // A model reads its metadata once; each step opens the profile afresh, as a
+        // relaunch would, so it sees what the checks recorded.
+        CommandRouter Open()
+        {
+            var model = new AppModel(
+                new KyttoPaths(profile.Data), profile.Home, new AllInstalled(), new InMemorySecretStore(),
+                watchConfigs: false);
+            _models.Add(model);
+            var router = new CommandRouter();
+            CommandRegistry.RegisterAll(router, model);
+            return router;
+        }
+
+        Check("before");
+        Check("shown");
+        var shown = Data(await Open().InvokeForTests("state.get"))
+            .GetProperty("contractAlerts")[0].GetProperty("reviewToken").GetString()!;
+
+        Check("arrived while reading");
+        var later = Open();
+        Assert.Equal(
+            "appState",
+            ErrorCode(await later.InvokeForTests(
+                "contract.acknowledge", $$"""{ "serverID": "memory", "reviewToken": "{{shown}}" }""")));
+        Assert.NotEmpty(new MetadataStore(new KyttoPaths(profile.Data)).For("memory")?.ContractChanges ?? []);
+
+        var current = Data(await later.InvokeForTests("state.get"))
+            .GetProperty("contractAlerts")[0].GetProperty("reviewToken").GetString()!;
+        Assert.NotEqual(shown, current);
+        var reviewed = Data(await later.InvokeForTests(
+            "contract.acknowledge", $$"""{ "serverID": "memory", "reviewToken": "{{current}}" }"""));
+        Assert.Empty(reviewed.GetProperty("contractAlerts").EnumerateArray());
+    }
+
     [Fact]
     public async Task AFreshLocalCheckAfterTheImportIsWhatLetsAnImportedReferenceBeReviewed()
     {
