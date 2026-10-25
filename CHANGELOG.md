@@ -114,6 +114,9 @@ also includes the fixes the review found in the Windows code.
 | Platform | Artifact | Size | SHA-256 |
 |---|---|---:|---|
 | macOS (universal) | `KyttoMCP-1.0.9.dmg` | 5.7 MB | `2cb955c50c2df94af27fe4445fc6929f17cb4664089f383b9c0d49cdd8837846` |
+| Windows x64 | `Kytto-Setup-win-x64-1.0.9.exe` | 78.6 MB | `085d0f843e334ead78d37bda6d6074f11e14dfd9568bdca84a5cfef8d0f336ac` |
+
+The macOS build is on the [v1.0.9](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9) release and the Windows build on [v1.0.9-windows](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9-windows). The Windows installer is unsigned; see the Windows release notes for what was and was not verified.
 
 ## [1.0.8] — 2026-10-15
 

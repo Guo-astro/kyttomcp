@@ -5,7 +5,7 @@
 Free and **open source** under the MIT License — the full source of both the macOS
 and the Windows app lives in this repository. Read it, build it, or send a pull request.
 
-[![Version](https://img.shields.io/badge/beta-macOS%201.0.9%20%C2%B7%20Windows%201.0.8-blue)](https://github.com/heyitsjakub/KyttoMCP/releases)
+[![Version](https://img.shields.io/badge/beta-1.0.9-blue)](https://github.com/heyitsjakub/KyttoMCP/releases)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](https://kytto.jakubhecht.sk/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 [![Open source](https://img.shields.io/badge/open%20source-yes-brightgreen)](#source-code)
@@ -91,7 +91,7 @@ Custom sources are read-only and are not an additional writable client. Want ano
 
 ## Install
 
-Download from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from GitHub Releases: Beta 1.0.9 for macOS ([v1.0.9](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9)) and Beta 1.0.8 for Windows ([v1.0.8](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.8)), whose port of the 1.0.9 fixes follows.
+Download from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from GitHub Releases: Beta 1.0.9 for macOS ([v1.0.9](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9)) and Beta 1.0.9 for Windows ([v1.0.9-windows](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9-windows)).
 
 ### macOS
 
@@ -113,8 +113,8 @@ shasum -a 256 KyttoMCP-1.0.9.dmg
 # 2cb955c50c2df94af27fe4445fc6929f17cb4664089f383b9c0d49cdd8837846
 
 # Windows (PowerShell)
-Get-FileHash Kytto-Setup-win-x64-1.0.8.exe -Algorithm SHA256
-# 0b51ecd7099809da767b904d4f349b6075b362a69410619df63d4bb422f382cd
+Get-FileHash Kytto-Setup-win-x64-1.0.9.exe -Algorithm SHA256
+# 085d0f843e334ead78d37bda6d6074f11e14dfd9568bdca84a5cfef8d0f336ac
 ```
 
 ## Local by design
