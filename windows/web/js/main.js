@@ -1064,9 +1064,15 @@ async function undoMatrixWrite() {
   setState({ notice: { ...current, undoBusy: true } });
   try {
     const plan = matrixUndoPlan(undo);
+    const name = getState().servers.find((server) => server.id === undo.serverId)?.name ?? undo.serverId;
     const result = await invoke(plan.command, plan.payload);
     applyState(result.state ?? result);
-    const notice = { kind: 'info', message: 'Undone. The previous client state is restored.' };
+    const notice = {
+      kind: 'info',
+      message: undo.previousState === 'absent'
+        ? `Undone: “${name}” was removed from that client again.`
+        : 'Undone. The previous client state is restored.',
+    };
     setState({ notice });
     await refreshAfterMutation(['Backups'], notice);
   } catch (error) {
@@ -1148,6 +1154,7 @@ async function submitForm() {
     .map((entry) => ({
       key: entry.key,
       value: entry.value === '' || entry.value === null ? null : entry.value,
+      previousKey: entry.originalKey && entry.originalKey !== entry.key ? entry.originalKey : null,
     }));
   const draft = { ...sheet.draft, env };
 

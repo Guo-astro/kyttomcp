@@ -326,7 +326,7 @@ public static class JsonEditor
             return new JsonSpan(self.BlankLinePrefixStart(span.Start) ?? span.Start, end);
         }
 
-        if (index > 0 && self.OffsetOfCommaBefore(span.Start) is { } previous)
+        if (index > 0 && self.OffsetOfComma(spans[index - 1].End, span.Start) is { } previous)
         {
             return new JsonSpan(previous, span.End);
         }
@@ -391,22 +391,49 @@ public static class JsonEditor
 
     private static bool IsSpace(byte b) => IsHorizontalSpace(b) || b is 0x0A or 0x0D;
 
-    /// <summary>Offset of the comma directly after a point, ignoring spaces.</summary>
-    private static int? OffsetOfCommaAfter(this JsonDocument self, int offset)
+    /// <summary>Offset of the comma directly after a point, ignoring spaces and comments.</summary>
+    private static int? OffsetOfCommaAfter(this JsonDocument self, int offset) =>
+        self.OffsetOfComma(offset, self.SourceBytes.Length);
+
+    /// <summary>
+    /// Offset of the first comma at or after <paramref name="offset"/> and before
+    /// <paramref name="limit"/>, with only whitespace and comments in between.
+    /// </summary>
+    /// <remarks>
+    /// JSONC puts comments between a value and its comma (<c>"a": 1 /* x */,</c>) and
+    /// after it on the same line; a scan that stopped at the first <c>/</c> would leave
+    /// a dangling comma behind.
+    /// </remarks>
+    private static int? OffsetOfComma(this JsonDocument self, int offset, int limit)
     {
         var bytes = self.SourceBytes;
         var index = offset;
-        while (index < bytes.Length && IsSpace(bytes[index])) index++;
-        return index < bytes.Length && bytes[index] == (byte)',' ? index : null;
-    }
-
-    /// <summary>Offset of the comma directly before a point, ignoring whitespace.</summary>
-    private static int? OffsetOfCommaBefore(this JsonDocument self, int offset)
-    {
-        var bytes = self.SourceBytes;
-        var index = offset - 1;
-        while (index >= 0 && IsSpace(bytes[index])) index--;
-        return index >= 0 && bytes[index] == (byte)',' ? index : null;
+        while (index < limit)
+        {
+            var current = bytes[index];
+            if (IsSpace(current))
+            {
+                index++;
+                continue;
+            }
+            if (current == (byte)',') return index;
+            if (current != (byte)'/' || index + 1 >= limit) return null;
+            switch (bytes[index + 1])
+            {
+                case (byte)'/':
+                    index += 2;
+                    while (index < limit && bytes[index] != 0x0A) index++;
+                    break;
+                case (byte)'*':
+                    index += 2;
+                    while (index + 1 < limit && !(bytes[index] == (byte)'*' && bytes[index + 1] == (byte)'/')) index++;
+                    index += 2;
+                    break;
+                default:
+                    return null;
+            }
+        }
+        return null;
     }
 
     /// <summary>Offset just past the newline, if everything up to it is blank.</summary>

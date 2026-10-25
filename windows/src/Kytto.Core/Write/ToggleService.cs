@@ -48,6 +48,21 @@ public sealed class ToggleException(string message) : Exception(message)
 
     public static ToggleException NoParkedDefinition(string name) =>
         new($"Kytto has no stored definition for \"{name}\" to put back.");
+
+    /// <summary>
+    /// The definition has settings the target client's format cannot be given from
+    /// Kytto's model — headers, a working directory — and copying it without them would
+    /// write a server that cannot start or authenticate.
+    /// </summary>
+    public static ToggleException DefinitionNotPortable(string name, IReadOnlyList<string> fields) =>
+        new($"\"{name}\" uses {string.Join(", ", fields)}, which Kytto cannot carry into this " +
+            "client's configuration format. Add it to this client by hand so nothing it needs to " +
+            "start or sign in is lost.");
+
+    /// <summary>The definition is Kytto's Gateway helper bound to one client's route.</summary>
+    public static ToggleException GatewayDefinitionNotPortable(string name) =>
+        new($"\"{name}\" runs through Kytto Gateway for one client. Restore its direct definition " +
+            "there first, then add it to this client.");
 }
 
 /// <summary>Turns a matrix cell on or off.</summary>
@@ -155,7 +170,9 @@ public sealed class ToggleService(
             // can be copied into another client's config.
             throw ToggleException.BundledServerNotPortable(server.Name);
         }
-        if (server.DefinitionSource.Length > 0 && FormatOf(server.Origin) == ConfigFormat.Json)
+        EnsurePortable(server, clientId);
+        if (server.DefinitionSource.Length > 0 && FormatOf(server.Origin) == ConfigFormat.Json &&
+            TargetFormat(clientId) == ConfigFormat.Json)
         {
             // A copy from another JSON client. Those agree on the per-server shape,
             // so the source text carries over as it stands.
@@ -166,6 +183,81 @@ public sealed class ToggleService(
             return new ArrivingDefinition.FromModel();
         }
         throw ToggleException.NoParkedDefinition(server.Name);
+    }
+
+    /// <summary>Refuses a copy that would arrive without something it needs.</summary>
+    /// <remarks>
+    /// A Gateway definition points at one client's route: copied, a second client would
+    /// run — and be logged and masked as — the first one. And a definition whose format
+    /// differs from the target's is rendered from the model, which carries command, args,
+    /// env and url and nothing else.
+    /// </remarks>
+    private void EnsurePortable(Server server, ClientId clientId)
+    {
+        if (server.Command is { } command && server.Args.Contains("--route", StringComparer.Ordinal) &&
+            Path.GetFileNameWithoutExtension(command).Equals("kytto-mcp-proxy", StringComparison.OrdinalIgnoreCase))
+        {
+            throw ToggleException.GatewayDefinitionNotPortable(server.Name);
+        }
+        if (FormatOf(server.Origin) is { } sourceFormat && sourceFormat != TargetFormat(clientId))
+        {
+            var lost = UnportableFields(server.DefinitionSource, sourceFormat);
+            if (lost.Count > 0) throw ToggleException.DefinitionNotPortable(server.Name, lost);
+        }
+    }
+
+    private ConfigFormat? TargetFormat(ClientId clientId) =>
+        _descriptors.FirstOrDefault(descriptor => descriptor.Id == clientId)?.EditableServerMap?.Format;
+
+    /// <summary>
+    /// Launch and authentication settings a definition has that rendering it from the
+    /// model (command, args, env, url) would drop.
+    /// </summary>
+    internal static IReadOnlyList<string> UnportableFields(string source, ConfigFormat format)
+    {
+        if (source.Length == 0) return [];
+        if (format == ConfigFormat.Json)
+        {
+            try
+            {
+                var keys = JsonDocument.Parse(source).Root.Keys;
+                return new[] { "headers", "cwd", "envFile" }.Where(keys.Contains).ToArray();
+            }
+            catch (JsonParseException)
+            {
+                return [];
+            }
+        }
+
+        TomlDocument document;
+        try
+        {
+            document = TomlDocument.Parse(source);
+        }
+        catch (TomlParseException)
+        {
+            return [];
+        }
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var table in document.Tables)
+        {
+            // Sub-tables (`[mcp_servers.x.http_headers]`) count by name; the server's
+            // own header names the server, not a setting.
+            if (table.Path.Count > 2) names.Add(table.Path[^1]);
+            foreach (var pair in table.Pairs)
+            {
+                names.Add(pair.Key[0]);
+                // An inline definition, `x = { url = "…", http_headers = { … } }`,
+                // keeps its settings inside the one value.
+                if (table.Path.Count <= 1 && pair.Value.InlinePairs is { } inline)
+                {
+                    foreach (var field in inline) names.Add(field.Key[0]);
+                }
+            }
+        }
+        return new[] { "http_headers", "env_http_headers", "bearer_token_env_var", "cwd", "env_vars" }
+            .Where(names.Contains)
+            .ToArray();
     }
 
     private string Literal(
@@ -244,11 +336,10 @@ public sealed class ToggleService(
         ConfigSource.ServerMap source,
         string flagKey)
     {
-        if (server.IsBundled && FormatOf(server.Origin) != ConfigFormat.Toml)
-        {
-            throw ToggleException.BundledServerNotPortable(server.Name);
-        }
-
+        // No up-front refusal for a bundled row: discovery merges rows by identity and
+        // takes `IsBundled` from whichever source it read first, so a Codex table can
+        // sit in a row that came from a Claude Desktop extension. Codex's own table is
+        // toggled like any other; only an arrival needs a portable definition.
         var path = _resolver.ResolveServerMap(source.File, clientId);
         var display = _resolver.DisplayServerMap(source.File, clientId);
         var serversKey = source.ServersKey;
@@ -258,11 +349,18 @@ public sealed class ToggleService(
             document =>
             {
                 // The name in this file, which need not match the row's name
-                // character for character — the matrix merges rows by identity.
+                // character for character — the matrix merges rows by identity. Two
+                // tables differing only in case are both valid TOML, and Codex runs
+                // both; toggling one of them would report a success it did not have,
+                // so an ambiguous name is refused.
                 var name = document.ServerName(server.Id, serversKey);
 
                 if (name is null)
                 {
+                    if (server.IsBundled && FormatOf(server.Origin) != ConfigFormat.Toml)
+                    {
+                        throw ToggleException.BundledServerNotPortable(server.Name);
+                    }
                     // Nothing in the config file answers to this name. Either it is
                     // genuinely not here, or it is here by another route — a plugin —
                     // and that route is not one Kytto writes to. Saying so beats a
@@ -274,6 +372,7 @@ public sealed class ToggleService(
                     }
                     // Switching off something that is not there is already true.
                     if (!enabled) return document.SourceText;
+                    EnsurePortable(server, clientId);
                     return document.SettingServer(
                         server.Name,
                         serversKey,
@@ -355,7 +454,7 @@ public sealed class ToggleService(
 
                 return document.AppendingElement(
                     document.ObjectLiteral(
-                        [(deny.NameField, JsonText.String(server.Name))],
+                        [(deny.NameField, JsonText.String(SpellingInConfig(server, clientId, source)))],
                         [deny.Key]),
                     [deny.Key]);
             });
@@ -394,6 +493,31 @@ public sealed class ToggleService(
             var name = element[deny.NameField]?.StringValue ?? element.StringValue;
             return name is not null && Server.Identity(name) == subject.Id;
         }
+    }
+
+    /// <summary>The name the client's own config file uses for this server.</summary>
+    /// <remarks>
+    /// Not the row's: the row takes its name from whichever client listed it first, and
+    /// the client matches its deny list against its own key.
+    /// </remarks>
+    private string SpellingInConfig(Server server, ClientId clientId, ConfigSource.ServerMap source)
+    {
+        var path = _resolver.ResolveServerMap(source.File, clientId);
+        try
+        {
+            if (File.Exists(path) &&
+                JsonDocument.ParseFile(path).ServerKey(server.Id, source.ServersKey) is { } key)
+            {
+                return key;
+            }
+        }
+        catch (Exception error) when (error is JsonParseException or JsonEditException or IOException or
+                                              UnauthorizedAccessException)
+        {
+            // The row's name is the best remaining guess, and the deny list matches
+            // by identity when it is read back.
+        }
+        return server.Name;
     }
 
     /// <summary>

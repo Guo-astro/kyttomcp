@@ -460,7 +460,8 @@ public static class TomlText
                 case '\r': result.Append("\\r"); break;
                 case '\t': result.Append("\\t"); break;
                 default:
-                    if (c < 0x20) result.Append(CultureInfo.InvariantCulture, $"\\u{(int)c:X4}");
+                    // DEL is a control character TOML forbids unescaped too.
+                    if (c < 0x20 || c == 0x7F) result.Append(CultureInfo.InvariantCulture, $"\\u{(int)c:X4}");
                     else result.Append(c);
                     break;
             }

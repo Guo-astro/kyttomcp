@@ -118,6 +118,7 @@ public enum JsonParseErrorKind
     UnterminatedComment,
     ExpectedColon,
     ExpectedKey,
+    NestingTooDeep,
 }
 
 public sealed class JsonParseException(
@@ -147,6 +148,7 @@ public sealed class JsonParseException(
             JsonParseErrorKind.UnterminatedComment => "unterminated block comment",
             JsonParseErrorKind.ExpectedColon => "expected ':'",
             JsonParseErrorKind.ExpectedKey => "expected a quoted key",
+            JsonParseErrorKind.NestingTooDeep => "values nested too deeply",
             _ => "malformed JSON",
         };
         return $"{what} at line {line}, column {column}";
@@ -166,8 +168,18 @@ public sealed class JsonParseException(
 /// </remarks>
 internal ref struct JsonParser(byte[] bytes)
 {
+    /// <summary>Recursion bound.</summary>
+    /// <remarks>
+    /// Health checks parse JSON from servers Kytto does not trust, and running out of
+    /// stack ends a .NET process outright — no handler gets to run. A reply nested a
+    /// thousand levels deep must be a parse error, not a crash. No config or tool
+    /// schema comes near this.
+    /// </remarks>
+    internal const int MaximumDepth = 128;
+
     private readonly byte[] _bytes = bytes;
     private int _index = 0;
+    private int _depth = 0;
 
     internal JsonNode ParseDocument()
     {
@@ -246,8 +258,19 @@ internal ref struct JsonParser(byte[] bytes)
         if (_index >= _bytes.Length) throw Error(JsonParseErrorKind.UnexpectedEndOfInput);
         switch (_bytes[_index])
         {
-            case (byte)'{': return ParseObject();
-            case (byte)'[': return ParseArray();
+            case (byte)'{' or (byte)'[':
+            {
+                if (_depth >= MaximumDepth) throw Error(JsonParseErrorKind.NestingTooDeep);
+                _depth++;
+                try
+                {
+                    return _bytes[_index] == (byte)'{' ? ParseObject() : ParseArray();
+                }
+                finally
+                {
+                    _depth--;
+                }
+            }
             case (byte)'"':
             {
                 var start = _index;

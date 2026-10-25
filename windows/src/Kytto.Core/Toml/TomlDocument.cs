@@ -242,6 +242,13 @@ public enum TomlParseErrorKind
     UnterminatedArray,
     UnterminatedInlineTable,
     UnterminatedTableHeader,
+
+    /// <summary>
+    /// A table defined twice — by two headers, or by a header after dotted keys
+    /// already defined it. Codex refuses such a file.
+    /// </summary>
+    DuplicateTable,
+    DuplicateKey,
 }
 
 public sealed class TomlParseException(
@@ -270,6 +277,8 @@ public sealed class TomlParseException(
             TomlParseErrorKind.UnterminatedArray => "unterminated array",
             TomlParseErrorKind.UnterminatedInlineTable => "unterminated inline table",
             TomlParseErrorKind.UnterminatedTableHeader => "unterminated table header",
+            TomlParseErrorKind.DuplicateTable => "a table is defined more than once",
+            TomlParseErrorKind.DuplicateKey => "a key is defined more than once",
             _ => "malformed TOML",
         };
         return $"{what} at line {line}, column {column}";
@@ -301,6 +310,12 @@ internal ref struct TomlParser(byte[] bytes)
         var isArrayElement = false;
         var pairs = new List<TomlPair>();
         var contentEnd = 0;
+        // TOML forbids defining a table twice. Kytto's editor checks its own output by
+        // parsing it again, so a parser that tolerated this would wave through a file
+        // Codex then cannot load.
+        var definedTables = new HashSet<string>(StringComparer.Ordinal) { PathKey([]) };
+        var arrayTables = new List<IReadOnlyList<string>>();
+        var keysInTable = new HashSet<string>(StringComparer.Ordinal);
 
         void CloseTable()
         {
@@ -352,15 +367,40 @@ internal ref struct TomlParser(byte[] bytes)
                     _index++;
                 }
 
+                if (doubled)
+                {
+                    arrayTables.Add(key);
+                }
+                else if (!arrayTables.Any(array => StartsWith(key, array)) && !definedTables.Add(PathKey(key)))
+                {
+                    _index = start;
+                    throw Error(TomlParseErrorKind.DuplicateTable);
+                }
+
                 path = key;
                 headerSpan = new TomlSpan(start, _index);
                 isArrayElement = doubled;
                 pairs = [];
+                keysInTable.Clear();
                 contentEnd = _index;
                 continue;
             }
 
+            var pairStart = _index;
             var pair = ParsePair();
+            if (!keysInTable.Add(PathKey(pair.Key)))
+            {
+                _index = pairStart;
+                throw Error(TomlParseErrorKind.DuplicateKey);
+            }
+            // `a.b = 1` defines table `a` here; a later `[…a]` header is a redefinition.
+            if (pair.Key.Count > 1 && !isArrayElement && !arrayTables.Any(array => StartsWith(path, array)))
+            {
+                for (var depth = 1; depth < pair.Key.Count; depth++)
+                {
+                    definedTables.Add(PathKey([.. path, .. pair.Key.Take(depth)]));
+                }
+            }
             pairs.Add(pair);
             contentEnd = pair.Span.End;
         }
@@ -368,6 +408,11 @@ internal ref struct TomlParser(byte[] bytes)
         CloseTable();
         return tables;
     }
+
+    private static string PathKey(IReadOnlyList<string> path) => string.Join('\0', path);
+
+    private static bool StartsWith(IReadOnlyList<string> path, IReadOnlyList<string> prefix) =>
+        path.Count >= prefix.Count && prefix.Select((part, index) => part == path[index]).All(same => same);
 
     // MARK: Trivia
 
@@ -670,11 +715,14 @@ internal ref struct TomlParser(byte[] bytes)
         {
             if (_bytes[_index] == quote && HasClosingDelimiter(quote))
             {
-                AppendChunk(result, literalStart, _index);
-                _index += 3;
-                // TOML allows more than three closing quotes; the extras belong to
-                // the value, but for our purposes stopping at three is right because
-                // the span, not the decoded text, is what gets spliced.
+                // A value may end in one or two quotes right before the delimiter
+                // (`"""a""""`): the delimiter is the *last* three of a run of up to
+                // five. Stopping at the first three would leave a stray quote that
+                // fails as a key and calls a valid file broken.
+                var run = 0;
+                while (_index + run < _bytes.Length && _bytes[_index + run] == quote && run < 5) run++;
+                AppendChunk(result, literalStart, _index + run - 3);
+                _index += run;
                 return result.ToString();
             }
             if (escaped && _bytes[_index] == (byte)'\\')

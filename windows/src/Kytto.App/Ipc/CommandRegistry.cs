@@ -740,7 +740,11 @@ internal sealed record ServerDraftPayload(
     /// receives secret values, so it cannot send them back; the native side merges
     /// them in before writing (§6).
     /// </param>
-    internal sealed record EnvPayload(string Key, string? Value);
+    /// <param name="PreviousKey">
+    /// The entry's name before a rename in the edit form, so a kept value follows it.
+    /// Names only; never a value.
+    /// </param>
+    internal sealed record EnvPayload(string Key, string? Value, string? PreviousKey = null);
 
     internal ServerDraft MakeDraft() => new()
     {
@@ -749,7 +753,7 @@ internal sealed record ServerDraftPayload(
             ?? throw new BadArgumentException($"Unknown transport {Transport}."),
         Command = Command ?? "",
         Args = Args ?? [],
-        Env = (Env ?? []).Select(entry => new EnvEntry(entry.Key, entry.Value)).ToArray(),
+        Env = (Env ?? []).Select(entry => new EnvEntry(entry.Key, entry.Value, entry.PreviousKey)).ToArray(),
         Url = Url ?? "",
     };
 }

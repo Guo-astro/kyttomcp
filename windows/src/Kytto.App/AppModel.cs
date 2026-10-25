@@ -911,6 +911,10 @@ internal sealed partial class AppModel : IDisposable
             .ToList();
 
         var changes = _current.Servers
+            // A plugin's servers are switched with the plugin, in its client; listing
+            // them under "Switch off" promised a change that always fails.
+            .Where(server => !server.HoldsPluginCopy(clientId) &&
+                             !(server.IsPlugin && server.DefinitionsByClient.GetValueOrDefault(clientId) is not { IsBundled: false }))
             .Select(server => new
             {
                 server.Id,

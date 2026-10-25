@@ -1226,13 +1226,18 @@ Applies to **every client the server is configured in**. Editing is not
 per-client: a server in three clients is one row in the matrix, and letting the
 three drift apart is the problem this app exists to solve.
 
-Renaming works — the name is the config key, so it is handled as a remove plus an
-add, and any deny-list entry for the old name is cleaned up with it.
+Renaming works — the name is the config key, so only the key changes. A server
+switched off through a deny list stays switched off: its entry is renamed with
+it. A rename that only changes letter case is still a rename.
 
 **Environment values:** an entry with `"value": null` means *keep whatever is
-already in the config*. The form never receives secret values, so it cannot send
-them back; the native side merges them in at the last moment. An empty string
-would overwrite a real token, so the UI sends `null`, not `""`.
+already in the config* — per file, so each client keeps its own value even when
+the clients disagree. The form never receives secret values, so it cannot send
+them back; for a client that does not have the key yet, the native side falls
+back to the server's existing value. An empty string would overwrite a real
+token, so the UI sends `null`, not `""`. When the user renames a key in the
+form, the entry carries `"previousKey"` (the old name, never a value) so a kept
+value moves to the new name instead of being lost.
 
 ### `servers.delete` → `AuthoringResultDTO`
 

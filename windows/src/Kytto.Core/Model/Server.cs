@@ -63,7 +63,11 @@ public static class Enablements
 /// The value is kept because spawning the process needs it, but it never crosses
 /// the IPC boundary — see <c>ServerDto</c> (§6).
 /// </remarks>
-public sealed record EnvEntry(string Key, string? Value)
+/// <param name="PreviousKey">
+/// In an edit: the name this entry had before the user renamed it, so a value left
+/// "unchanged" moves with it instead of being lost. Names only; never a value.
+/// </param>
+public sealed record EnvEntry(string Key, string? Value, string? PreviousKey = null)
 {
     public bool HasValue => !string.IsNullOrEmpty(Value);
 }

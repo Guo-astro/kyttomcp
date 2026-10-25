@@ -133,7 +133,9 @@ test('the matrix write explanation is required once and never for read-only sour
   );
 });
 
-test('Undo restores absent through backup/remove and on/off through the safe toggle path', () => {
+test('Undo removes just an arrival and reverses on/off through the safe toggle path', () => {
+  // Never the whole pre-write backup, even when there is one: that would also undo
+  // whatever changed in the file since the arrival.
   assert.deepEqual(
     matrixUndoPlan({
       previousState: 'absent',
@@ -142,8 +144,8 @@ test('Undo restores absent through backup/remove and on/off through the safe tog
       serverId: 'github',
     }),
     {
-      command: 'backups.restore',
-      payload: { backupID: 'backup-1', clientID: 'cursor' },
+      command: 'servers.removeFromClient',
+      payload: { serverID: 'github', clientID: 'cursor' },
     },
   );
   assert.equal(

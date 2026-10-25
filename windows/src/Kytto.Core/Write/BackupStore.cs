@@ -253,15 +253,33 @@ public sealed class BackupStore(KyttoPaths paths, int retentionPerClient = Backu
         AtomicWriter.Write(data, target, throughLinks: true);
     }
 
+    /// <summary>Keeps the newest <see cref="RetentionPerClient"/> backups of each file.</summary>
+    /// <remarks>
+    /// Per file, not per client: Claude Code's off switch writes two files, so counting
+    /// them together let twenty deny-list toggles push out every backup of its main
+    /// config — and at a low setting, one toggle could delete the backup its own Undo
+    /// was about to use. <see cref="List"/> already orders newest first.
+    /// </remarks>
     private void Prune(ClientId client)
     {
-        var all = List(client);
-        if (all.Count <= RetentionPerClient) return;
-
-        foreach (var backup in all.Skip(RetentionPerClient))
+        var byFile = List(client).GroupBy(backup => FileKey(backup.OriginalPath), StringComparer.OrdinalIgnoreCase);
+        foreach (var backup in byFile.SelectMany(group => group.Skip(RetentionPerClient)))
         {
             Delete(backup.Path);
             Delete(backup.Path + ".origin");
+        }
+
+        static string FileKey(string path)
+        {
+            if (path.Length == 0) return "";
+            try
+            {
+                return Path.GetFullPath(path);
+            }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                return path;
+            }
         }
 
         static void Delete(string path)

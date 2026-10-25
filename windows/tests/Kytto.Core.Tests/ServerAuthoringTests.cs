@@ -392,11 +392,12 @@ public class UpdateServerTests
     }
 
     /// <summary>
-    /// Recreating a renamed server later must not come back mysteriously switched
-    /// off because a deny-list entry outlived the name.
+    /// A server switched off through Claude Code's deny list stays off under its new
+    /// name: the entry is respelt, not dropped — and no entry outlives the old name to
+    /// switch off a server created under it later.
     /// </summary>
     [Fact]
-    public void RenamingClearsTheOldNamesDenyListEntry()
+    public void RenamingAServerSwitchedOffInClaudeCodeKeepsItSwitchedOff()
     {
         using var harness = MakeHarness();
         var xcode = harness.Server("XcodeBuildMCP");
@@ -405,10 +406,57 @@ public class UpdateServerTests
         var draft = ServerDraft.Editing(xcode) with { Name = "xcode-build" };
         harness.Authoring().Update(draft, "XcodeBuildMCP", xcode, harness.Discover().Servers);
 
+        Assert.Equal(Enablement.Disabled, harness.Server("xcode-build").EnabledIn[ClientId.ClaudeCode]);
         var settings = JsonDocument.Parse(harness.Text(@".claude\settings.json"));
         var denied = settings.Root["deniedMcpServers"]?.Elements?
             .Select(entry => entry["serverName"]?.StringValue).ToArray();
+        Assert.Contains("xcode-build", denied!, StringComparer.Ordinal);
         Assert.DoesNotContain("XcodeBuildMCP", denied!, StringComparer.Ordinal);
+    }
+
+    /// <summary>"figma" → "Figma" is a rename too: the files should say what the user typed.</summary>
+    [Fact]
+    public void ARenameThatOnlyChangesLetterCaseIsWritten()
+    {
+        using var harness = MakeHarness();
+        var figma = harness.Server("figma");
+        var draft = ServerDraft.Editing(figma) with { Name = "Figma" };
+
+        harness.Authoring().Update(draft, "figma", figma, harness.Discover().Servers);
+
+        var cursor = JsonDocument.Parse(harness.Text(@".cursor\mcp.json"));
+        Assert.Equal(["github", "Figma"], cursor.ValueAt("mcpServers")?.Keys);
+    }
+
+    /// <summary>
+    /// An untouched secret keeps each client's own value — two clients can hold
+    /// different tokens for one row — and follows a key the user renamed.
+    /// </summary>
+    [Fact]
+    public void AnUntouchedSecretKeepsEachClientsOwnValueAndFollowsARenamedKey()
+    {
+        using var harness = new ToggleHarness();
+        harness.Write(
+            """{"mcpServers": {"github": {"command": "npx", "env": {"GITHUB_TOKEN": "cursor-token", "GITHUB_HOST": "x"}}}}""",
+            @".cursor\mcp.json");
+        harness.Write(
+            """{"mcpServers": {"github": {"command": "npx", "env": {"GITHUB_TOKEN": "claude-token"}}}}""",
+            ".claude.json");
+        var server = harness.Server("github");
+
+        var draft = (ServerDraft.Editing(server) with
+        {
+            Args = ["-y", "new"],
+            Env = [new EnvEntry(" GH_TOKEN ", null, PreviousKey: "GITHUB_TOKEN"), new EnvEntry("GITHUB_HOST", null)],
+        }).MergingSecrets(server);
+        harness.Authoring().Update(draft, "github", server, harness.Discover().Servers);
+
+        var cursor = JsonDocument.Parse(harness.Text(@".cursor\mcp.json"));
+        Assert.Equal("cursor-token", cursor.ValueAt("mcpServers", "github", "env", "GH_TOKEN")?.StringValue);
+        Assert.Equal("x", cursor.ValueAt("mcpServers", "github", "env", "GITHUB_HOST")?.StringValue);
+        Assert.Null(cursor.ValueAt("mcpServers", "github", "env", "GITHUB_TOKEN"));
+        var claude = JsonDocument.Parse(harness.Text(".claude.json"));
+        Assert.Equal("claude-token", claude.ValueAt("mcpServers", "github", "env", "GH_TOKEN")?.StringValue);
     }
 
     [Fact]

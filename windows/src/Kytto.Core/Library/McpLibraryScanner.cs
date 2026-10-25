@@ -224,14 +224,16 @@ public sealed class McpLibraryScanner
                 }
                 foreach (var entry in entries.Distinct(StringComparer.OrdinalIgnoreCase).Take(8))
                 {
-                    var relativeEntry = SafeRelative(file.DirectoryName!, entry);
-                    if (relativeEntry is null) continue;
+                    // Absolute: a client starts the server from a directory of its own,
+                    // so a path relative to the library would name a file not there.
+                    var entryPath = InsideRoot(file.DirectoryName!, entry);
+                    if (entryPath is null) continue;
                     var serverName = packageName ?? Path.GetFileNameWithoutExtension(file.Name);
                     var server = SuggestedServer(
                         name: serverName,
                         command: "node",
-                        args: [relativeEntry],
-                        provenance: ServerProvenance.Infer(Transport.Stdio, "node", [relativeEntry], null));
+                        args: [entryPath],
+                        provenance: ServerProvenance.Infer(Transport.Stdio, "node", [entryPath], null));
                     AddCandidate(server, file,
                     [
                         "Suggested from package.json; the entry point was not executed or verified.",
@@ -243,13 +245,14 @@ public sealed class McpLibraryScanner
 
         void AddPythonSuggestion(FileInfo file)
         {
-            var relative = Relative(file.FullName);
+            // Absolute, for the same reason as a package entry point.
+            var entryPath = file.FullName;
             var name = Path.GetFileNameWithoutExtension(file.Name);
             var server = SuggestedServer(
                 name,
                 "python",
-                [relative],
-                ServerProvenance.Infer(Transport.Stdio, "python", [relative], null));
+                [entryPath],
+                ServerProvenance.Infer(Transport.Stdio, "python", [entryPath], null));
             AddCandidate(server, file,
             [
                 "Suggested from a Python entry point; the file was not executed or verified.",
@@ -307,14 +310,16 @@ public sealed class McpLibraryScanner
 
         string Relative(string path) => Path.GetRelativePath(fullRoot, path);
 
-        string? SafeRelative(string directory, string path)
+        // The entry point's full path, or null when it leaves the library root.
+        string? InsideRoot(string directory, string path)
         {
             if (Path.IsPathFullyQualified(path)) return null;
             var combined = Path.GetFullPath(Path.Combine(directory, path));
             var relative = Path.GetRelativePath(fullRoot, combined);
-            return relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            return relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+                   Path.IsPathFullyQualified(relative)
                 ? null
-                : relative;
+                : combined;
         }
     }
 

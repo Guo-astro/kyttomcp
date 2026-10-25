@@ -115,7 +115,9 @@ public static class ServerDraftSplicing
         // Environment, key by key. A value of null is the UI saying "keep what is
         // there" (§6), which for a key already in this file means not touching it at
         // all — including values that are not strings.
-        var wanted = RealEnvironment(draft);
+        var wanted = draft.RealEnvironment;
+        var fileValues = StringValues((Definition().Node["env"]?.Members ?? [])
+            .Select(member => (member.Key, member.Value.StringValue)));
         if (Definition().Node["env"]?.Members is { } envMembers)
         {
             if (wanted.Count == 0)
@@ -145,7 +147,7 @@ public static class ServerDraftSplicing
                     }
                     else
                     {
-                        Set(entry.Key, JsonText.String(entry.Value ?? ""), "env");
+                        Set(entry.Key, JsonText.String(draft.ValueForNewKey(entry, fileValues)), "env");
                     }
                 }
             }
@@ -153,7 +155,7 @@ public static class ServerDraftSplicing
         else if (wanted.Count > 0)
         {
             Set("env", Render(JsonBuildValue.Object(wanted
-                .Select(entry => new JsonBuildValue.Field(entry.Key, JsonBuildValue.Text(entry.Value ?? "")))
+                .Select(entry => new JsonBuildValue.Field(entry.Key, JsonBuildValue.Text(draft.ValueForNewKey(entry))))
                 .ToArray())));
         }
 
@@ -235,7 +237,8 @@ public static class ServerDraftSplicing
             if (existing.Url != url) Set("url", TomlText.String(url));
         }
 
-        var wanted = RealEnvironment(draft);
+        var wanted = draft.RealEnvironment;
+        var tableValues = StringValues((envTable?.Pairs ?? []).Select(pair => (pair.Name ?? "", pair.Value.StringValue)));
         if (envTable is not null)
         {
             if (wanted.Count == 0)
@@ -267,7 +270,7 @@ public static class ServerDraftSplicing
                     }
                     else
                     {
-                        Set(entry.Key, TomlText.String(entry.Value ?? ""), envPath);
+                        Set(entry.Key, TomlText.String(draft.ValueForNewKey(entry, tableValues)), envPath);
                     }
                 }
             }
@@ -294,12 +297,13 @@ public static class ServerDraftSplicing
                     pairs.LastOrDefault(pair => pair.Name == entry.Key)?.Value.StringValue == entry.Value);
                 if (!(sameKeys && sameValues))
                 {
+                    var inlineValues = StringValues(pairs.Select(pair => (pair.Name ?? "", pair.Value.StringValue)));
                     var spelled = wanted.Select(entry =>
                     {
                         var kept = pairs.LastOrDefault(pair => pair.Name == entry.Key);
                         var raw = kept is not null && (entry.Value is null || kept.Value.StringValue == entry.Value)
                             ? current.Slice(kept.Value.Span)
-                            : TomlText.String(entry.Value ?? "");
+                            : TomlText.String(draft.ValueForNewKey(entry, inlineValues));
                         return $"{TomlText.Key(entry.Key)} = {raw}";
                     });
                     text = current.Replacing(envValue.Span, "{ " + string.Join(", ", spelled) + " }");
@@ -314,13 +318,21 @@ public static class ServerDraftSplicing
                 ?? throw new TomlEditException(TomlEditErrorKind.TableNotFound, $"{key}.{name}");
             var newline = current.Newline();
             var lines = new[] { "", $"[{TomlText.Path(envPath)}]" }
-                .Concat(wanted.Select(entry => $"{TomlText.Key(entry.Key)} = {TomlText.String(entry.Value ?? "")}"));
+                .Concat(wanted.Select(entry => $"{TomlText.Key(entry.Key)} = {TomlText.String(draft.ValueForNewKey(entry))}"));
             text = current.Replacing(new TomlSpan(anchor, anchor), newline + string.Join(newline, lines));
         }
 
         return text;
     }
 
-    private static IReadOnlyList<EnvEntry> RealEnvironment(ServerDraft draft) =>
-        draft.Env.Where(entry => entry.Key.Trim().Length > 0).ToArray();
+    /// <summary>The string values a file holds, last spelling winning, for a key a draft keeps or renames.</summary>
+    private static Dictionary<string, string> StringValues(IEnumerable<(string Key, string? Value)> members)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (key, value) in members)
+        {
+            if (value is not null) values[key] = value;
+        }
+        return values;
+    }
 }

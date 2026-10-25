@@ -18,6 +18,13 @@ public sealed record ServerDraft
     public IReadOnlyList<EnvEntry> Env { get; init; } = [];
     public string Url { get; init; } = "";
 
+    /// <summary>
+    /// Values the existing server already has, used only for a key a target file does
+    /// not have yet. See <see cref="MergingSecrets"/>.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> InheritedEnv { get; init; } =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
     /// <summary>Pre-fills a draft from a server that already exists, for editing.</summary>
     public static ServerDraft Editing(Server server) => new()
     {
@@ -31,29 +38,49 @@ public sealed record ServerDraft
 
     public string TrimmedName => Name.Trim();
 
-    /// <summary>Fills in environment values the editor was never given.</summary>
+    /// <summary>Attaches the environment values the editor was never given.</summary>
     /// <remarks>
     /// The UI only ever sees <c>{ key, hasValue }</c> — an API token does not cross
-    /// the IPC boundary just because someone opened the edit form (§6). So a value
-    /// of null coming back means "leave this one as it was", and the real value is
-    /// looked up here, natively, at the last moment.
+    /// the IPC boundary just because someone opened the edit form (§6). So a value of
+    /// null coming back means "leave this one as it was", and that is decided per file
+    /// when splicing: each client keeps its own value, which may differ from the row's.
+    /// The row's values are only a fallback for a file that does not have the key yet.
     /// </remarks>
     public ServerDraft MergingSecrets(Server server)
     {
-        var existing = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var inherited = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var entry in server.Env)
         {
-            existing.TryAdd(entry.Key, entry.Value);
+            if (entry.Value is { } value) inherited.TryAdd(entry.Key, value);
         }
+        return this with { InheritedEnv = inherited };
+    }
 
-        return this with
+    /// <summary>The entries with a name, names trimmed.</summary>
+    /// <remarks>
+    /// A pasted <c>"TOKEN "</c> is the variable <c>TOKEN</c>, not a key no server will
+    /// ever read.
+    /// </remarks>
+    internal IReadOnlyList<EnvEntry> RealEnvironment => Env
+        .Select(entry => entry with { Key = entry.Key.Trim(), PreviousKey = entry.PreviousKey?.Trim() })
+        .Where(entry => entry.Key.Length > 0)
+        .ToArray();
+
+    /// <summary>The value to write for a key the target does not have yet.</summary>
+    /// <remarks>
+    /// The one typed, else what the target or the server had under the entry's previous
+    /// name (a rename), else under this name. Never a blank over a known value.
+    /// </remarks>
+    internal string ValueForNewKey(EnvEntry entry, IReadOnlyDictionary<string, string>? fileValues = null)
+    {
+        if (entry.Value is { } typed) return typed;
+        foreach (var key in new[] { entry.PreviousKey, entry.Key })
         {
-            Env = Env
-                .Select(entry => entry.Value is not null
-                    ? entry
-                    : new EnvEntry(entry.Key, existing.GetValueOrDefault(entry.Key)))
-                .ToArray(),
-        };
+            if (key is null) continue;
+            if (fileValues?.GetValueOrDefault(key) is { } inFile) return inFile;
+            if (InheritedEnv.GetValueOrDefault(key) is { } inherited) return inherited;
+        }
+        return "";
     }
 
     // MARK: - Validation
@@ -132,16 +159,17 @@ public sealed record ServerDraft
             }
         }
 
-        if (Env.Any(entry => entry.Key.Length == 0))
+        var envKeys = Env.Select(entry => entry.Key.Trim()).ToArray();
+        if (envKeys.Any(key => key.Length == 0))
         {
             problems.Add(new Problem(
                 ValidationError.EnvKeyEmpty, "An environment variable has no name."));
         }
-        else if (Env.FirstOrDefault(entry => !IsPortableEnvName(entry.Key)) is { } invalid)
+        else if (envKeys.FirstOrDefault(key => !IsPortableEnvName(key)) is { } invalid)
         {
             problems.Add(new Problem(
                 ValidationError.EnvKeyInvalid,
-                $"\"{invalid.Key}\" is not a valid environment variable name. Use letters, numbers, and underscores, and do not start with a number."));
+                $"\"{invalid}\" is not a valid environment variable name. Use letters, numbers, and underscores, and do not start with a number."));
         }
 
         return problems;
@@ -183,12 +211,12 @@ public sealed record ServerDraft
             fields.Add(new JsonBuildValue.Field("url", JsonBuildValue.Text(Url.Trim())));
         }
 
-        var realEnv = Env.Where(entry => entry.Key.Trim().Length > 0).ToArray();
-        if (realEnv.Length > 0)
+        var realEnv = RealEnvironment;
+        if (realEnv.Count > 0)
         {
             fields.Add(new JsonBuildValue.Field("env", JsonBuildValue.Object(
                 realEnv.Select(entry =>
-                    new JsonBuildValue.Field(entry.Key, JsonBuildValue.Text(entry.Value ?? "")))
+                    new JsonBuildValue.Field(entry.Key, JsonBuildValue.Text(ValueForNewKey(entry))))
                     .ToArray())));
         }
 
@@ -214,7 +242,7 @@ public sealed record ServerDraft
             command: isRemote ? null : Command.Trim(),
             args: Args,
             url: isRemote ? Url.Trim() : null,
-            env: Env,
+            env: RealEnvironment.Select(entry => new EnvEntry(entry.Key, ValueForNewKey(entry))).ToArray(),
             enabled: enabled);
     }
 }

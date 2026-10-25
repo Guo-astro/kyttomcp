@@ -145,7 +145,8 @@ export function draftFromServer(server) {
     args: [...server.args],
     // Values are deliberately absent — they never left the native side. An
     // untouched field sends null, which means "keep what is there" (§6).
-    env: server.env.map((entry) => ({ key: entry.key, value: null, hasValue: entry.hasValue })),
+    // `originalKey` lets a renamed key carry its kept value along.
+    env: server.env.map((entry) => ({ key: entry.key, value: null, hasValue: entry.hasValue, originalKey: entry.key })),
     url: server.url ?? '',
   };
 }
@@ -420,16 +421,15 @@ export function needsMatrixWriteConfirmation(settings, client) {
 
 /** The safe native command that restores one captured pre-write matrix state. */
 export function matrixUndoPlan(undo) {
+  // Adding an absent server has no inverse toggle: switching it off would leave a
+  // parked or disabled definition. Remove just that definition instead. Restoring
+  // the whole pre-write backup would also undo everything the client or the user
+  // changed in that file since — a notice can be clicked hours later.
   if (undo.previousState === 'absent') {
-    return undo.backupId
-      ? {
-          command: 'backups.restore',
-          payload: { backupID: undo.backupId, clientID: undo.clientId },
-        }
-      : {
-          command: 'servers.removeFromClient',
-          payload: { serverID: undo.serverId, clientID: undo.clientId },
-        };
+    return {
+      command: 'servers.removeFromClient',
+      payload: { serverID: undo.serverId, clientID: undo.clientId },
+    };
   }
   return {
     command: 'servers.setEnabled',

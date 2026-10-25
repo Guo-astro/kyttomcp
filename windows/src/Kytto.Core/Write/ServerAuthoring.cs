@@ -129,10 +129,12 @@ public sealed class ServerAuthoring(
         var problems = draft.Validate(TakenNames(clients, existing), allowing: originalName);
         if (problems.Count > 0) throw AuthoringException.Invalid(problems);
 
-        // A rename changes the key, and only the key.
-        var renamedFrom = Server.Identity(originalName) == Server.Identity(draft.TrimmedName)
+        // A rename changes the key, and only the key. "github" → "GitHub" is a rename
+        // too: the files should say what the user typed.
+        var renamedFrom = string.Equals(originalName, draft.TrimmedName, StringComparison.Ordinal)
             ? null
             : originalName;
+        var identityChanged = Server.Identity(originalName) != Server.Identity(draft.TrimmedName);
 
         // A copy that is switched off in a presence-only client is not in that file.
         // Writing the edit there would switch it back on while the matrix still showed
@@ -164,7 +166,7 @@ public sealed class ServerAuthoring(
                     draft.SplicingJson(entry.SourceText, []));
                 // The park store is keyed by identity, so a rename is a new entry and
                 // the old one has to go or the row would come back twice.
-                if (renamedFrom is not null) parkStore.Unpark(clientId, entry.ServerName);
+                if (renamedFrom is not null && identityChanged) parkStore.Unpark(clientId, entry.ServerName);
                 parkedUpdated.Add(clientId);
             }
             catch (Exception error) when (
@@ -486,13 +488,15 @@ public sealed class ServerAuthoring(
             serverWrites.Add(new ClientWrite(clientId, prepared));
         }
 
+        // A server switched off through a deny list stays off under its new name: the
+        // entry is renamed, not dropped.
         var allWrites = oldName is null
             ? serverWrites.ToArray()
-            : serverWrites.Concat(PrepareDenyListEntries(oldName, clients)).ToArray();
+            : serverWrites.Concat(PrepareDenyListEntries(oldName, clients, renamingTo: draft.TrimmedName)).ToArray();
         var receipts = writer.Commit(allWrites.Select(item => item.Write).ToArray());
         RecordDigests(allWrites, receipts);
 
-        if (oldName is not null)
+        if (oldName is not null && Server.Identity(oldName) != Server.Identity(draft.TrimmedName))
         {
             foreach (var item in serverWrites)
             {
@@ -517,7 +521,8 @@ public sealed class ServerAuthoring(
             var name = key;
             if (oldName is not null)
             {
-                if (document.ServerKey(Server.Identity(draft.TrimmedName), serversKey) is not null)
+                // Taken by another entry, not by this one under its old spelling.
+                if (document.ServerKey(Server.Identity(draft.TrimmedName), serversKey) is { } clash && clash != key)
                 {
                     throw NameTaken(draft);
                 }
@@ -575,7 +580,7 @@ public sealed class ServerAuthoring(
             var name = existing;
             if (oldName is not null)
             {
-                if (document.ServerName(Server.Identity(draft.TrimmedName), key) is not null)
+                if (document.ServerName(Server.Identity(draft.TrimmedName), key) is { } clash && clash != existing)
                 {
                     throw NameTaken(draft);
                 }
@@ -599,9 +604,14 @@ public sealed class ServerAuthoring(
     /// Without this, deleting a disabled server leaves a dangling entry, and
     /// recreating it later would come back mysteriously switched off.
     /// </remarks>
+    /// <param name="renamingTo">
+    /// For a rename, the entry is respelt instead — one string splice — so the server is
+    /// still switched off afterwards.
+    /// </param>
     private IReadOnlyList<ClientWrite> PrepareDenyListEntries(
         string name,
-        IReadOnlyList<ClientId> clients)
+        IReadOnlyList<ClientId> clients,
+        string? renamingTo = null)
     {
         var writes = new List<ClientWrite>();
         foreach (var clientId in clients)
@@ -613,13 +623,20 @@ public sealed class ServerAuthoring(
             var path = _resolver.Resolve(deny.File);
             if (!File.Exists(path)) continue;
 
+            bool Names(JsonNode element)
+            {
+                var entry = element[deny.NameField]?.StringValue ?? element.StringValue;
+                return entry is not null && Server.Identity(entry) == Server.Identity(name);
+            }
+
             var prepared = writer.Prepare<JsonDocument>(
                 path, clientId, deny.File.DisplayString(), ledger.DigestFor(path),
-                document => document.RemovingElements([deny.Key], element =>
-                {
-                    var entry = element[deny.NameField]?.StringValue ?? element.StringValue;
-                    return entry is not null && Server.Identity(entry) == Server.Identity(name);
-                }));
+                document => renamingTo is null
+                    ? document.RemovingElements([deny.Key], Names)
+                    : document.Replacing((document.ValueAt(deny.Key)?.Elements ?? [])
+                        .Where(Names)
+                        .Select(element => ((element[deny.NameField] ?? element).Span, JsonText.String(renamingTo)))
+                        .ToArray()));
             writes.Add(new ClientWrite(clientId, prepared));
         }
         return writes;
