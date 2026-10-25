@@ -11,9 +11,9 @@ without a backup.
 
 ## [1.0.9] — 2026-10-24
 
-A macOS release: support for the MCP 2026-07-28 revision and the fixes from a
-full review of the app. Windows stays at 1.0.8 for now; its port of these fixes
-follows in a later release.
+Support for the MCP 2026-07-28 revision and the fixes from a full review of the
+app. Released for macOS on 2026-10-24 and for Windows on 2026-10-25, where it
+also includes the fixes the review found in the Windows code.
 
 ### Added (macOS)
 
@@ -63,13 +63,57 @@ follows in a later release.
 - In narrow windows the matrix and inspector spilled over the status bar. Contract Guard diffs were squeezed into a narrow column, sheets had no shadow, row status lines were misaligned and wrapped, and Compact density looked like an active filter.
 - Refresh now also reloads Secrets, Profiles and Activity. Dragging the sidebar no longer freezes when the window updates mid-drag, keyboard focus stays inside an open dialog, and Apply profile no longer does nothing when the default client is a read-only source.
 
+### Added (Windows) — 2026-10-25
+
+- Health checks speak MCP 2026-07-28. Kytto asks `server/discover` first and falls back to the `initialize` handshake for older servers, on stdio and Streamable HTTP alike, so a server that only speaks the new revision is no longer reported as broken.
+- MCP Doctor notes when a server uses something the 2026-07-28 revision deprecates: the legacy HTTP+SSE transport, Roots, Sampling or MCP logging.
+
+### Changed (Windows)
+
+- An endpoint that turns out to use the legacy HTTP+SSE transport is shown as not checkable instead of failed, and so is a plain-HTTP address off this computer.
+- Signing in to a remote server again asks for any additional scope the server requested, keeping the scopes you already granted.
+- Up to a window width of 1280 px the server inspector sits below the matrix, and it is hidden there while no server is selected.
+- Copying a server between a JSON client and Codex is refused, with the settings named, when it uses HTTP headers, a bearer token, a working directory or other settings the other format could not carry. A Gateway definition is never copied to another client.
+
+### Fixed (Windows) — configuration writes
+
+- Renaming a server that was switched off in Claude Code switched it back on. Renaming only the letter case of a name was ignored.
+- Saving an edit overwrote other clients' environment values with one client's value. Each client now keeps its own value for an untouched field, and renaming a key in the edit form keeps its value.
+- Undo after adding a server to a client restored the whole file from before the change. Undo now removes just that server.
+- Applying a profile tried, and failed, to switch off plugin servers. They are now left to their plugin, in the preview too.
+- A Claude Code deny entry used another client's spelling of the name, and a Codex server sharing its name with a Claude Desktop extension could not be toggled.
+- Backup retention counted all of a client's files together, so Claude Code's two-file switch could push out every backup of its main config.
+- Kytto could write a Codex `config.toml` that Codex refuses (a table defined twice), and reported some valid files as unreadable. Removing an entry from a JSON file with comments could leave a trailing comma.
+- Importing an entry point from the MCP Library wrote a relative path that clients could not start.
+
+### Fixed (Windows) — health checks, Doctor and Contract Guard
+
+- A server reply nested deeply enough could crash Kytto.
+- Health checks reported prompts-only servers as broken, timed out on servers that asked Kytto a question, and could cut off the end of a server's error output.
+- Doctor called "method not found" a missing executable.
+- Contract Guard showed identical before/after text for changes past the first 800 characters and printed invisible characters as nothing. "Mark as reviewed" now accepts only the changes that were on screen.
+- The Tool Safety Scanner missed variation selectors, the combining grapheme joiner, the Mongolian vowel separator and Hangul fillers used to hide text or split a phrase.
+- Check all could run twice at once, and a sign-in during the run stopped it instead of skipping that server.
+
+### Fixed (Windows) — remote servers, Gateway and portable setup
+
+- Remote sign-in failed when the authorization server granted a different scope than requested, when protected-resource metadata described the whole origin, when a discovery URL answered with an error page, or when `expires_in` arrived as text. A token without an expiry or revoked early is now refreshed once, and two checks no longer spend the same refresh token.
+- Gateway mode dropped a Codex inline `env` and showed its values in the preview, could lose working directories and client placeholders, and could leave server processes running after the client quit. A hidden tool could still be called inside a JSON-RPC batch. Gateway mode is refused when Kytto runs from inside a ZIP file.
+- Health checks of a Gateway server now check the server itself rather than the masked helper. The activity log is rotated and read without stalling the window.
+- Portable import into Codex refused remote URLs ending in `/sse` and asked for inputs of copies going nowhere. Input labels now say where each value goes, whatever the file claims.
+
+### Fixed (Windows) — app and interface
+
+- A setting written by a newer version no longer resets all settings.
+- Abandoned update downloads are cleaned up. Skills kept behind a junction or symbolic link are found. An older MCP Library scan finishing last no longer replaces a newer one.
+- Sheets had no shadow, row status lines wrapped, and Compact density looked like an active filter.
+- Refresh now also reloads Secrets, Profiles and Activity. Dragging the sidebar no longer freezes when the window updates mid-drag, keyboard focus stays inside an open dialog, and a failed setup import closes with an explanation.
+
 ### Downloads
 
 | Platform | Artifact | Size | SHA-256 |
 |---|---|---:|---|
 | macOS (universal) | `KyttoMCP-1.0.9.dmg` | 5.7 MB | `2cb955c50c2df94af27fe4445fc6929f17cb4664089f383b9c0d49cdd8837846` |
-
-Windows: use 1.0.8 (below) until its port of these fixes ships.
 
 ## [1.0.8] — 2026-10-15
 
