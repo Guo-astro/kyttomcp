@@ -143,7 +143,7 @@ public struct ClientDefinition: Equatable, Sendable {
 ///
 /// Config files stay authoritative for what is enabled; this is a read-through
 /// view of them, not a store.
-public struct Server: Identifiable, Sendable {
+public struct Server: Identifiable, Sendable, Equatable {
     public let id: String
     public let name: String
     public let transport: Transport

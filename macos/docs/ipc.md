@@ -398,7 +398,8 @@ environment values are intentionally absent.
 
 ### `discovery.refresh` → `StateDTO`
 
-No payload. Re-reads every config from disk.
+No payload. Re-reads every config from disk, off the main thread, and replies
+once a pass that started after the request has finished.
 
 ### `servers.setEnabled` → `ToggleResultDTO`
 
@@ -1180,9 +1181,12 @@ it. That is why every write command replies with fresh state itself. What the
 page did not ask for is pushed instead — a file changed by someone else, a
 toggle, profile or health check run from the menu bar item, a path override or
 custom source changed in Settings, and a re-read each time the window becomes
-key (at most once every two seconds). Re-reading is cheap and the render is
-idempotent, so the page applies every push as the truth rather than working
-out which events were its own.
+key (at most once every two seconds). Re-reads triggered by the file watcher
+run off the main thread, and the push is skipped when the pass found the same
+servers, clients, diagnostics and restart state the page already has — Claude
+Code rewrites `~/.claude.json` after nearly every message without touching any
+server. The page still applies every push it does receive as the truth rather
+than working out which events were its own.
 
 ## Not implemented
 

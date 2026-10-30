@@ -109,6 +109,10 @@ public struct SecretsService: Sendable {
         }
 
         let known = store.storedIdentifiers()
+        // Every secret in one config sits in the same file, and the Git answer
+        // costs a process (up to `gitCheckTimeout`) on the main thread. Asked
+        // once per file per scan, not once per secret.
+        var repositories: [String: URL?] = [:]
         return groups
             .map { id, group in
                 SecretRecord(
@@ -117,7 +121,7 @@ public struct SecretsService: Sendable {
                     maskedValue: Self.mask(group.value),
                     usages: group.usages.sorted { $0.clientID.rawValue < $1.clientID.rawValue },
                     isInSecretStore: known.contains(id),
-                    exposure: exposure(for: group.usages)
+                    exposure: exposure(for: group.usages, repositories: &repositories)
                 )
             }
             .sorted { ($0.key, $0.id) < ($1.key, $1.id) }
@@ -361,7 +365,7 @@ public struct SecretsService: Sendable {
         return true
     }
 
-    private func exposure(for usages: [SecretUsage]) -> [SecretExposure] {
+    private func exposure(for usages: [SecretUsage], repositories: inout [String: URL?]) -> [SecretExposure] {
         var found: [SecretExposure] = []
         var seen: Set<ClientID> = []
 
@@ -383,7 +387,14 @@ public struct SecretsService: Sendable {
                 }
             }
 
-            if let repository = gitRepository(containing: url) {
+            let repository: URL?
+            if let known = repositories[url.path] {
+                repository = known
+            } else {
+                repository = gitRepository(containing: url)
+                repositories[url.path] = .some(repository)
+            }
+            if let repository {
                 found.append(
                     .insideGitRepository(
                         pathDisplay: display,

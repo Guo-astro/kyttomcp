@@ -16,6 +16,16 @@ without a backup.
 - Remote checks resolve OpenCode's `{env:VAR}` placeholders in headers.
 - Switch single tools of a server off. The tool list in a server's details now has a button per client that can do it in its own configuration — Claude Code, Codex, Antigravity and OpenCode — which opens a picker with each tool's context cost and what your choice saves. Saving is one guarded write with a backup and Undo: an `mcp__<server>__<tool>` deny rule in Claude Code (which takes the tool out of its context), `disabled_tools` in Codex, `disabledTools` in Antigravity, `<server>_<tool>: false` in OpenCode. Tools switched off are marked in the list, and the tool counter and VS Code's 128-tool limit count only the tools that stay on. For Cursor, VS Code, Claude Desktop and Devin Desktop the details point to Gateway mode, which can already hide tools.
 
+### Changed (macOS)
+
+- Kytto re-reads your client configs in the background, so the window no longer stalls when a config changes on disk, when you press Refresh or when you switch back to Kytto.
+- Claude Code's `~/.claude.json` is read once per refresh instead of once for every Claude Code project, which makes refreshing much faster when Claude Code's history has made that file large.
+
+### Fixed (macOS)
+
+- While you used Claude Code, Kytto redrew its window after almost every message even though no server had changed. It now updates only when something it shows has changed, and still notices every real edit before it writes.
+- Opening Secrets could start a Git process for every secret when your home folder is a Git repository. Each config file is now checked once.
+
 ## [1.0.9] — 2026-10-24
 
 Support for the MCP 2026-07-28 revision and the fixes from a full review of the

@@ -360,6 +360,51 @@ struct KyttoMCPTests {
         #expect(reloads == 1)
         #expect(publishedStateFlags == [false, true])
     }
+
+    @Test("a background re-read records new bytes but reports only real changes")
+    @MainActor
+    func backgroundReloadReportsOnlyRealChanges() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appending(path: "KyttoMCPTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let config = home.appending(path: ".cursor/mcp.json")
+        try FileManager.default.createDirectory(
+            at: config.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: home) }
+        let servers = #""alpha": { "command": "/usr/bin/true" }"#
+        try Data(#"{ "mcpServers": { \#(servers) } }"#.utf8).write(to: config)
+
+        let model = AppModel(home: home)
+        _ = model.current()
+        var notifications = 0
+        model.onStateChanged = { notifications += 1 }
+
+        // The same bytes again: nothing to redraw.
+        try Data(#"{ "mcpServers": { \#(servers) } }"#.utf8).write(to: config)
+        #expect(await model.reloadInBackground() == false)
+
+        // Bookkeeping outside the servers, as Claude Code writes after every
+        // message: still nothing to redraw…
+        try Data(#"{ "numStartups": 2, "mcpServers": { \#(servers) } }"#.utf8).write(to: config)
+        #expect(await model.reloadInBackground() == false)
+        #expect(notifications == 0)
+
+        // …but the digest guard saw the new bytes, so a write is not refused
+        // as "changed on disk".
+        _ = try model.setEnabled(false, serverID: "alpha", clientID: .cursor)
+        #expect(model.current().servers.first { $0.id == "alpha" }?.enabledIn[.cursor] == .disabled)
+
+        // A real external edit is reported and shown. (Counted through the
+        // callback: the file watcher may get to it first, which is fine.)
+        let beforeEdit = notifications
+        let edited = try String(contentsOf: config, encoding: .utf8)
+            .replacingOccurrences(of: #""mcpServers": {"#, with: #""mcpServers": { "gamma": { "command": "/usr/bin/true" },"#)
+        try Data(edited.utf8).write(to: config)
+        await model.reloadInBackground()
+        #expect(notifications > beforeEdit)
+        #expect(model.current().servers.contains { $0.id == "gamma" })
+    }
 }
 
 private struct WirePayload: Decodable {

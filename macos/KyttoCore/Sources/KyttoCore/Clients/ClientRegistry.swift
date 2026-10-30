@@ -55,7 +55,8 @@ public enum ClientRegistry {
     /// crawl projects or the user's home directory.
     public static func allIncludingClaudeCodeProjects(
         home: URL,
-        pathOverride: String? = nil
+        pathOverride: String? = nil,
+        readData: (URL) -> Data? = { try? Data(contentsOf: $0) }
     ) -> [ClientDescriptor] {
         let path = pathOverride ?? "~/.claude.json"
         let url: URL = if path.hasPrefix("~/") {
@@ -63,7 +64,7 @@ public enum ClientRegistry {
         } else {
             URL(filePath: path)
         }
-        let data = try? Data(contentsOf: url)
+        let data = readData(url)
         let root = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
         let projects = root?["projects"] as? [String: Any] ?? [:]
 
@@ -79,7 +80,7 @@ public enum ClientRegistry {
         }
         // Explicit registrations are the boundary: no project directory crawl.
         let installedURL = PluginRegistrySource.claudeCode().registrationFile.resolve(home: home)
-        let installedData = try? Data(contentsOf: installedURL)
+        let installedData = readData(installedURL)
         let installed = installedData.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
         let plugins = installed?["plugins"] as? [String: Any] ?? [:]
         let pluginProjectPaths = plugins.values.flatMap { $0 as? [[String: Any]] ?? [] }.compactMap { entry -> String? in

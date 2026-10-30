@@ -416,7 +416,7 @@ struct StateDTO: Encodable {
             uniqueKeysWithValues: model.pendingRestarts.map { ($0.key.rawValue, $0.value) }
         )
         dismissedRestarts = model.dismissedRestartClients.map(\.rawValue).sorted()
-        gatewayRoutes = model.routes().map(GatewayRouteDTO.init)
+        gatewayRoutes = routes.map(GatewayRouteDTO.init)
         doctorReports = model.doctorReports().map(DoctorServerReportDTO.init)
         contractAlerts = model.contractAlerts().map(ContractAlertDTO.init)
         pendingContractImports = PendingContractImportsDTO(model)

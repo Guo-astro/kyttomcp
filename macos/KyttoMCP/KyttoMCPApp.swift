@@ -34,9 +34,13 @@ struct KyttoMCPApp: App {
         }
         model.onExternalChange = pushState
 
+        // Re-read off the main actor: on a large setup a full pass is long
+        // enough to stall the window it is refreshing.
         let mainWindow = MainWindowLink {
-            model.reload()
-            pushState()
+            Task {
+                await model.reloadInBackground()
+                pushState()
+            }
         }
         let menuBar = MenuBarController(model: model) { mainWindow.open() }
         // The page's own commands reply with fresh state; changes made from the

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct DiscoveredClient: Sendable {
+public struct DiscoveredClient: Sendable, Equatable {
     public let id: ClientID
     public let displayName: String
     /// The application (or CLI) is present on this machine.
@@ -30,7 +30,7 @@ public struct DiscoveredClient: Sendable {
     public var toolLimit: ClientToolLimit? = nil
 }
 
-public struct DiscoveryResult: Sendable {
+public struct DiscoveryResult: Sendable, Equatable {
     public let clients: [DiscoveredClient]
     public let servers: [Server]
     public let diagnostics: [Diagnostic]
@@ -56,7 +56,12 @@ public struct Discovery: Sendable {
     /// What Kytto has measured about these servers, keyed by server id.
     private let metadata: [String: ServerMetadata]
     private let resolver: ClientPathResolver
+    /// Every file is read and parsed at most once per `run()`.
+    let files: DiscoveryReadCache
 
+    /// - Parameter additionalDescriptors: appended to the built-in clients
+    ///   (custom sources), which keeps the built-ins reading `~/.claude.json`
+    ///   through the same per-pass cache as discovery itself.
     public init(
         home: URL,
         locator: any AppLocating,
@@ -64,12 +69,15 @@ public struct Discovery: Sendable {
         ledger: DigestLedger? = nil,
         parked: [ParkStore.Entry] = [],
         metadata: [String: ServerMetadata] = [:],
-        pathOverrides: [String: String] = [:]
+        pathOverrides: [String: String] = [:],
+        additionalDescriptors: [ClientDescriptor] = []
     ) {
+        let files = DiscoveryReadCache()
+        self.files = files
         resolver = ClientPathResolver(home: home, overrides: pathOverrides)
         self.home = home
         self.locator = locator
-        self.descriptors = descriptors ?? ClientRegistry.allIncludingClaudeCodeProjects(home: home, pathOverride: pathOverrides[ClientID.claudeCode.rawValue])
+        self.descriptors = (descriptors ?? ClientRegistry.allIncludingClaudeCodeProjects(home: home, pathOverride: pathOverrides[ClientID.claudeCode.rawValue], readData: files.data(at:))) + additionalDescriptors
         self.ledger = ledger
         self.parked = parked
         self.metadata = metadata
@@ -118,15 +126,23 @@ public struct Discovery: Sendable {
 
     /// Reads a file and records what it looked like. Returns nil if absent.
     private func readTracked(_ url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else {
-            ledger?.record(nil, for: url)
-            return nil
-        }
-        ledger?.record(ConfigWriter.digest(of: data), for: url)
-        return String(data: data, encoding: .utf8)
+        let file = files.file(at: url)
+        ledger?.record(file?.digest, for: url)
+        return file?.text
+    }
+
+    /// Parsed once per pass, however many sources share the file.
+    private func parseJSON(_ text: String, at url: URL) throws -> JSONDocument {
+        try files.jsonDocument(at: url, text: text)
+    }
+
+    private func parseTOML(_ text: String, at url: URL) throws -> TOMLDocument {
+        try files.tomlDocument(at: url, text: text)
     }
 
     public func run() -> DiscoveryResult {
+        // The next pass reads the disk again, not what this one saw.
+        defer { files.removeAll() }
         var clients: [DiscoveredClient] = []
         var diagnostics: [Diagnostic] = []
         // Keyed by `Server.identity`, so the same name in three clients is one row.
@@ -371,7 +387,7 @@ public struct Discovery: Sendable {
             registrationURL = registry.registrationFile.resolve(home: home)
         }
         outcome.sourceExists = FileManager.default.fileExists(atPath: registrationURL.path)
-        let installations = PluginInstallations.read(registry, home: home, codexConfig: registrationURL, text: readTracked)
+        let installations = PluginInstallations.read(registry, home: home, codexConfig: registrationURL, text: readTracked, json: { try? parseJSON($1, at: $0) }, toml: { try? parseTOML($1, at: $0) })
         func warn(_ message: String) {
             outcome.diagnostics.append(Diagnostic(severity: .warning, clientID: descriptor.id, pathDisplay: registry.registrationFile.displayString(), message: message))
         }
@@ -386,7 +402,7 @@ public struct Discovery: Sendable {
             }
             func readFile(_ url: URL) {
                 guard let source = readTracked(url) else { return }
-                guard let document = try? JSONDocument.parse(source) else {
+                guard let document = try? parseJSON(source, at: url) else {
                     warn("An active plugin's declared MCP configuration could not be parsed and was skipped.")
                     return
                 }
@@ -459,7 +475,7 @@ public struct Discovery: Sendable {
         guard let source = readTracked(url) else { return outcome }
         outcome.sourceExists = true
 
-        if let document = try? JSONDocument.parse(source) {
+        if let document = try? parseJSON(source, at: url) {
             let keys = ["mcpServers", "servers"].filter { document.root[$0]?.members != nil }
             guard keys.count == 1, let key = keys.first else {
                 outcome.diagnostics.append(unknownAdapterDiagnostic(file: file, descriptor: descriptor, ambiguous: keys.count > 1))
@@ -473,7 +489,7 @@ public struct Discovery: Sendable {
             )
         }
 
-        if let document = try? TOMLDocument.parse(source) {
+        if let document = try? parseTOML(source, at: url) {
             let keys = ["mcp_servers", "mcpServers", "servers"].filter { key in
                 document.table(at: [key]) != nil || !document.serverNames(under: key).isEmpty
             }
@@ -517,7 +533,7 @@ public struct Discovery: Sendable {
 
         let document: JSONDocument
         do {
-            document = try JSONDocument.parse(source)
+            document = try parseJSON(source, at: url)
         } catch {
             outcome.diagnostics.append(unreadable(error, file: file, descriptor: descriptor))
             return outcome
@@ -603,7 +619,7 @@ public struct Discovery: Sendable {
 
         let document: JSONDocument
         do {
-            document = try JSONDocument.parse(source)
+            document = try parseJSON(source, at: url)
         } catch {
             outcome.diagnostics.append(unreadable(error, file: file, descriptor: descriptor))
             return outcome
@@ -675,7 +691,7 @@ public struct Discovery: Sendable {
 
         let document: TOMLDocument
         do {
-            document = try TOMLDocument.parse(source)
+            document = try parseTOML(source, at: url)
         } catch {
             outcome.diagnostics.append(unreadable(error, file: file, descriptor: descriptor))
             return outcome
@@ -828,9 +844,10 @@ public struct Discovery: Sendable {
     /// Claude Code's permission deny rules, read (and so tracked) from the
     /// settings file a tool switch writes to.
     private func permissionDenyRules(for toolSwitch: ToolSwitch?) -> [String] {
-        guard case .permissionRules(let file, let path)? = toolSwitch,
-              let source = readTracked(file.resolve(home: home)),
-              let document = try? JSONDocument.parse(source)
+        guard case .permissionRules(let file, let path)? = toolSwitch else { return [] }
+        let url = file.resolve(home: home)
+        guard let source = readTracked(url),
+              let document = try? parseJSON(source, at: url)
         else { return [] }
         return document.value(at: path)?.elements?.compactMap(\.stringValue) ?? []
     }
@@ -839,7 +856,7 @@ public struct Discovery: Sendable {
         guard case .denyList(let file, let key, let nameField) = enablement else { return [] }
         let url = file.resolve(home: home)
         guard let source = readTracked(url),
-              let document = try? JSONDocument.parse(source),
+              let document = try? parseJSON(source, at: url),
               let list = document.root[key]?.elements
         else { return [] }
 
