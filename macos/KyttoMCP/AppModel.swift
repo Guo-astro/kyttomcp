@@ -259,33 +259,108 @@ final class AppModel {
         return reload()
     }
 
+    /// Re-reads every client's configuration now, on the main actor.
+    ///
+    /// For the write paths: a command that has just written answers with the
+    /// state it produced, and the next write's digest check needs what this
+    /// read. Anything that only wants to catch up with the disk uses
+    /// `reloadInBackground()` instead.
     @discardableResult
     func reload() -> DiscoveryResult {
-        let discovery = makeDiscovery()
-        let result = discovery.run()
-        cached = result
-        reconcileRestartState(using: result)
-        onStateChanged?()
-        // Re-arm each time: a client that just gained a config directory becomes
-        // watchable only once it exists.
-        watcher.watch(directories: discovery.watchedDirectories())
-        return result
+        // Any background pass still reading started before this one; its
+        // result is older and must not replace this.
+        reloadGeneration += 1
+        let output = Self.discover(discoveryInput(), ledger: ledger)
+        apply(output, alwaysNotify: true)
+        return output.result
     }
 
-    private func makeDiscovery() -> Discovery {
-        let descriptors = ClientRegistry.allIncludingClaudeCodeProjects(
-            home: home,
-            pathOverride: settings.clientPathOverrides[ClientID.claudeCode.rawValue]
-        ) + settings.customConfigSources.map(ClientRegistry.customDescriptor)
-        return Discovery(
-            home: home,
+    /// Re-reads off the main actor and applies the result only if nothing
+    /// newer has been read or written meanwhile. Returns whether the state the
+    /// window shows changed.
+    ///
+    /// Concurrent requests are coalesced by `ReloadScheduler`: one pass at a
+    /// time, and one more after it for everything asked in the meantime.
+    @discardableResult
+    func reloadInBackground() async -> Bool {
+        await reloads.request().changed
+    }
+
+    private lazy var reloads = ReloadScheduler { [weak self] in
+        await self?.backgroundPass() ?? false
+    }
+    private var reloadGeneration = 0
+    private var lastPushedExternalPass = 0
+
+    private func backgroundPass() async -> Bool {
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        let revision = ledger.revision
+        let input = discoveryInput()
+        // A private ledger: what this pass read reaches the digest guard only
+        // together with the state the window is then shown (§6.4).
+        let passLedger = DigestLedger()
+        let output = await Task.detached(priority: .userInitiated) {
+            Self.discover(input, ledger: passLedger)
+        }.value
+
+        // A synchronous reload or a write happened while this pass was
+        // reading. Both are newer than what it read; the write's own watcher
+        // event brings another pass.
+        guard generation == reloadGeneration, revision == ledger.revision else { return false }
+        ledger.adopt(passLedger)
+        return apply(output, alwaysNotify: false)
+    }
+
+    /// Installs a discovery result. Returns whether anything the window or the
+    /// menu bar shows changed, so a re-read that found the same servers — the
+    /// usual outcome when Claude Code rewrites its file after a message — costs
+    /// no redraw.
+    @discardableResult
+    private func apply(_ output: DiscoveryOutput, alwaysNotify: Bool) -> Bool {
+        let previous = cached
+        let previousRestarts = pendingRestarts
+        let previousDismissed = dismissedRestartClients
+        cached = output.result
+        reconcileRestartState(using: output.result)
+        let changed = previous != output.result
+            || pendingRestarts != previousRestarts
+            || dismissedRestartClients != previousDismissed
+        if changed || alwaysNotify { onStateChanged?() }
+        // Re-arm each time: a client that just gained a config directory becomes
+        // watchable only once it exists.
+        watcher.watch(directories: output.watchedDirectories)
+        return changed
+    }
+
+    private nonisolated struct DiscoveryInput: Sendable {
+        let home: URL
+        let settings: KyttoSettings
+        let parkStore: ParkStore
+        let metadata: MetadataStore
+    }
+
+    private nonisolated struct DiscoveryOutput: Sendable {
+        let result: DiscoveryResult
+        let watchedDirectories: [URL]
+    }
+
+    private func discoveryInput() -> DiscoveryInput {
+        DiscoveryInput(home: home, settings: settings, parkStore: parkStore, metadata: metadata)
+    }
+
+    /// Everything a pass does, with nothing borrowed from the main actor.
+    private nonisolated static func discover(_ input: DiscoveryInput, ledger: DigestLedger) -> DiscoveryOutput {
+        let discovery = Discovery(
+            home: input.home,
             locator: SystemAppLocator(),
-            descriptors: descriptors,
             ledger: ledger,
-            parked: parkStore.all(),
-            metadata: metadata.all(),
-            pathOverrides: settings.clientPathOverrides
+            parked: input.parkStore.all(),
+            metadata: input.metadata.all(),
+            pathOverrides: input.settings.clientPathOverrides,
+            additionalDescriptors: input.settings.customConfigSources.map(ClientRegistry.customDescriptor)
         )
+        return DiscoveryOutput(result: discovery.run(), watchedDirectories: discovery.watchedDirectories())
     }
 
     // MARK: - Portable setup (native file selection and secret inputs)
@@ -1498,12 +1573,19 @@ final class AppModel {
     // MARK: - External changes
 
     private func handleExternalChange() {
-        // Kytto's own writes trip the watcher too, so this fires more often than
-        // the user makes changes. Re-reading is cheap and the render is
-        // idempotent, so the honest thing is to reload and let the UI settle on
-        // the truth rather than try to guess which events were ours.
-        reload()
-        onExternalChange?()
+        // Kytto's own writes trip the watcher too, and Claude Code rewrites
+        // `~/.claude.json` after nearly every message, so this fires far more
+        // often than a server changes. The re-read runs off the main actor and
+        // always records the new digests; the window is redrawn only when what
+        // it shows actually changed, and once per pass however many events
+        // that pass answered.
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await reloads.request()
+            guard outcome.changed, outcome.pass > lastPushedExternalPass else { return }
+            lastPushedExternalPass = outcome.pass
+            onExternalChange?()
+        }
     }
 
     enum AppError: LocalizedError {

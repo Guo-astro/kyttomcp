@@ -1,6 +1,6 @@
 import Foundation
 
-public struct DiscoveredClient: Sendable {
+public struct DiscoveredClient: Sendable, Equatable {
     public let id: ClientID
     public let displayName: String
     /// The application (or CLI) is present on this machine.
@@ -30,7 +30,7 @@ public struct DiscoveredClient: Sendable {
     public var toolLimit: ClientToolLimit? = nil
 }
 
-public struct DiscoveryResult: Sendable {
+public struct DiscoveryResult: Sendable, Equatable {
     public let clients: [DiscoveredClient]
     public let servers: [Server]
     public let diagnostics: [Diagnostic]

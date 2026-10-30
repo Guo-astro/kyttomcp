@@ -79,7 +79,7 @@ enum CommandRegistry {
         }
 
         router.register("discovery.refresh") { () -> StateDTO in
-            model.reload()
+            await model.reloadInBackground()
             return StateDTO(model)
         }
 
