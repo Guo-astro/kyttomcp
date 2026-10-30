@@ -219,3 +219,70 @@ extension ToolSwitch {
         return ToolFilter(prefix: prefix, rules: rules, wholeServerPatterns: wholeServer)
     }
 }
+
+// MARK: - Renaming a server
+
+extension ToolSwitch {
+    /// OpenCode's `tools` keys for `oldServer`, respelt for `newServer`.
+    ///
+    /// The rules name the server, so a rename that left them behind would
+    /// switch every tool the user had switched off back on. A key already
+    /// under the new name gives way to the one that moves: the moving rules
+    /// are what the matrix showed for this server. Keys that belong to another
+    /// server whose name merely starts the same way (`github_enterprise_*`
+    /// beside `github`) stay where they are.
+    static func renamingMapRules(
+        in text: String,
+        mapKey: String,
+        serversKey: String,
+        from oldServer: String,
+        to newServer: String
+    ) throws -> String {
+        let oldPrefix = ToolFilter.sanitized(oldServer) + "_"
+        let newPrefix = ToolFilter.sanitized(newServer) + "_"
+        guard oldPrefix != newPrefix else { return text }
+        let document = try JSONDocument.parse(text)
+        guard let members = document.root[mapKey]?.members else { return text }
+
+        let otherPrefixes = (document.root[serversKey]?.keys ?? [])
+            .map { ToolFilter.sanitized($0) + "_" }
+            .filter { $0 != oldPrefix && $0 != newPrefix && $0.hasPrefix(oldPrefix) }
+        func moves(_ key: String) -> Bool {
+            key.hasPrefix(oldPrefix) && !otherPrefixes.contains(where: key.hasPrefix)
+        }
+        func renamed(_ key: String) -> String { newPrefix + key.dropFirst(oldPrefix.count) }
+
+        let moving = members.map(\.key).filter(moves)
+        guard !moving.isEmpty else { return text }
+        var result = text
+        for key in Set(moving.map(renamed)) where !moving.contains(key) && members.contains(where: { $0.key == key }) {
+            result = try JSONDocument.parse(result).removingMember(key, at: [mapKey])
+        }
+        let current = try JSONDocument.parse(result)
+        let edits = (current.root[mapKey]?.members ?? []).filter { moves($0.key) }.map { member in
+            (span: member.keySpan, replacement: JSONText.string(renamed(member.key)))
+        }
+        return current.replacing(edits)
+    }
+
+    /// Claude Code's `mcp__<server>…` permission rules for `oldServer`,
+    /// respelt for `newServer`; every other rule is left as written.
+    static func renamingPermissionRules(
+        in text: String,
+        path: [String],
+        from oldServer: String,
+        to newServer: String
+    ) throws -> String {
+        let old = "mcp__" + ToolFilter.sanitized(oldServer)
+        let new = "mcp__" + ToolFilter.sanitized(newServer)
+        guard old != new else { return text }
+        let document = try JSONDocument.parse(text)
+        let edits = (document.value(at: path)?.elements ?? []).compactMap { element -> (span: JSONSpan, replacement: String)? in
+            guard let rule = element.stringValue else { return nil }
+            let lowered = rule.lowercased(), prefix = old.lowercased()
+            guard lowered == prefix || lowered.hasPrefix(prefix + "__") else { return nil }
+            return (element.span, JSONText.string(new + rule.dropFirst(old.count)))
+        }
+        return edits.isEmpty ? text : document.replacing(edits)
+    }
+}

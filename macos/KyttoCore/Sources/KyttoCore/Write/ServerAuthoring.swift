@@ -540,6 +540,13 @@ public struct ServerAuthoring: Sendable {
                                 guard let member else { throw JSONEditError.pathNotFound([source.serversKey, key]) }
                                 text = document.replacing(member.keySpan, with: JSONText.string(draft.trimmedName))
                                 name = draft.trimmedName
+                                // Tool switches that name the server move with it.
+                                if case .prefixedToolMap(let mapKey)? = descriptors.first(where: { $0.id == clientID })?.toolSwitch {
+                                    text = try ToolSwitch.renamingMapRules(
+                                        in: text, mapKey: mapKey, serversKey: source.serversKey,
+                                        from: key, to: draft.trimmedName
+                                    )
+                                }
                             }
                             return try draft.splicingJSON(into: text, at: [source.serversKey, name], schema: schema(of: clientID))
                         }
@@ -681,7 +688,13 @@ public struct ServerAuthoring: Sendable {
                 let edits = (document.value(at: [key])?.elements ?? []).filter(names).map { element in
                     (span: (element[nameField] ?? element).span, replacement: JSONText.string(newName))
                 }
-                return document.replacing(edits)
+                let renamed = document.replacing(edits)
+                // Single-tool deny rules in the same file name the server too;
+                // left behind, the tools they switched off would come back on.
+                guard case .permissionRules(let rulesFile, let path)? = descriptor.toolSwitch,
+                      rulesFile.resolve(home: home).standardizedFileURL == url.standardizedFileURL
+                else { return renamed }
+                return try ToolSwitch.renamingPermissionRules(in: renamed, path: path, from: name, to: newName)
             }
             record(receipt, for: snapshot, in: &committed)
         }

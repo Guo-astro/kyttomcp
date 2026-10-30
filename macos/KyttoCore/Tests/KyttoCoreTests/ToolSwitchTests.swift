@@ -152,6 +152,39 @@ struct ToolSwitchTests {
         #expect(try harness.text(".claude/settings.json") == before)
     }
 
+    @Test("renaming a server moves the tool switches that name it")
+    func rename() throws {
+        let harness = try ToggleHarness()
+        defer { harness.cleanUp() }
+        try harness.home.write("""
+        {
+          "mcp": {
+            "github": { "type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-github"] },
+            "github_enterprise": { "type": "local", "command": ["npx", "ghe-mcp"] }
+          },
+          "tools": { "github_delete_*": false, "github_create_issue": false, "github_enterprise_push": false, "bash": true }
+        }
+        """, to: ".config/opencode/opencode.json")
+        try harness.home.write(Fixture.claudeCode.text, to: ".claude.json")
+        try harness.home.write(#"{"deniedMcpServers":[],"permissions":{"deny":["mcp__XcodeBuildMCP__build_sim","mcp__Other__x","Bash(rm:*)"]}}"#, to: ".claude/settings.json")
+
+        let github = try harness.server("github")
+        var draft = ServerDraft(editing: github)
+        draft.name = "gh"
+        _ = try harness.authoring.update(draft, originalName: "github", server: github, existing: harness.discover().servers)
+        let tools = try #require(JSONDocument.parse(harness.text(".config/opencode/opencode.json")).root["tools"])
+        #expect(tools.keys == ["gh_delete_*", "gh_create_issue", "github_enterprise_push", "bash"])
+        #expect(try harness.server("gh").toolFilters[.openCode]?.offTools(among: githubTools) == ["create_issue", "delete_branch"])
+
+        let xcode = try harness.server("XcodeBuildMCP")
+        var xcodeDraft = ServerDraft(editing: xcode)
+        xcodeDraft.name = "xcode"
+        _ = try harness.authoring.update(xcodeDraft, originalName: "XcodeBuildMCP", server: xcode, existing: harness.discover().servers)
+        let deny = try JSONDocument.parse(harness.text(".claude/settings.json")).value(at: ["permissions", "deny"])?.elements?.compactMap(\.stringValue)
+        #expect(deny == ["mcp__xcode__build_sim", "mcp__Other__x", "Bash(rm:*)"])
+        #expect(try harness.server("xcode").toolFilters[.claudeCode]?.isOff("build_sim") == true)
+    }
+
     @Test("a tool name listed twice does not trap the lock map")
     func duplicateToolNames() {
         let filter = ToolFilter(prefix: "mcp__s__", wholeServerPatterns: ["mcp__s"])
