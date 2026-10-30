@@ -253,7 +253,14 @@ public enum ClientRegistry {
         in a different file entirely: `~/.claude/settings.json` → `deniedMcpServers`, \
         an array of objects with a `serverName` field. A denied server stays in the \
         config and must still be listed, shown as off.
-        """
+        """,
+        toolSwitch: .permissionRules(
+            file: PlatformPath(
+                darwin: "~/.claude/settings.json",
+                windows: #"%USERPROFILE%\.claude\settings.json"#
+            ),
+            path: ["permissions", "deny"]
+        )
         // No tool limit: MCP tools are deferred behind tool search by default,
         // with a catalog of up to 10,000
         // (https://code.claude.com/docs/en/agent-sdk/tool-search).
@@ -371,7 +378,8 @@ public enum ClientRegistry {
         registrations can bundle `.mcp.json` in the ordinary `mcpServers` shape. \
         Kytto reads the registered or unambiguous installed version, skips \
         ambiguous caches with a diagnostic, and never writes plugin packages.
-        """
+        """,
+        toolSwitch: .entryLists(deny: "disabled_tools", allow: "enabled_tools")
         // No tool limit: none is documented, and MCP tools are deferred behind
         // tool search where the model supports it
         // (https://github.com/openai/codex/pull/29486).
@@ -407,7 +415,8 @@ public enum ClientRegistry {
         point Kytto there with a path override if that is the file you use. \
         Workspace configs (`.agents/mcp_config.json`) are not read.
         """,
-        serverSchema: .antigravity
+        serverSchema: .antigravity,
+        toolSwitch: .entryLists(deny: "disabledTools", allow: "enabledTools")
     )
 
     // MARK: - Devin Desktop (formerly Windsurf)
@@ -473,6 +482,7 @@ public enum ClientRegistry {
         `opencode.jsonc`, `OPENCODE_CONFIG` or project `opencode.json` is not \
         read; use a path override for the first two.
         """,
-        serverSchema: .openCode
+        serverSchema: .openCode,
+        toolSwitch: .prefixedToolMap(key: "tools")
     )
 }

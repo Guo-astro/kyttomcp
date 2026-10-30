@@ -116,6 +116,9 @@ struct ClientDTO: Encodable {
     let scopeLabel: String
     /// How many tools this client hands its model, against its cap if it has one.
     let toolBudget: ClientToolBudgetDTO
+    /// What switching a single tool off writes in this client, or null when
+    /// only Gateway mode can hide its tools (§7.11).
+    let toolSwitchSummary: String?
 
     init(_ client: DiscoveredClient, toolBudget: ClientToolBudget) {
         id = client.id.rawValue
@@ -137,6 +140,7 @@ struct ClientDTO: Encodable {
         configurationScope = client.configurationScope.rawValue
         scopeLabel = client.scopeLabel
         self.toolBudget = ClientToolBudgetDTO(toolBudget)
+        toolSwitchSummary = client.isReadOnly ? nil : ClientRegistry.descriptorIfKnown(for: client.id)?.toolSwitch?.summary
     }
 }
 
@@ -323,6 +327,11 @@ struct ServerDTO: Encodable {
     let tokenWeight: TokenWeightDTO?
     let provenance: MCPProvenanceDTO
     let source: ServerSourceDTO
+    /// Client id → the known tools that client's own files switch off (§7.11).
+    let toolsOff: [String: [String]]
+    /// Client id → tool → the broader rule keeping it off, which a switch for
+    /// that one tool cannot undo.
+    let lockedTools: [String: [String: String]]
 
     nonisolated init(_ server: Server, provenance: MCPProvenance? = nil) {
         health = server.health.map(HealthDTO.init)
@@ -347,6 +356,15 @@ struct ServerDTO: Encodable {
         }
         isBundled = server.isBundled
         hasRelativePath = server.hasRelativePath
+        let known = server.knownTools.map(\.name)
+        toolsOff = Dictionary(uniqueKeysWithValues: server.toolFilters.map { client, filter in
+            (client.rawValue, filter.offTools(among: known))
+        })
+        lockedTools = Dictionary(uniqueKeysWithValues: server.toolFilters.map { client, filter in
+            (client.rawValue, Dictionary(uniqueKeysWithValues: known.compactMap { tool in
+                filter.blockingPattern(for: tool).map { (tool, $0) }
+            }))
+        })
     }
 }
 
@@ -518,6 +536,27 @@ struct GatewayMigrationResultDTO: Encodable {
     @MainActor
     init(_ result: GatewayMigrationResult, model: AppModel) {
         route = GatewayRouteDTO(result.route)
+        backupID = result.backupID
+        pathDisplay = result.pathDisplay
+        state = StateDTO(model)
+    }
+}
+
+struct ToolSwitchResultDTO: Encodable {
+    let serverName: String
+    let clientID: String
+    let disabledTools: [String]
+    let requiresRestart: Bool
+    let backupID: String?
+    let pathDisplay: String
+    let state: StateDTO
+
+    @MainActor
+    init(_ result: ToolSwitchResult, model: AppModel) {
+        serverName = result.serverName
+        clientID = result.clientID.rawValue
+        disabledTools = result.disabledTools
+        requiresRestart = result.requiresRestart
         backupID = result.backupID
         pathDisplay = result.pathDisplay
         state = StateDTO(model)

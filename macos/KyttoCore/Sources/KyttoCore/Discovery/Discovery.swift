@@ -163,6 +163,7 @@ public struct Discovery: Sendable {
                         existing.enabledIn[descriptor.id] = found.enablement
                         existing.definitionsByClient[descriptor.id] =
                             ClientDefinition(from: found.server)
+                        existing.toolFilters[descriptor.id] = found.server.toolFilters[descriptor.id]
                         merged[key] = existing
                     } else {
                         var server = found.server
@@ -611,6 +612,7 @@ public struct Discovery: Sendable {
         // Only the top-level servers key. For Claude Code that deliberately skips
         // `projects.<path>.mcpServers`, which is project scope and out of v1 (§4).
         guard let map = document.root[serversKey], let members = map.members else { return outcome }
+        let permissionDeny = permissionDenyRules(for: descriptor.toolSwitch)
 
         for member in members {
             guard member.value.members != nil else {
@@ -624,12 +626,23 @@ public struct Discovery: Sendable {
                 )
                 continue
             }
-            let server = descriptor.serverSchema.fields(of: member.value).makeServer(
+            var server = descriptor.serverSchema.fields(of: member.value).makeServer(
                 name: member.key,
                 origin: .configFile(descriptor.id),
                 isBundled: false,
                 sourceText: document.slice(member.value.span)
             )
+            let toolFilter: ToolFilter? = switch descriptor.toolSwitch {
+            case .entryLists(let deny, let allow)?:
+                ToolSwitch.entryFilter(deny: deny, allow: allow, in: member.value)
+            case .prefixedToolMap(let key)?:
+                ToolSwitch.mapFilter(document.root[key], serverKey: member.key)
+            case .permissionRules?:
+                ToolSwitch.permissionFilter(permissionDeny, serverKey: member.key)
+            case nil:
+                nil
+            }
+            if let toolFilter, !toolFilter.isEmpty { server.toolFilters[descriptor.id] = toolFilter }
             // A flag on the entry itself (Antigravity's `disabled`, OpenCode's
             // `enabled`); absent means on, as it does for Codex.
             let flagSaysOff = enablement.inlineFlag.map { flag in
@@ -714,12 +727,17 @@ public struct Discovery: Sendable {
 
             let envTable = document.table(at: [serversKey, name, "env"])
             let fields = ServerFields(table: table, envTable: envTable)
-            let server = fields.makeServer(
+            var server = fields.makeServer(
                 name: name,
                 origin: .configFile(descriptor.id),
                 isBundled: false,
                 sourceText: document.serverDefinitionText(name, under: serversKey) ?? ""
             )
+
+            if case .entryLists(let deny, let allow)? = descriptor.toolSwitch {
+                let filter = ToolSwitch.entryFilter(deny: deny, allow: allow, in: table)
+                if !filter.isEmpty { server.toolFilters[descriptor.id] = filter }
+            }
 
             // Absent means on. That is Codex's rule, not a guess: `codex mcp list`
             // reports a server with no `enabled` key as enabled.
@@ -807,6 +825,16 @@ public struct Discovery: Sendable {
     }
 
     /// Names switched off in a separate settings file, normalized for comparison.
+    /// Claude Code's permission deny rules, read (and so tracked) from the
+    /// settings file a tool switch writes to.
+    private func permissionDenyRules(for toolSwitch: ToolSwitch?) -> [String] {
+        guard case .permissionRules(let file, let path)? = toolSwitch,
+              let source = readTracked(file.resolve(home: home)),
+              let document = try? JSONDocument.parse(source)
+        else { return [] }
+        return document.value(at: path)?.elements?.compactMap(\.stringValue) ?? []
+    }
+
     private func deniedNames(for enablement: EnablementStrategy) -> Set<String> {
         guard case .denyList(let file, let key, let nameField) = enablement else { return [] }
         let url = file.resolve(home: home)

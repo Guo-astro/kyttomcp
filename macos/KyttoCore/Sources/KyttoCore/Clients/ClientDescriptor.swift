@@ -273,6 +273,9 @@ public struct ClientDescriptor: Sendable {
     /// How one entry in the editable server map is spelled. JSON clients
     /// mostly agree, and the ones that do not are why this exists (§4).
     public var serverSchema: ServerSchema = .standard
+    /// Where single tools can be switched off in this client's own files, or
+    /// nil when only Gateway can hide them (§7.11).
+    public var toolSwitch: ToolSwitch? = nil
 
     /// The file and key holding servers the user can add, edit and remove.
     ///

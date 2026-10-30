@@ -1300,6 +1300,25 @@ final class AppModel {
         return result
     }
 
+    /// States which of a server's known tools are off in one client (§7.11).
+    func setDisabledTools(_ names: [String], serverID: String, clientID: ClientID) throws -> ToolSwitchResult {
+        guard let server = current().servers.first(where: { $0.id == serverID }) else {
+            throw AppError.unknownServer(serverID)
+        }
+        let service = ToolSwitchService(
+            home: home, writer: ConfigWriter(backups: backups),
+            ledger: ledger, pathOverrides: settings.clientPathOverrides
+        )
+        let result = try service.setDisabledTools(
+            Set(names), among: server.knownTools.map(\.name), server: server, in: clientID
+        )
+        if result.requiresRestart {
+            pendingRestarts[clientID, default: 0] += 1
+        }
+        reload()
+        return result
+    }
+
     func createServer(_ draft: ServerDraft, in clients: [ClientID]) throws -> AuthoringResult {
         let result = try authoring.create(draft, in: clients, existing: current().servers)
         noteRestarts(result)

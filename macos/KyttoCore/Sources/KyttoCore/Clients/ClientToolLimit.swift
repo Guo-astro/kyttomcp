@@ -38,8 +38,8 @@ public struct ClientToolBudget: Equatable, Sendable {
     /// measured, after Gateway masking. A lower bound when anything switched on
     /// has not been measured.
     public let toolCount: Int
-    /// Tools the measured servers have that Gateway masking keeps from this
-    /// client. Already subtracted from `toolCount`.
+    /// Tools the measured servers have that Gateway masking or the client's own
+    /// tool switches keep from this client. Already subtracted from `toolCount`.
     public let maskedToolCount: Int
     /// Servers switched on in this client with no tool list to count — never
     /// checked, failed, remote, or waiting for sign-in.
@@ -88,7 +88,15 @@ public enum ToolBudget {
                 continue
             }
             let route = routes.first { $0.serverID == server.id && $0.clientID == clientID }
-            let visible = route?.exposedTools.map { exposedCount($0, of: server, offered: offered) } ?? offered
+            var visible = route?.exposedTools.map { exposedCount($0, of: server, offered: offered) } ?? offered
+            // Tools the client's own files switch off (§7.11). Only countable by
+            // name, so only with a complete tool list.
+            if let filter = server.toolFilters[clientID], let names = server.health?.tools.map(\.name),
+               names.count >= offered {
+                let exposed = route?.exposedTools.map(Set.init)
+                let survivors = names.filter { exposed?.contains($0) ?? true }
+                visible -= filter.offTools(among: survivors).count
+            }
             count += visible
             masked += offered - visible
         }

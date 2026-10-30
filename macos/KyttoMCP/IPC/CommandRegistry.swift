@@ -231,6 +231,16 @@ enum CommandRegistry {
             return ToggleResultDTO(result, model: model)
         }
 
+        router.register("servers.setDisabledTools") { (payload: SetDisabledToolsPayload) -> ToolSwitchResultDTO in
+            guard let clientID = ClientID(rawValue: payload.clientID) else {
+                throw CommandError.badArgument("Unknown client \(payload.clientID).")
+            }
+            let result = try model.setDisabledTools(
+                payload.disabledTools, serverID: payload.serverID, clientID: clientID
+            )
+            return ToolSwitchResultDTO(result, model: model)
+        }
+
         router.register("restarts.acknowledge") { (payload: AcknowledgePayload) -> StateDTO in
             let clientID: ClientID?
             if let raw = payload.clientID {
@@ -606,6 +616,14 @@ struct EnableGatewayPayload: Decodable {
 
 struct GatewayRoutePayload: Decodable {
     let routeID: String
+}
+
+struct SetDisabledToolsPayload: Decodable {
+    let serverID: String
+    let clientID: String
+    /// The server's known tools that should be off in this client; every other
+    /// known tool ends up on.
+    let disabledTools: [String]
 }
 
 struct ExposedToolsPayload: Decodable {

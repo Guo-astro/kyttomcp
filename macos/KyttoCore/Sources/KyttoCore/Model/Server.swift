@@ -195,6 +195,9 @@ public struct Server: Identifiable, Sendable {
     public var health: HealthResult?
     /// The tools from the last passing check, kept through later failures.
     public var lastPassingTools: [ToolSummary]?
+    /// Each client's own rules for this server's single tools, where its files
+    /// have any to say (§7.11). Absent means every tool stays on.
+    public var toolFilters: [ClientID: ToolFilter] = [:]
     /// What the server offers as far as Kytto knows.
     ///
     /// `health.tools` is empty after a failed check, yet clients keep running

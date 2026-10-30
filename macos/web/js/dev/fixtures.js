@@ -56,6 +56,7 @@ const CLIENTS = [
     configPathDisplay: '~/.claude.json',
     configFormatDisplay: 'JSON',
     offSwitchSummary: OFF_SWITCH.denyList,
+    toolSwitchSummary: "Switching a tool off adds an mcp__<server>__<tool> deny rule to permissions in ~/.claude/settings.json, which removes the tool from Claude Code's context.",
     serverCount: 3,
     schemaQuirks:
       '~/.claude.json also holds per-project history and routinely runs to hundreds of kilobytes. Only the top-level mcpServers is in scope, and enablement lives in ~/.claude/settings.json under deniedMcpServers.',
@@ -92,6 +93,7 @@ const CLIENTS = [
     configPathDisplay: '~/.codex/config.toml',
     configFormatDisplay: 'TOML',
     offSwitchSummary: `${OFF_SWITCH.inlineFlag} ${OFF_SWITCH.plugins}`,
+    toolSwitchSummary: 'Switching a tool off adds it to disabled_tools on the server’s own entry.',
     serverCount: 3,
     schemaQuirks:
       'The only TOML client. Environment variables live in a [mcp_servers.<name>.env] sub-table, so removing a server means removing two tables, and the file also carries dozens of [projects."…"] tables that must not move.',
@@ -821,7 +823,7 @@ const parseAgentImport = (text) => {
 
 const snapshot = () => ({
   clients: CLIENTS.map((client) => ({ ...client, toolBudget: toolBudget(client.id) })),
-  servers: structuredClone(world.servers),
+  servers: structuredClone(world.servers).map((server) => ({ toolsOff: {}, lockedTools: {}, ...server })),
   diagnostics: structuredClone(world.diagnostics),
   pendingRestarts: { ...world.pendingRestarts },
   dismissedRestarts: [...world.dismissedRestarts],
@@ -1587,6 +1589,30 @@ const HANDLERS = {
       requiresRestart: true,
       wasParked: wasParked && !wasAbsent,
       backupID: world.backups[0].id,
+      pathDisplay: PATHS[clientID],
+      state: snapshot(),
+    };
+  },
+
+  'servers.setDisabledTools': ({ serverID, clientID, disabledTools }) => {
+    const target = world.servers.find((entry) => entry.id === serverID);
+    if (!target) throw Object.assign(new Error('No such server'), { code: 'unknownServer' });
+    const client = CLIENTS.find((entry) => entry.id === clientID);
+    if (!client?.toolSwitchSummary) {
+      throw Object.assign(new Error(`${client?.displayName ?? clientID} has no setting for single tools. Use Gateway mode to choose which tools it sees.`), { code: 'notSupported' });
+    }
+    const known = (target.health?.tools ?? []).map((tool) => tool.name);
+    const next = known.filter((name) => disabledTools.includes(name));
+    const previous = target.toolsOff?.[clientID] ?? [];
+    const changed = next.length !== previous.length || next.some((name) => !previous.includes(name));
+    target.toolsOff = { ...(target.toolsOff ?? {}), [clientID]: next };
+    if (changed) recordWrite(clientID);
+    return {
+      serverName: target.name,
+      clientID,
+      disabledTools: next,
+      requiresRestart: changed,
+      backupID: changed ? world.backups[0].id : null,
       pathDisplay: PATHS[clientID],
       state: snapshot(),
     };

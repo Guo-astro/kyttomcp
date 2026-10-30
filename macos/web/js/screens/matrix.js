@@ -39,7 +39,7 @@ import {
   renderUnifyPreview,
 } from './serverDetail.js';
 import { renderServerForm } from './serverForm.js';
-import { renderToolMask } from './toolMask.js';
+import { renderToolMask, renderToolSwitch } from './toolMask.js';
 import { renderSidebar, sidebarResizeHandle } from './sidebar.js';
 import { renderDoctor, renderDoctorFix } from './doctor.js';
 import { renderActivity } from './activity.js';
@@ -309,6 +309,8 @@ function sheetBody(state) {
       return renderGatewayRestore(state);
     case 'toolMask':
       return renderToolMask(state);
+    case 'toolSwitch':
+      return renderToolSwitch(state);
     case 'unifyPreview':
       return renderUnifyPreview(state);
     case 'form':
@@ -720,6 +722,7 @@ function notice(current, leaving = false) {
     action.dataset.clientId = current.action.clientId;
     action.dataset.previousState = current.action.previousState;
     if (current.action.backupId) action.dataset.backupId = current.action.backupId;
+    if (current.action.disabledTools) action.dataset.disabledTools = current.action.disabledTools;
     bar.append(action);
   }
   if (current.kind === 'error') bar.append(bugReportLink());

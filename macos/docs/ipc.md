@@ -192,11 +192,13 @@ attached custom sources follow them with opaque `custom.<uuid>` ids.
 | `configurationScope` | `global` \| `profile` \| `workspace` |
 | `scopeLabel` | Optional user-visible profile or workspace name |
 | `toolBudget` | `{ toolCount, maskedToolCount, unmeasuredServerIDs, limit, state, pastLimitSummary }` — see below |
+| `toolSwitchSummary` | One sentence on what switching a single tool off writes in this client, or null when only Gateway mode can hide its tools (§7.11) |
 
 `toolBudget` counts the tools this client hands its model: every server
 `enabled` in it with a passing health check contributes its measured
-`toolCount`, less whatever its Gateway route's allow list hides
-(`maskedToolCount`, already subtracted). Servers switched on with nothing to
+`toolCount`, less whatever its Gateway route's allow list hides and whatever
+the client's own tool switches keep off (`maskedToolCount`, already
+subtracted). Servers switched on with nothing to
 count — never checked, failed, remote, waiting for sign-in — are named in
 `unmeasuredServerIDs`, and while that list is non-empty `toolCount` is a floor
 the UI prefixes with `≥`. `limit` is the client's documented tool cap from the
@@ -227,6 +229,8 @@ No payload. Servers merged across clients: one entry per normalized name.
 | `hasRelativePath` | The command or an argument is resolved against a working directory, so copying this definition into another client may write cleanly and still not start. The fact only — no path crosses |
 | `tokenWeight` | `{ estimate, method, isMeasured, measuredAt, percentOfContext, referenceContextWindow }`, or null before a health check |
 | `provenance` | `{ sourceKind, packageName, sourceURL, installedVersion, latestVersion, latestCheckedAt, confidence, maintenanceState }` |
+| `toolsOff` | Client id → names of the server's known tools that client's own file keeps off (§7.11). Clients with no rules are absent |
+| `lockedTools` | Client id → `{ tool: rule }` for tools kept off by a broader rule (a glob, a whole-server deny) that switching one tool cannot undo |
 
 `isMeasured` is what decides whether the UI writes "~" in front of a token
 figure. It is true when a real vocabulary produced the number and false when the
@@ -428,6 +432,34 @@ Errors worth handling by code:
 | `changed on disk` | Someone else edited the file. Nothing was written. Refresh, then retry. |
 | `cannot be copied` | A Claude Desktop extension is an installed bundle, not a portable definition. |
 | `installed plugin` | A Codex plugin provides this server. Its definition is in a cache the client rewrites, so there is nothing here to toggle. |
+
+### `servers.setDisabledTools` → `ToolSwitchResultDTO`
+
+```json
+{ "serverID": "github", "clientID": "codex", "disabledTools": ["delete_branch", "create_issue"] }
+```
+
+States which of the server's known tools (from its last passing check) are off
+in one client's own configuration (§7.11); every other known tool ends up on,
+and tools Kytto does not know are left alone. One guarded write with one
+backup: Codex `disabled_tools` (or `enabled_tools` when the table has an allow
+list), Antigravity `disabledTools`/`enabledTools`, OpenCode's top-level `tools`
+map (`<server>_<tool>: false`), Claude Code `permissions.deny` rules
+(`mcp__<server>__<tool>`) in `~/.claude/settings.json`. A save that changes
+nothing writes nothing (`requiresRestart: false`, `backupID: null`). Undo is the
+same command with the previous `toolsOff` list.
+
+```json
+{ "serverName": "github", "clientID": "codex", "disabledTools": ["create_issue", "delete_branch"],
+  "requiresRestart": true, "backupID": "config.toml.2026-10-30-101500-120.bak",
+  "pathDisplay": "~/.codex/config.toml", "state": { ... } }
+```
+
+| Message contains | Meaning |
+|---|---|
+| `no setting for single tools` | The client cannot say this in its files; offer Gateway mode instead. |
+| `is kept off by the rule` | A glob or whole-server rule covers this tool; nothing was written. |
+| `changed on disk` | As for every write. |
 
 ### `servers.unifyPreview` → `UnifyPreviewDTO`
 
