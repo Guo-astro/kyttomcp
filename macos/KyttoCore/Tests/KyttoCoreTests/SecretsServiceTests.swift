@@ -424,6 +424,27 @@ struct SecretExposureTests {
         #expect(record.exposure.contains { if case .insideGitRepository = $0 { true } else { false } })
     }
 
+    @Test("every secret in a file inside a git working tree is called out")
+    func gitRepositoryAnsweredOncePerFile() throws {
+        let harness = try ToggleHarness()
+        defer { harness.cleanUp() }
+        // Git is asked once per file per scan; each secret still says so.
+        try harness.home.write(
+            #"{"mcpServers": {"github": {"command": "npx", "env": {"API_KEY": "value-aaaaaaaaaaaa", "SECRET_TOKEN": "value-bbbbbbbbbbbb"}}}}"#,
+            to: ".cursor/mcp.json"
+        )
+        try FileManager.default.createDirectory(
+            at: harness.home.root.appending(path: ".git"),
+            withIntermediateDirectories: true
+        )
+
+        let records = harness.secrets().scan(servers: harness.discover().servers)
+        #expect(records.count == 2)
+        #expect(records.allSatisfy { record in
+            record.exposure.contains { if case .insideGitRepository = $0 { true } else { false } }
+        })
+    }
+
     @Test("a config with tight permissions and no repository is clean")
     func noExposure() throws {
         let harness = try ToggleHarness()

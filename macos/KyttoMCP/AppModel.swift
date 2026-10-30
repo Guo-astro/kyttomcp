@@ -661,6 +661,8 @@ final class AppModel {
     /// digest is retained and it never crosses the IPC boundary.
     private func restartSnapshots(from result: DiscoveryResult) -> [ClientID: RestartSnapshot] {
         var snapshots: [ClientID: RestartSnapshot] = [:]
+        // Read once, not once per client: this runs on every reload.
+        let routes = (try? gatewayRoutes.all()) ?? []
 
         for clientID in ClientID.allCases {
             var entries: RestartSnapshot = [:]
@@ -679,7 +681,7 @@ final class AppModel {
 
             // Gateway route metadata changes also require the owning client to
             // restart, even though the server map itself may stay byte-identical.
-            for route in (try? gatewayRoutes.all()) ?? [] where route.clientID == clientID {
+            for route in routes where route.clientID == clientID {
                 let routeState = [
                     route.serverID,
                     route.exposedTools?.joined(separator: "\u{1}") ?? "*",
