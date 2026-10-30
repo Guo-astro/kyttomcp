@@ -9,6 +9,12 @@ without a backup.
 
 ## [Unreleased]
 
+### Added (macOS)
+
+- Three new clients: Google Antigravity, Devin Desktop (Windsurf until June 2026) and OpenCode. Their servers appear in the matrix, and you can switch them on and off, add, edit, copy and remove them, use them in profiles and import them from a portable setup, with the usual preview, backup and Undo. Switching a server off keeps its definition in the file (`"disabled": true` in Antigravity and Devin Desktop, `"enabled": false` in OpenCode), so nothing has to be stored aside.
+- Copying a server between clients writes it the way the target client expects: a remote endpoint becomes `serverUrl` in Antigravity, OpenCode gets its own `type`/`command`/`environment` entry, and the source client's on/off and tool settings stay behind. A copy that would lose headers, a working directory or sign-in settings is refused with the settings named, and a legacy SSE server is not written into Antigravity, which accepts only Streamable HTTP.
+- Remote checks resolve OpenCode's `{env:VAR}` placeholders in headers.
+
 ## [1.0.9] — 2026-10-24
 
 Support for the MCP 2026-07-28 revision and the fixes from a full review of the

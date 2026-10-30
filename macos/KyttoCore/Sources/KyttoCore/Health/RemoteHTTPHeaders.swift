@@ -72,7 +72,13 @@ public enum RemoteHTTPHeaders {
     private static func expand(_ value: String, environment: [String: String]) throws -> String {
         var result = ""
         var remaining = value[...]
-        while let open = remaining.range(of: "${") {
+        // `${VAR}` and `${env:VAR}` in most clients; OpenCode writes `{env:VAR}`.
+        func nextPlaceholder() -> Range<Substring.Index>? {
+            [remaining.range(of: "${"), remaining.range(of: "{env:")]
+                .compactMap { $0 }
+                .min { $0.lowerBound < $1.lowerBound }
+        }
+        while let open = nextPlaceholder() {
             result += remaining[..<open.lowerBound]
             guard let close = remaining[open.upperBound...].firstIndex(of: "}") else {
                 throw RemoteHTTPError.unresolvedCredential

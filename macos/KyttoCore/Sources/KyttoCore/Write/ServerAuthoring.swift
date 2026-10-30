@@ -27,9 +27,13 @@ public enum AuthoringError: Error, LocalizedError, Equatable {
     case noSourceForClient(ClientID)
     case notFound(String)
     case rollbackFailed(original: String, rollback: String)
+    /// The client only accepts Streamable HTTP for remote servers.
+    case sseNotAccepted(client: String)
 
     public var errorDescription: String? {
         switch self {
+        case .sseNotAccepted(let client):
+            "\(client) only connects to remote servers over Streamable HTTP, not the legacy HTTP+SSE transport. Use the server's Streamable HTTP endpoint, or leave \(client) out."
         case .invalid(let errors):
             errors.compactMap(\.errorDescription).joined(separator: " ")
         case .notEditable(let name):
@@ -154,7 +158,7 @@ public struct ServerAuthoring: Sendable {
         for clientID in parked {
             guard let entry = parkStore.parked(clientID: clientID, serverName: server.name),
                   descriptors.first(where: { $0.id == clientID })?.editableServerMap?.format == .json,
-                  let text = try? draft.splicingJSON(into: entry.sourceText, at: []),
+                  let text = try? draft.splicingJSON(into: entry.sourceText, at: [], schema: schema(of: clientID)),
                   (try? parkStore.park(
                       clientID: clientID,
                       serverName: renamedFrom == nil ? entry.serverName : draft.trimmedName,
@@ -242,7 +246,7 @@ public struct ServerAuthoring: Sendable {
                 try parkStore.park(
                     clientID: clientID,
                     serverName: entry.serverName,
-                    sourceText: draft.splicingJSON(into: entry.sourceText, at: [])
+                    sourceText: draft.splicingJSON(into: entry.sourceText, at: [], schema: schema(of: clientID))
                 )
                 result.parkedUpdated.append(clientID)
             } catch {
@@ -312,9 +316,12 @@ public struct ServerAuthoring: Sendable {
                         pathDisplay: target.snapshot.pathDisplay, expecting: expecting
                     ) { document in
                         let name = try document.serverKey(for: server.id, under: source.serversKey) ?? server.name
+                        // OpenCode keeps the arguments after the command in one
+                        // array, so the model's argument N is element N + 1.
+                        let isArgv = schema(of: target.clientID).shape == .openCode
                         return try document.replacingString(
-                            inArrayAt: [source.serversKey, name, "args"],
-                            position: edit.index,
+                            inArrayAt: [source.serversKey, name, isArgv ? "command" : "args"],
+                            position: isArgv ? edit.index + 1 : edit.index,
                             expecting: edit.expected,
                             with: edit.replacement
                         )
@@ -483,6 +490,10 @@ public struct ServerAuthoring: Sendable {
         to clients: [ClientID],
         replacing oldName: String?
     ) throws -> AuthoringResult {
+        if draft.transport == .sse,
+           let refusing = descriptors.first(where: { clients.contains($0.id) && !$0.serverSchema.acceptsSSE }) {
+            throw AuthoringError.sseNotAccepted(client: refusing.displayName)
+        }
         let targets = try editableTargets(for: clients)
         let denySnapshots: [String: FileSnapshot]
         if let oldName {
@@ -530,7 +541,7 @@ public struct ServerAuthoring: Sendable {
                                 text = document.replacing(member.keySpan, with: JSONText.string(draft.trimmedName))
                                 name = draft.trimmedName
                             }
-                            return try draft.splicingJSON(into: text, at: [source.serversKey, name])
+                            return try draft.splicingJSON(into: text, at: [source.serversKey, name], schema: schema(of: clientID))
                         }
 
                         // New to this file: the definition has to be rendered.
@@ -551,7 +562,7 @@ public struct ServerAuthoring: Sendable {
                         return try current.settingMember(
                             draft.trimmedName,
                             at: [source.serversKey],
-                            to: draft.definition(baseIndent: baseIndent, unit: unit)
+                            to: draft.definition(baseIndent: baseIndent, unit: unit, schema: schema(of: clientID))
                         )
                     }
                 case .toml:
@@ -814,6 +825,10 @@ public struct ServerAuthoring: Sendable {
     /// Whether this client's copy of `server` is one Kytto is holding rather
     /// than one in the file. Both have to be true: a park the file has since
     /// overtaken — the definition put back by hand — is stale, and the file wins.
+    private func schema(of clientID: ClientID) -> ServerSchema {
+        descriptors.first { $0.id == clientID }?.serverSchema ?? .standard
+    }
+
     private func isParked(_ server: Server, in clientID: ClientID) -> Bool {
         server.enabledIn[clientID] == .disabled
             && parkStore.parked(clientID: clientID, serverName: server.name) != nil

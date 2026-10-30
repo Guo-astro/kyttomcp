@@ -282,14 +282,13 @@ public struct Discovery: Sendable {
     /// from. Codex never parks — its servers stay in the file when switched off —
     /// but the store is per-client and nothing else guarantees that stays true.
     private func parkedFields(_ entry: ParkStore.Entry) -> ServerFields? {
-        let format = descriptors
-            .first { $0.id == entry.clientID }?
-            .editableServerMap?.format ?? .json
+        let descriptor = descriptors.first { $0.id == entry.clientID }
+        let format = descriptor?.editableServerMap?.format ?? .json
 
         switch format {
         case .json:
             guard let document = try? JSONDocument.parse(entry.sourceText) else { return nil }
-            return ServerFields(node: document.root)
+            return (descriptor?.serverSchema ?? .standard).fields(of: document.root)
         case .toml:
             guard let document = try? TOMLDocument.parse(entry.sourceText),
                   let table = document.tables.first(where: { $0.headerSpan != nil })
@@ -625,17 +624,22 @@ public struct Discovery: Sendable {
                 )
                 continue
             }
-            let server = ServerFields(node: member.value).makeServer(
+            let server = descriptor.serverSchema.fields(of: member.value).makeServer(
                 name: member.key,
                 origin: .configFile(descriptor.id),
                 isBundled: false,
                 sourceText: document.slice(member.value.span)
             )
+            // A flag on the entry itself (Antigravity's `disabled`, OpenCode's
+            // `enabled`); absent means on, as it does for Codex.
+            let flagSaysOff = enablement.inlineFlag.map { flag in
+                member.value[flag.key]?.boolValue.map { $0 != flag.onValue } ?? false
+            } ?? false
             outcome.servers.append(
                 FoundServer(
                     name: member.key,
                     server: server,
-                    enablement: denied.contains(Server.identity(for: member.key)) ? .disabled : .enabled
+                    enablement: flagSaysOff || denied.contains(Server.identity(for: member.key)) ? .disabled : .enabled
                 )
             )
         }

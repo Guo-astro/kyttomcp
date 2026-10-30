@@ -270,7 +270,27 @@ fallback.
 | VS Code | user-level MCP config |
 | Codex | `~/.codex/config.toml` (`[mcp_servers.<name>]`)<br>Windows `%USERPROFILE%\.codex\config.toml` |
 
-Deferred to v1.1: Windsurf.
+### Added in 1.0.9.1
+
+| Client | Config location | Off switch |
+|---|---|---|
+| Antigravity | `~/.gemini/config/mcp_config.json` (`mcpServers`)<br>Windows `%USERPROFILE%\.gemini\config\mcp_config.json` | `"disabled": true` on the entry |
+| Devin Desktop (Windsurf until June 2026) | `~/.config/devin/mcp_config.json` (`mcpServers`)<br>Windows `%APPDATA%\devin\mcp_config.json` | `"disabled": true` on the entry |
+| OpenCode | `~/.config/opencode/opencode.json` (`mcp`)<br>Windows `%USERPROFILE%\.config\opencode\opencode.json` | `"enabled": false` on the entry |
+
+These three are JSON, but they do not all spell an entry the way the first
+five do, so the per-server shape is data on the descriptor (`ServerSchema`)
+next to the path and the off switch. Antigravity writes a remote endpoint as
+`serverUrl`, rejects a `type` and accepts only Streamable HTTP; Devin Desktop
+states only the legacy transport, as `transport: "sse"`; OpenCode has its own
+entry — `type: local|remote`, one argv array in `command`, `environment`. A copy
+between two `mcpServers`-shaped clients respells just the keys they disagree on
+and keeps `headers`, `cwd` and unknown keys; a copy into or out of OpenCode is
+rendered from the model and refused when it would drop headers, a working
+directory or OAuth settings. A copy never carries the source client's own
+`disabled`/`enabled`/`enabledTools`/`disabledTools` state. Workspace and project
+configs of these clients are not read, and Gateway mode does not support
+OpenCode yet.
 
 **Codex is the client that proves §4's point.** It is the only one in TOML, so
 `format` on the source descriptor is real rather than aspirational, and the
@@ -313,7 +333,7 @@ Config schemas differ between clients. Normalize into an internal model on read,
 
 ### Scope decision (v1)
 
-The five built-in clients remain global/user-level and writable. A user may also
+The built-in clients remain global/user-level and writable. A user may also
 explicitly attach a named JSON, JSONC or TOML configuration as a **read-only
 custom source** and label it `Global`, `Profile` or `Workspace`. Kytto recognizes
 only tested top-level server maps (`mcpServers`, `servers`, `mcp_servers`), shows

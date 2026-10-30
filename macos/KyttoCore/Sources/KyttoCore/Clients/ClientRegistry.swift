@@ -12,6 +12,9 @@ public enum ClientRegistry {
         cursor,
         vsCode,
         codex,
+        antigravity,
+        devinDesktop,
+        openCode,
     ]
 
     public static func descriptor(for id: ClientID) -> ClientDescriptor {
@@ -372,5 +375,104 @@ public enum ClientRegistry {
         // No tool limit: none is documented, and MCP tools are deferred behind
         // tool search where the model supports it
         // (https://github.com/openai/codex/pull/29486).
+    )
+
+    // MARK: - Google Antigravity
+
+    static let antigravity = ClientDescriptor(
+        id: .antigravity,
+        displayName: "Antigravity",
+        iconAsset: "client-antigravity",
+        bundleIdentifiers: ["com.google.antigravity"],
+        executableNames: ["agy", "antigravity"],
+        sources: [
+            .serverMap(
+                file: PlatformPath(
+                    darwin: "~/.gemini/config/mcp_config.json",
+                    windows: #"%USERPROFILE%\.gemini\config\mcp_config.json"#
+                ),
+                format: .json,
+                serversKey: "mcpServers",
+                enablement: .inlineDisabledFlag(key: "disabled")
+            )
+        ],
+        schemaQuirks: """
+        The `mcpServers` shape with three differences that matter: a remote \
+        endpoint is `serverUrl` (`url` is read too), a `type` field is rejected, \
+        and remote servers must speak Streamable HTTP — the legacy HTTP+SSE \
+        transport is not accepted. `"disabled": true` switches a server off \
+        without removing it, and `enabledTools`/`disabledTools` filter its \
+        tools; Kytto keeps both. The file is shared by the Antigravity app, IDE \
+        and CLI. Older releases kept it at `~/.gemini/antigravity/mcp_config.json`; \
+        point Kytto there with a path override if that is the file you use. \
+        Workspace configs (`.agents/mcp_config.json`) are not read.
+        """,
+        serverSchema: .antigravity
+    )
+
+    // MARK: - Devin Desktop (formerly Windsurf)
+
+    static let devinDesktop = ClientDescriptor(
+        id: .devinDesktop,
+        displayName: "Devin Desktop",
+        iconAsset: "client-devin",
+        // Windsurf became Devin Desktop on 2 June 2026 and kept its app.
+        bundleIdentifiers: ["com.exafunction.windsurf"],
+        executableNames: ["devin", "windsurf"],
+        sources: [
+            .serverMap(
+                file: PlatformPath(
+                    darwin: "~/.config/devin/mcp_config.json",
+                    windows: #"%APPDATA%\devin\mcp_config.json"#
+                ),
+                format: .json,
+                serversKey: "mcpServers",
+                enablement: .inlineDisabledFlag(key: "disabled")
+            )
+        ],
+        schemaQuirks: """
+        Windsurf, renamed Devin Desktop in June 2026. The user-level \
+        `mcp_config.json` uses the `mcpServers` shape; a remote server is a \
+        `url`, and only the legacy SSE transport is stated, as `transport: \
+        "sse"`. `"disabled": true` switches a server off without removing it. \
+        Windsurf kept the same shape at `~/.codeium/windsurf/mcp_config.json`, \
+        which Devin Desktop migrates on first launch; a Windsurf install that \
+        has not been migrated can be pointed at with a path override. Project \
+        configs (`.devin/mcp_config.json`) are not read.
+        """,
+        serverSchema: .devin
+    )
+
+    // MARK: - OpenCode
+
+    static let openCode = ClientDescriptor(
+        id: .openCode,
+        displayName: "OpenCode",
+        iconAsset: "client-opencode",
+        bundleIdentifiers: ["ai.opencode.desktop"],
+        executableNames: ["opencode"],
+        sources: [
+            .serverMap(
+                file: PlatformPath(
+                    darwin: "~/.config/opencode/opencode.json",
+                    windows: #"%USERPROFILE%\.config\opencode\opencode.json"#
+                ),
+                format: .json,
+                serversKey: "mcp",
+                enablement: .inlineFlag(key: "enabled")
+            )
+        ],
+        schemaQuirks: """
+        A schema of its own, under `mcp` rather than `mcpServers`: \
+        `type: "local"` with the command and its arguments as one array in \
+        `command` and variables in `environment`, or `type: "remote"` with a \
+        `url`. `enabled: false` switches a server off and keeps it. The file is \
+        JSONC — comments and trailing commas survive a write — and holds \
+        OpenCode's whole configuration, including the `tools` map that \
+        switches off single MCP tools as `<server>_<tool>`. A global \
+        `opencode.jsonc`, `OPENCODE_CONFIG` or project `opencode.json` is not \
+        read; use a path override for the first two.
+        """,
+        serverSchema: .openCode
     )
 }

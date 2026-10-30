@@ -167,24 +167,38 @@ public struct ServerDraft: Equatable, Sendable {
     /// `type` is written only for HTTP and SSE. Every client understands a bare
     /// `command` as stdio, but not all of them have always understood
     /// `"type": "stdio"`, so the quieter form is the portable one.
-    public func definition(baseIndent: String, unit: String) -> String {
+    ///
+    /// - Parameter schema: how the target client spells an entry. Antigravity
+    ///   and Devin Desktop leave Streamable HTTP unstated; OpenCode writes the
+    ///   command and its arguments as one array.
+    public func definition(baseIndent: String, unit: String, schema: ServerSchema = .standard) -> String {
         var fields: [JSONBuildValue.Field] = []
+        let command = command.trimmingCharacters(in: .whitespaces)
+        let url = url.trimmingCharacters(in: .whitespaces)
 
-        switch transport {
-        case .stdio:
-            fields.append(.init("command", .string(command.trimmingCharacters(in: .whitespaces))))
+        switch (schema.shape, transport) {
+        case (.mcpServers, .stdio):
+            fields.append(.init("command", .string(command)))
             if !args.isEmpty {
                 fields.append(.init("args", .array(args.map { .string($0) })))
             }
-        case .http, .sse:
-            fields.append(.init("type", .string(transport.rawValue)))
-            fields.append(.init("url", .string(url.trimmingCharacters(in: .whitespaces))))
+        case (.mcpServers, .http), (.mcpServers, .sse):
+            if let key = schema.transportKey, schema.statesDefaultTransport || transport != .http {
+                fields.append(.init(key, .string(transport.rawValue)))
+            }
+            fields.append(.init(schema.remoteURLKey, .string(url)))
+        case (.openCode, .stdio):
+            fields.append(.init("type", .string("local")))
+            fields.append(.init("command", .array(([command] + args).map { .string($0) })))
+        case (.openCode, .http), (.openCode, .sse):
+            fields.append(.init("type", .string("remote")))
+            fields.append(.init("url", .string(url)))
         }
 
         let realEnv = realEnvironment
         if !realEnv.isEmpty {
             fields.append(
-                .init("env", .object(realEnv.map { .init($0.key, .string(valueForNewKey($0))) }))
+                .init(schema.environmentKey, .object(realEnv.map { .init($0.key, .string(valueForNewKey($0))) }))
             )
         }
 
@@ -229,7 +243,10 @@ extension ServerDraft {
     ///
     /// - Parameter path: where the definition object sits — `[serversKey, name]`
     ///   in a config file, `[]` for a parked copy, which is the object alone.
-    public func splicingJSON(into source: String, at path: [String]) throws -> String {
+    public func splicingJSON(into source: String, at path: [String], schema: ServerSchema = .standard) throws -> String {
+        if schema.shape == .openCode {
+            return try splicingOpenCode(into: source, at: path)
+        }
         var text = source
         let unit = IndentStyle.detect(in: source).text
 
@@ -243,11 +260,15 @@ extension ServerDraft {
         let initial = try definition()
         // A field the draft describes, spelled twice, would make every
         // comparison below a guess about which copy the client reads.
-        for key in Self.describedJSONFields {
+        for key in Self.describedJSONFields + schema.remoteURLKeys + [schema.transportKey].compactMap({ $0 }) {
             _ = try JSONDocument.soleMember(key, in: initial.members, at: path)
         }
-        let existing = ServerFields(node: initial.node)
+        let existing = schema.fields(of: initial.node)
         let existingTransport = Self.transport(of: existing)
+        // The endpoint stays under the key this entry already uses: Antigravity
+        // reads `url` as well as its own `serverUrl`.
+        let urlKey = schema.remoteURLKeys.first { initial.node[$0] != nil } ?? schema.remoteURLKey
+        let typeKeys = ["type", schema.transportKey].compactMap { $0 }
 
         /// Rendered to sit among the definition's own members: on one line if
         /// the definition is written on one line, indented like its members
@@ -273,8 +294,7 @@ extension ServerDraft {
         // Fields that describe the other transport go only when the transport
         // actually changes; a definition that already carries both keeps both.
         if transport == .stdio, existingTransport != .stdio {
-            try remove("url")
-            try remove("type")
+            for key in schema.remoteURLKeys + typeKeys { try remove(key) }
         } else if transport != .stdio, existingTransport == .stdio {
             try remove("command")
             try remove("args")
@@ -292,43 +312,134 @@ extension ServerDraft {
                 try set("args", render(.array(args.map { .string($0) })))
             }
         case .http, .sse:
-            if existingTransport != transport { try set("type", JSONText.string(transport.rawValue)) }
+            if existingTransport != transport {
+                // A `type` already in the file is kept truthful; a schema that
+                // leaves Streamable HTTP unstated only ever writes the exception.
+                let present = typeKeys.filter { initial.node[$0] != nil }
+                for key in present { try set(key, JSONText.string(transport.rawValue)) }
+                if present.isEmpty, let key = schema.transportKey,
+                   schema.statesDefaultTransport || transport != .http {
+                    try set(key, JSONText.string(transport.rawValue))
+                }
+            }
+            let url = url.trimmingCharacters(in: .whitespaces)
+            if existing.url != url { try set(urlKey, JSONText.string(url)) }
+        }
+
+        return try splicingJSONEnvironment(into: text, at: path, key: "env")
+    }
+
+    /// OpenCode's entry: `type`, one argv array in `command`, `environment`.
+    /// Same rules as `splicingJSON` — only what the draft describes is touched,
+    /// and `enabled`, `timeout`, `headers`, `oauth` and comments stay put.
+    private func splicingOpenCode(into source: String, at path: [String]) throws -> String {
+        var text = source
+        let document = try JSONDocument.parse(text)
+        guard let node = document.value(at: path) else { throw JSONEditError.pathNotFound(path) }
+        guard let members = node.members else { throw JSONEditError.notAnObject(path) }
+        for key in ["type", "command", "url", "environment"] {
+            _ = try JSONDocument.soleMember(key, in: members, at: path)
+        }
+        let existing = ServerSchema.openCode.fields(of: node)
+        let existingTransport = Self.transport(of: existing)
+        let unit = IndentStyle.detect(in: source).text
+
+        func set(_ key: String, _ raw: String) throws {
+            text = try JSONDocument.parse(text).settingMember(key, at: path, to: raw)
+        }
+        func remove(_ key: String) throws {
+            text = try JSONDocument.parse(text).removingMember(key, at: path)
+        }
+
+        if (transport == .stdio) != (existingTransport == .stdio) {
+            try remove(transport == .stdio ? "url" : "command")
+        }
+        let type = transport == .stdio ? "local" : "remote"
+        if node["type"]?.stringValue != type { try set("type", JSONText.string(type)) }
+
+        switch transport {
+        case .stdio:
+            let argv = [command.trimmingCharacters(in: .whitespaces)] + args
+            if node["command"]?.elements?.compactMap(\.stringValue) != argv
+                || node["command"]?.elements?.count != argv.count {
+                let current = try JSONDocument.parse(text)
+                guard let entry = current.value(at: path), let first = entry.members?.first else {
+                    throw JSONEditError.pathNotFound(path)
+                }
+                let oneLine = !current.containsNewline(from: entry.span.start, to: entry.span.end)
+                let indent = current.lineIndent(at: first.span.start)
+                try set("command", oneLine
+                    ? JSONBuilder.render(.array(argv.map { .string($0) }))
+                    : JSONBuilder.render(.array(argv.map { .string($0) }), baseIndent: indent, unit: unit))
+            }
+        case .http, .sse:
             let url = url.trimmingCharacters(in: .whitespaces)
             if existing.url != url { try set("url", JSONText.string(url)) }
+        }
+
+        return try splicingJSONEnvironment(into: text, at: path, key: "environment")
+    }
+
+    /// Environment, key by key, for the object at `path`.
+    private func splicingJSONEnvironment(into source: String, at path: [String], key envKey: String) throws -> String {
+        var text = source
+        let unit = IndentStyle.detect(in: source).text
+        func definition() throws -> (document: JSONDocument, node: JSONNode, members: [JSONMember]) {
+            let document = try JSONDocument.parse(text)
+            guard let node = document.value(at: path) else { throw JSONEditError.pathNotFound(path) }
+            guard let members = node.members else { throw JSONEditError.notAnObject(path) }
+            return (document, node, members)
+        }
+        func render(_ value: JSONBuildValue) throws -> String {
+            let current = try definition()
+            let oneLine = !current.members.isEmpty
+                && !current.document.containsNewline(from: current.node.span.start, to: current.node.span.end)
+            if oneLine, case .object(let fields) = value {
+                return JSONText.inlineObject(fields.map { ($0.key, JSONBuilder.render($0.value)) })
+            }
+            let indent = current.members.first.map { current.document.lineIndent(at: $0.span.start) }
+                ?? current.document.lineIndent(at: current.node.span.start) + unit
+            return JSONBuilder.render(value, baseIndent: oneLine ? "" : indent, unit: unit)
+        }
+        func set(_ key: String, _ raw: String, under sub: [String] = []) throws {
+            text = try JSONDocument.parse(text).settingMember(key, at: path + sub, to: raw)
+        }
+        func remove(_ key: String, under sub: [String] = []) throws {
+            text = try JSONDocument.parse(text).removingMember(key, at: path + sub)
         }
 
         // Environment, key by key. A value of nil is the UI saying "keep what is
         // there" (§6), which for a key already in this file means not touching
         // it at all — including values that are not strings.
         let wanted = realEnvironment
-        let envNode = try definition().node["env"]
+        let envNode = try definition().node[envKey]
         let fileValues = Dictionary(
             (envNode?.members ?? []).compactMap { member in member.value.stringValue.map { (member.key, $0) } },
             uniquingKeysWith: { _, last in last }
         )
         if let envMembers = envNode?.members {
             if wanted.isEmpty {
-                if !envMembers.isEmpty { try remove("env") }
+                if !envMembers.isEmpty { try remove(envKey) }
             } else {
                 let keys = Set(wanted.map(\.key))
                 for member in envMembers where !keys.contains(member.key) {
-                    try remove(member.key, under: ["env"])
+                    try remove(member.key, under: [envKey])
                 }
                 for entry in wanted {
-                    let current = try definition().node["env"]?.members?.filter { $0.key == entry.key }
+                    let current = try definition().node[envKey]?.members?.filter { $0.key == entry.key }
                     guard current?.count ?? 0 <= 1 else {
-                        throw JSONEditError.duplicateKey(path + ["env", entry.key])
+                        throw JSONEditError.duplicateKey(path + [envKey, entry.key])
                     }
                     if let present = current?.first {
                         guard let value = entry.value, present.value.stringValue != value else { continue }
-                        try set(entry.key, JSONText.string(value), under: ["env"])
+                        try set(entry.key, JSONText.string(value), under: [envKey])
                     } else {
-                        try set(entry.key, JSONText.string(valueForNewKey(entry, fileValues: fileValues)), under: ["env"])
+                        try set(entry.key, JSONText.string(valueForNewKey(entry, fileValues: fileValues)), under: [envKey])
                     }
                 }
             }
         } else if !wanted.isEmpty {
-            try set("env", render(.object(wanted.map { .init($0.key, .string(valueForNewKey($0))) })))
+            try set(envKey, render(.object(wanted.map { .init($0.key, .string(valueForNewKey($0))) })))
         }
 
         return text

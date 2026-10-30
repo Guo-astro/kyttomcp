@@ -209,7 +209,8 @@ public struct SecretsService: Sendable {
                             continue
                         }
                         text = try Self.replacingEnvironmentValue(
-                            record.key, with: newValue, in: current, at: [source.serversKey, name]
+                            record.key, with: newValue, in: current, at: [source.serversKey, name],
+                            environmentKey: descriptor.serverSchema.environmentKey
                         )
                     }
                     return text
@@ -303,9 +304,10 @@ public struct SecretsService: Sendable {
         _ key: String,
         with value: String,
         in document: JSONDocument,
-        at path: [String]
+        at path: [String],
+        environmentKey: String = "env"
     ) throws -> String {
-        let envPath = path + ["env"]
+        let envPath = path + [environmentKey]
         guard let members = document.value(at: envPath)?.members,
               let member = try JSONDocument.soleMember(key, in: members, at: envPath)
         else { throw JSONEditError.pathNotFound(envPath + [key]) }

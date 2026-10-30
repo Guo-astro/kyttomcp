@@ -107,6 +107,34 @@ struct PortableSetupTests {
         #expect(throws: PortableSetupError.stalePreview) { try service.apply(previewID: preview.id) }
     }
 
+    @Test("a server imported switched off arrives off in Antigravity and OpenCode, in their own shapes")
+    func flagClientsImport() throws {
+        let source = try ToggleHarness()
+        let destination = try ToggleHarness()
+        defer { source.cleanUp(); destination.cleanUp() }
+        try source.home.write(#"{"mcpServers":{"memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"env":{"KEY":"original-secret"}}}}"#, to: ".cursor/mcp.json")
+        let summary = try source.portable.export(to: source.portableFile, servers: source.discover().servers)
+        let service = destination.portable
+        let preview = try service.preview(file: source.portableFile, targetClients: [.antigravity, .openCode], values: inputValues(summary))
+        let result = try service.apply(previewID: preview.id)
+        #expect(Set(result.changedClients) == [.antigravity, .openCode])
+        #expect(destination.parkStore.all().isEmpty)
+
+        let antigravity = try #require(JSONDocument.parse(destination.text(".gemini/config/mcp_config.json")).value(at: ["mcpServers", "memory"]))
+        #expect(antigravity["disabled"]?.boolValue == true)
+        #expect(antigravity["env"]?["KEY"]?.stringValue == "replacement-value")
+
+        let openCode = try #require(JSONDocument.parse(destination.text(".config/opencode/opencode.json")).value(at: ["mcp", "memory"]))
+        #expect(openCode["enabled"]?.boolValue == false)
+        #expect(openCode["type"]?.stringValue == "local")
+        #expect(openCode["command"]?.elements?.first?.stringValue == "npx")
+        #expect(openCode["environment"]?["KEY"]?.stringValue == "replacement-value")
+
+        let memory = try #require(destination.discover().servers.first { $0.name == "memory" })
+        #expect(memory.enabledIn[.antigravity] == .disabled)
+        #expect(memory.enabledIn[.openCode] == .disabled)
+    }
+
     @Test("explicit enabled import preserves JSONC, TOML comments, unknown fields and backups")
     func preservation() throws {
         let source = try ToggleHarness()

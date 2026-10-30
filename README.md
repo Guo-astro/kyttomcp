@@ -33,6 +33,9 @@ Once you run more than two or three MCP servers, the configuration is spread acr
 | Cursor | `~/.cursor/mcp.json` | `%USERPROFILE%\.cursor\mcp.json` |
 | VS Code | `~/Library/Application Support/Code/User/mcp.json` | `%APPDATA%\Code\User\mcp.json` |
 | Codex | `~/.codex/config.toml` | `%USERPROFILE%\.codex\config.toml` |
+| Antigravity | `~/.gemini/config/mcp_config.json` | `%USERPROFILE%\.gemini\config\mcp_config.json` |
+| Devin Desktop (formerly Windsurf) | `~/.config/devin/mcp_config.json` | `%APPDATA%\devin\mcp_config.json` |
+| OpenCode | `~/.config/opencode/opencode.json` (`mcp`) | `%USERPROFILE%\.config\opencode\opencode.json` (`mcp`) |
 
 Different formats, different locations, different rules about what a valid entry looks like. And the question that keeps coming back has no single place to answer it: **what is actually enabled, where?**
 
@@ -44,7 +47,7 @@ Kytto reads those files locally and turns them into one workspace.
 Every server against every client in one matrix. Toggle a server on or off, edit a definition across every client that uses it, or remove it from one client without touching the others — Kytto writes each client in that client's own format and respects its rules. Add servers by hand or from a built-in catalog. Since 1.0.5, Kytto explains the first matrix write before it happens and offers Undo after successful changes, including exact backup restoration for a server that was previously absent.
 
 **Attach custom sources without writing them**
-Attach multiple named JSON, JSONC or TOML configuration files as read-only custom sources with Global, Profile or Workspace display scope. Kytto discovers and watches their servers without rewriting, creating or deleting the selected files, and keeps them distinct from the five built-in writable clients.
+Attach multiple named JSON, JSONC or TOML configuration files as read-only custom sources with Global, Profile or Workspace display scope. Kytto discovers and watches their servers without rewriting, creating or deleting the selected files, and keeps them distinct from the built-in writable clients.
 
 **Find out why a server fails**
 Run an on-demand MCP handshake and read what the server actually reports: tools, prompts, resources, protocol details and stderr. MCP Doctor turns that evidence into concrete findings — missing environment values, relative paths, failed handshakes, executables that only resolve inside one client's PATH — and previews any fix before writing it. A package a server fetches by name without an exact version (`npx some-package`, `@latest`, `uvx`) is flagged, and once you check the latest release Doctor can pin that exact version in every client that uses it.
@@ -86,6 +89,9 @@ For supported stdio servers, preview a local Gateway route, move the direct defi
 | Cursor | Supported |
 | VS Code | Supported |
 | Codex | Supported |
+| Antigravity | Supported on macOS; Windows coming |
+| Devin Desktop (formerly Windsurf) | Supported on macOS; Windows coming |
+| OpenCode | Supported on macOS; Windows coming |
 
 Custom sources are read-only and are not an additional writable client. Want another built-in client supported? [Open an issue](https://github.com/heyitsjakub/KyttoMCP/issues) — the roadmap is driven by what people actually ask for.
 

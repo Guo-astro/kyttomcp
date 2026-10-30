@@ -144,7 +144,7 @@ public struct ToggleService: Sendable {
                 configFile: source.file,
                 serversKey: source.serversKey
             )
-        case .inlineFlag(let flagKey):
+        case .inlineFlag(let flagKey) where source.format == .toml:
             return try setViaInlineFlag(
                 enabled,
                 server: server,
@@ -152,6 +152,18 @@ public struct ToggleService: Sendable {
                 configFile: source.file,
                 serversKey: source.serversKey,
                 flagKey: flagKey
+            )
+        case .inlineFlag, .inlineDisabledFlag:
+            guard source.format == .json, let flag = source.enablement.inlineFlag else {
+                throw ToggleError.noSourceForClient(clientID)
+            }
+            return try setViaJSONFlag(
+                enabled,
+                server: server,
+                clientID: clientID,
+                configFile: source.file,
+                serversKey: source.serversKey,
+                flag: flag
             )
         case .extensionFlag:
             throw ToggleError.noSourceForClient(clientID)
@@ -194,15 +206,25 @@ public struct ToggleService: Sendable {
            let command = server.command, URL(filePath: command).lastPathComponent == "kytto-mcp-proxy" {
             throw ToggleError.gatewayDefinitionNotPortable(server.name)
         }
-        let targetFormat = descriptors.first { $0.id == clientID }?.editableServerMap?.format
-        if let sourceFormat = format(of: server.origin), sourceFormat != targetFormat {
-            let lost = Self.unportableFields(in: server.definitionSource, format: sourceFormat)
-            if !lost.isEmpty { throw ToggleError.definitionNotPortable(server.name, fields: lost) }
+        let target = descriptors.first { $0.id == clientID }
+        let targetFormat = target?.editableServerMap?.format
+        let targetSchema = target?.serverSchema ?? .standard
+        let sourceSchema = schema(of: server.origin)
+        if targetFormat == .json, server.transport == .sse, !targetSchema.acceptsSSE {
+            throw ToggleError.definitionNotPortable(server.name, fields: ["the legacy HTTP+SSE transport"])
         }
-        if !server.definitionSource.isEmpty, format(of: server.origin) == .json, targetFormat == .json {
-            // A copy from another JSON client. Those agree on the per-server
-            // shape, so the source text carries over as it stands.
-            return .verbatim(server.definitionSource)
+        if !server.definitionSource.isEmpty, format(of: server.origin) == .json, targetFormat == .json,
+           let copied = Self.portableJSON(server.definitionSource, from: sourceSchema, to: targetSchema) {
+            // A copy from another JSON client. Where the two agree on the
+            // per-server shape the text carries over as it stands, keeping
+            // `headers`, `cwd` and keys Kytto does not model; where they spell
+            // the endpoint differently only those keys are respelt.
+            return .verbatim(copied)
+        }
+        if let sourceFormat = format(of: server.origin),
+           sourceFormat != targetFormat || sourceSchema.shape != targetSchema.shape {
+            let lost = Self.unportableFields(in: server.definitionSource, format: sourceFormat, schema: sourceSchema)
+            if !lost.isEmpty { throw ToggleError.definitionNotPortable(server.name, fields: lost) }
         }
         if server.command != nil || server.url != nil {
             return .fromModel
@@ -214,21 +236,42 @@ public struct ToggleService: Sendable {
         for arriving: ArrivingDefinition,
         server: Server,
         serversKey: String,
-        in document: JSONDocument
+        in document: JSONDocument,
+        clientID: ClientID
     ) -> String {
         switch arriving {
         case .verbatim(let text): text
-        case .fromModel: jsonLiteral(for: server, serversKey: serversKey, in: document)
+        case .fromModel:
+            jsonLiteral(
+                for: server, serversKey: serversKey, in: document,
+                schema: descriptors.first { $0.id == clientID }?.serverSchema ?? .standard
+            )
         }
+    }
+
+    /// A JSON definition from a client with schema `from`, ready for one with
+    /// schema `to`, without the source client's own on/off and tool state.
+    /// Nil when the shapes differ and the definition has to be rendered.
+    static func portableJSON(_ source: String, from: ServerSchema, to: ServerSchema) -> String? {
+        guard from == to else { return to.translating(source, from: from) }
+        guard let document = try? JSONDocument.parse(source),
+              document.root.keys.contains(where: ServerSchema.clientStateKeys.contains)
+        else { return source }
+        var text = source
+        for key in ServerSchema.clientStateKeys {
+            guard let next = try? JSONDocument.parse(text).removingMember(key, at: []) else { return nil }
+            text = next
+        }
+        return text
     }
 
     /// Launch and authentication settings a definition has that rendering it
     /// from the model (command, args, env, url) would drop.
-    static func unportableFields(in source: String, format: ConfigFormat) -> [String] {
+    static func unportableFields(in source: String, format: ConfigFormat, schema: ServerSchema = .standard) -> [String] {
         switch format {
         case .json:
-            let keys = (try? JSONDocument.parse(source))?.root.keys ?? []
-            return ["headers", "cwd", "envFile"].filter(keys.contains)
+            guard let root = (try? JSONDocument.parse(source))?.root else { return [] }
+            return schema.unportableFields(in: root)
         case .toml:
             guard let document = try? TOMLDocument.parse(source) else { return [] }
             let names = Set(document.tables.flatMap { table in
@@ -252,9 +295,19 @@ public struct ToggleService: Sendable {
         return descriptors.first { $0.id == clientID }?.editableServerMap?.format
     }
 
+    private func schema(of origin: Origin) -> ServerSchema {
+        guard case .configFile(let clientID) = origin else { return .standard }
+        return descriptors.first { $0.id == clientID }?.serverSchema ?? .standard
+    }
+
     /// A JSON object literal for a server that came from somewhere else,
     /// indented to sit among whatever is already in `document`.
-    private func jsonLiteral(for server: Server, serversKey: String, in document: JSONDocument) -> String {
+    private func jsonLiteral(
+        for server: Server,
+        serversKey: String,
+        in document: JSONDocument,
+        schema: ServerSchema = .standard
+    ) -> String {
         let unit = IndentStyle.detect(in: document.sourceText).text
         let map = document.value(at: [serversKey])
         let baseIndent: String = if let first = map?.members?.first {
@@ -264,7 +317,7 @@ public struct ToggleService: Sendable {
         } else {
             unit
         }
-        return ServerDraft(editing: server).definition(baseIndent: baseIndent, unit: unit)
+        return ServerDraft(editing: server).definition(baseIndent: baseIndent, unit: unit, schema: schema)
     }
 
     private func tomlBlock(for server: Server, name: String, serversKey: String, enabled: Bool) -> String {
@@ -356,6 +409,70 @@ public struct ToggleService: Sendable {
             backupID: receipt.backupID,
             pathDisplay: receipt.pathDisplay,
             // Nothing is ever removed here, so nothing is ever parked.
+            wasParked: false
+        )
+    }
+
+    // MARK: - Antigravity, Devin Desktop, OpenCode: a boolean on the JSON entry
+
+    /// The JSON sibling of `setViaInlineFlag`. The definition never leaves the
+    /// file, so nothing is parked; only a first arrival writes a definition.
+    private func setViaJSONFlag(
+        _ enabled: Bool,
+        server: Server,
+        clientID: ClientID,
+        configFile: PlatformPath,
+        serversKey: String,
+        flag: (key: String, onValue: Bool)
+    ) throws -> ToggleResult {
+        let url = resolver.resolveServerMap(configFile, for: clientID)
+        let display = resolver.displayServerMap(configFile, for: clientID)
+        let receipt = try writer.edit(
+            url: url,
+            clientID: clientID,
+            pathDisplay: display,
+            expecting: ledger.digest(for: url)
+        ) { document in
+            guard let key = try document.serverKey(for: server.id, under: serversKey) else {
+                if server.enabledIn[clientID] ?? .absent != .absent {
+                    throw ToggleError.bundledServerNotToggleable(server.name)
+                }
+                guard enabled else { return document.sourceText }
+                let arriving = try arrivingDefinition(for: server, in: clientID)
+                return try document.settingMember(
+                    server.name,
+                    at: [serversKey],
+                    to: literal(for: arriving, server: server, serversKey: serversKey, in: document, clientID: clientID)
+                )
+            }
+
+            // Absent means on. A server already in the state asked for is not
+            // written at all, so a no-op click costs no backup slot.
+            let path = [serversKey, key]
+            guard let entry = document.value(at: path), let members = entry.members else {
+                throw JSONEditError.notAnObject(path)
+            }
+            let current = try JSONDocument.soleMember(flag.key, in: members, at: path)?.value.boolValue
+            let isOn = current.map { $0 == flag.onValue } ?? true
+            guard isOn != enabled else { return document.sourceText }
+
+            // `"disabled": true` goes away when the server comes back on, which
+            // is how the entry looked before Kytto touched it; an `enabled` key
+            // states its value either way, as Codex's does.
+            if enabled, !flag.onValue {
+                return try document.removingMember(flag.key, at: path)
+            }
+            return try document.settingMember(flag.key, at: path, to: JSONText.bool(enabled == flag.onValue))
+        }
+        ledger.record(receipt.digest, for: url)
+
+        return ToggleResult(
+            clientID: clientID,
+            serverName: server.name,
+            enabled: enabled,
+            requiresRestart: receipt.didWrite,
+            backupID: receipt.backupID,
+            pathDisplay: receipt.pathDisplay,
             wasParked: false
         )
     }
@@ -538,7 +655,7 @@ public struct ToggleService: Sendable {
             return try document.settingMember(
                 server.name,
                 at: [serversKey],
-                to: literal(for: arriving, server: server, serversKey: serversKey, in: document)
+                to: literal(for: arriving, server: server, serversKey: serversKey, in: document, clientID: clientID)
             )
         }
         ledger.record(receipt.digest, for: url)
@@ -630,7 +747,7 @@ public struct ToggleService: Sendable {
                     return try document.settingMember(
                         previousPark?.serverName ?? server.name,
                         at: [serversKey],
-                        to: literal(for: arriving, server: server, serversKey: serversKey, in: document)
+                        to: literal(for: arriving, server: server, serversKey: serversKey, in: document, clientID: clientID)
                     )
                 }
                 guard let key, let member = document.value(at: [serversKey])?.member(key) else {

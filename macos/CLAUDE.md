@@ -112,6 +112,8 @@ is the substance of the matrix (`EnablementStrategy`):
 | Claude Code | JSON | a deny list in a *different* file |
 | Cursor, VS Code | JSON | presence only |
 | Codex | **TOML** | `enabled = false` on the server's own table |
+| Antigravity, Devin Desktop | JSON | `"disabled": true` on the entry |
+| OpenCode | JSON, own entry shape (`ServerSchema.openCode`) | `"enabled": false` on the entry |
 
 "Presence only" means switching off has to remove the definition — which is only
 acceptable because `ParkStore` keeps the exact bytes first and restores them
@@ -121,7 +123,9 @@ A client can have more than one source. Claude Desktop and Codex both have a
 second, **read-only** one — extension bundles and plugins respectively — because
 those are installed software in directories the client rewrites.
 
-**Definitions do not travel as text between formats.** Copying a server into a
+**Definitions do not travel as text between formats** — nor between JSON
+clients whose `ServerSchema` differs, unless `ServerSchema.translating` can
+respell the keys they disagree on. Copying a server into a
 client whose format differs renders it from the model instead. The bug this
 guards against is a TOML table spliced into a JSON file.
 

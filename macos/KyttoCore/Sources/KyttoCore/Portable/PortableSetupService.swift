@@ -268,11 +268,18 @@ public final class PortableSetupService: @unchecked Sendable {
                     )
                     guard draft.validate().isEmpty else { throw PortableSetupError.invalid("invalid definition for \(copy.name)") }
                     let enabled = enableImportedServers && copy.wasEnabled
-                    let definition = try Self.render(copy, draft: draft, resolve: resolve, format: source.format, key: source.serversKey, enabled: enabled)
+                    let schema = descriptors.first { $0.id == clientID }?.serverSchema ?? .standard
+                    if source.format == .json, copy.transport == .sse, !schema.acceptsSSE {
+                        throw PortableSetupError.invalid("\(copy.name) uses the legacy HTTP+SSE transport, which \(clientID.rawValue) does not accept")
+                    }
+                    let definition = try Self.render(
+                        copy, draft: draft, resolve: resolve, format: source.format, key: source.serversKey,
+                        enabled: enabled, schema: schema, flag: source.enablement.inlineFlag
+                    )
                     switch source.enablement {
                     case .presence where !enabled:
                         parks.append(ParkEdit(clientID: clientID, name: copy.name, text: definition))
-                    case .presence, .inlineFlag, .denyList:
+                    case .presence, .inlineFlag, .inlineDisabledFlag, .denyList:
                         switch source.format {
                         case .json: text = try JSONDocument.parse(text).settingMember(copy.name, at: [source.serversKey], to: definition)
                         case .toml: text = try TOMLDocument.parse(text).settingServer(copy.name, under: source.serversKey, to: definition)
@@ -625,15 +632,21 @@ public final class PortableSetupService: @unchecked Sendable {
 
     private static func render(
         _ copy: PortableServer, draft: ServerDraft, resolve: (PortableValue) -> String,
-        format: ConfigFormat, key: String, enabled: Bool
+        format: ConfigFormat, key: String, enabled: Bool,
+        schema: ServerSchema = .standard, flag: (key: String, onValue: Bool)? = nil
     ) throws -> String {
         switch format {
         case .json:
-            var text = draft.definition(baseIndent: "", unit: "  ")
+            var text = draft.definition(baseIndent: "", unit: "  ", schema: schema)
             if let cwd = copy.workingDirectory { text = try JSONDocument.parse(text).settingMember("cwd", at: [], to: JSONText.string(resolve(cwd))) }
             if !copy.headers.isEmpty {
                 let fields = copy.headers.keys.sorted().map { JSONBuildValue.Field($0, .string(resolve(copy.headers[$0]!))) }
                 text = try JSONDocument.parse(text).settingMember("headers", at: [], to: JSONBuilder.render(.object(fields)))
+            }
+            // A client whose off switch sits on the entry gets it there, so a
+            // server imported switched off arrives switched off.
+            if !enabled, let flag {
+                text = try JSONDocument.parse(text).settingMember(flag.key, at: [], to: JSONText.bool(!flag.onValue))
             }
             return text
         case .toml:

@@ -262,6 +262,11 @@ public struct GatewayMigrationService: Sendable {
         guard let descriptor = descriptors.first(where: { $0.id == clientID }),
               let source = descriptor.editableServerMap
         else { throw AuthoringError.noSourceForClient(clientID) }
+        // The helper is written as `command` + `args`, which OpenCode does not
+        // read; its argv-array entry is not modelled here yet.
+        guard descriptor.serverSchema.shape == .mcpServers else {
+            throw GatewayMigrationError.invalidDefinition("Gateway mode does not support \(descriptor.displayName) yet")
+        }
 
         let url = resolver.resolveServerMap(source.file, for: clientID)
         let display = resolver.displayServerMap(source.file, for: clientID)

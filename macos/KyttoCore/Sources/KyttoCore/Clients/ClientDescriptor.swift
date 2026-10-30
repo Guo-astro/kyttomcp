@@ -8,12 +8,16 @@ public struct ClientID: RawRepresentable, Hashable, CaseIterable, Codable, Senda
     public static let cursor = ClientID(unchecked: "cursor")
     public static let vsCode = ClientID(unchecked: "vsCode")
     public static let codex = ClientID(unchecked: "codex")
+    public static let antigravity = ClientID(unchecked: "antigravity")
+    public static let devinDesktop = ClientID(unchecked: "devinDesktop")
+    public static let openCode = ClientID(unchecked: "openCode")
 
-    /// `allCases` remains the five clients Kytto owns and may write. Custom
+    /// `allCases` remains the built-in clients Kytto owns and may write. Custom
     /// sources are deliberately dynamic and read-only, so they never leak into
     /// backup, authoring or menu-bar write loops that use this collection.
     public static let allCases: [ClientID] = [
         .claudeDesktop, .claudeCode, .cursor, .vsCode, .codex,
+        .antigravity, .devinDesktop, .openCode,
     ]
 
     public init?(rawValue: String) {
@@ -134,6 +138,21 @@ public enum EnablementStrategy: Sendable {
     /// — though Kytto writes it either way, so the state is visible in the file.
     case inlineFlag(key: String)
 
+    /// The same boolean with the opposite meaning: `true` switches the server
+    /// off. Antigravity and Devin Desktop: `"disabled": true` on the entry.
+    /// Absent means on, exactly as with `inlineFlag`.
+    case inlineDisabledFlag(key: String)
+
+    /// The key and the value it holds when a server is switched on, for the
+    /// two flags that live on the server's own entry.
+    public var inlineFlag: (key: String, onValue: Bool)? {
+        switch self {
+        case .inlineFlag(let key): (key, true)
+        case .inlineDisabledFlag(let key): (key, false)
+        case .presence, .denyList, .extensionFlag: nil
+        }
+    }
+
     /// What switching a server off in this client actually does to the file, in
     /// one sentence (§7.8).
     ///
@@ -161,6 +180,11 @@ public enum EnablementStrategy: Sendable {
         case .inlineFlag(let key):
             return """
             Switching a server off writes \(key) = false on the server's own entry, \
+            so its definition never leaves the file.
+            """
+        case .inlineDisabledFlag(let key):
+            return """
+            Switching a server off writes \(key) = true on the server's own entry, \
             so its definition never leaves the file.
             """
         }
@@ -246,6 +270,9 @@ public struct ClientDescriptor: Sendable {
     /// How many tools this client hands the model before it drops or refuses
     /// the rest. Nil when there is no documented cap — see `ClientToolLimit`.
     public var toolLimit: ClientToolLimit? = nil
+    /// How one entry in the editable server map is spelled. JSON clients
+    /// mostly agree, and the ones that do not are why this exists (§4).
+    public var serverSchema: ServerSchema = .standard
 
     /// The file and key holding servers the user can add, edit and remove.
     ///
