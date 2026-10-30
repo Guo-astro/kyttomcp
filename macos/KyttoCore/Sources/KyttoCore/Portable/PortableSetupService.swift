@@ -270,7 +270,8 @@ public final class PortableSetupService: @unchecked Sendable {
                     let enabled = enableImportedServers && copy.wasEnabled
                     let schema = descriptors.first { $0.id == clientID }?.serverSchema ?? .standard
                     if source.format == .json, copy.transport == .sse, !schema.acceptsSSE {
-                        throw PortableSetupError.invalid("\(copy.name) uses the legacy HTTP+SSE transport, which \(clientID.rawValue) does not accept")
+                        let clientName = descriptors.first { $0.id == clientID }?.displayName ?? clientID.rawValue
+                        throw PortableSetupError.invalid("\(copy.name) uses the legacy HTTP+SSE transport, which \(clientName) does not accept")
                     }
                     let definition = try Self.render(
                         copy, draft: draft, resolve: resolve, format: source.format, key: source.serversKey,

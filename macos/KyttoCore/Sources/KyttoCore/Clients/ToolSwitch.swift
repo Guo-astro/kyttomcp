@@ -54,12 +54,23 @@ public struct ToolFilter: Equatable, Sendable {
     public let wholeServerPatterns: [String]
     /// When the client keeps an allow list, only these tools stay on.
     public let allowList: [String]?
+    /// Whether a tool's own rule can say "on" over a broader rule. OpenCode's
+    /// map can (`"github_x": true` beside `"github_*": false`); Claude Code's
+    /// deny rules cannot be answered by anything but removing them.
+    public let ownRuleOverrides: Bool
 
-    public init(prefix: String = "", rules: [Rule] = [], wholeServerPatterns: [String] = [], allowList: [String]? = nil) {
+    public init(
+        prefix: String = "",
+        rules: [Rule] = [],
+        wholeServerPatterns: [String] = [],
+        allowList: [String]? = nil,
+        ownRuleOverrides: Bool = false
+    ) {
         self.prefix = prefix
         self.rules = rules
         self.wholeServerPatterns = wholeServerPatterns
         self.allowList = allowList
+        self.ownRuleOverrides = ownRuleOverrides
     }
 
     public var isEmpty: Bool { rules.isEmpty && wholeServerPatterns.isEmpty && allowList == nil }
@@ -72,7 +83,7 @@ public struct ToolFilter: Equatable, Sendable {
     /// Whether the client keeps `tool` from its model.
     public func isOff(_ tool: String) -> Bool {
         if let allowList, !allowList.contains(tool) { return true }
-        if blockingPattern(for: tool) != nil { return true }
+        if !wholeServerPatterns.isEmpty { return true }
         let name = ruleName(for: tool)
         if let exact = rules.last(where: { $0.pattern == name }) { return !exact.keepsOn }
         if let glob = rules.last(where: { $0.pattern != name && Self.glob($0.pattern, matches: name) }) {
@@ -81,16 +92,31 @@ public struct ToolFilter: Equatable, Sendable {
         return false
     }
 
-    /// A rule other than this tool's own that switches it off, which a switch
-    /// for this one tool cannot undo without changing what the user wrote for
-    /// others. Nil when nothing but the tool's own rule (or none) applies.
+    /// A rule broader than this tool's own that would keep it off once its own
+    /// rule is gone. Nil when nothing but the tool's own rule (or none) applies.
     public func blockingPattern(for tool: String) -> String? {
-        let name = ruleName(for: tool)
         if let whole = wholeServerPatterns.first { return whole }
-        if rules.contains(where: { $0.pattern == name }) { return nil }
+        let name = ruleName(for: tool)
         let glob = rules.last { $0.pattern != name && Self.glob($0.pattern, matches: name) }
         if let glob, !glob.keepsOn { return glob.pattern }
         return nil
+    }
+
+    /// The broader rule keeping an off tool off that a switch for this one
+    /// tool cannot answer, or nil when switching it on is possible.
+    public func lockingRule(for tool: String) -> String? {
+        guard isOff(tool) else { return nil }
+        if !wholeServerPatterns.isEmpty { return wholeServerPatterns.first }
+        return ownRuleOverrides ? nil : blockingPattern(for: tool)
+    }
+
+    /// Tool → locking rule, for every tool in `tools` that has one. Servers can
+    /// list a name twice; the first wins rather than trapping.
+    public func lockedTools(among tools: [String]) -> [String: String] {
+        Dictionary(
+            tools.compactMap { tool in lockingRule(for: tool).map { (tool, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     /// The names of `tools` this client keeps from its model.
@@ -173,7 +199,7 @@ extension ToolSwitch {
             return member.key.hasPrefix(prefix) || Self.isGlob(member.key)
                 ? .init(pattern: member.key, keepsOn: value) : nil
         }
-        return ToolFilter(prefix: prefix, rules: rules)
+        return ToolFilter(prefix: prefix, rules: rules, ownRuleOverrides: true)
     }
 
     /// Claude Code's deny rules that can reach this server's tools. Allow

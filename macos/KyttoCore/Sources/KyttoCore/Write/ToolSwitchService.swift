@@ -157,10 +157,11 @@ public struct ToolSwitchService: Sendable {
                     let key = filter.ruleName(for: tool)
                     if wantOff {
                         text = try JSONDocument.parse(text).settingMember(key, at: [mapKey], to: JSONText.bool(false))
+                    } else if filter.blockingPattern(for: tool) != nil {
+                        // A broader `false` would still reach the tool once its
+                        // own key is gone; the tool's own `true` answers it.
+                        text = try JSONDocument.parse(text).settingMember(key, at: [mapKey], to: JSONText.bool(true))
                     } else {
-                        if let rule = filter.blockingPattern(for: tool) {
-                            throw ToolSwitchError.blockedByRule(tool: tool, rule: rule)
-                        }
                         text = try JSONDocument.parse(text).removingMember(key, at: [mapKey])
                     }
                 }

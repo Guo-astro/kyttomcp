@@ -195,7 +195,9 @@ public struct ServerDraft: Equatable, Sendable {
             fields.append(.init("url", .string(url)))
         }
 
-        let realEnv = realEnvironment
+        // OpenCode's remote entry has no environment, and refuses keys it
+        // does not define.
+        let realEnv = schema.shape == .openCode && transport != .stdio ? [] : realEnvironment
         if !realEnv.isEmpty {
             fields.append(
                 .init(schema.environmentKey, .object(realEnv.map { .init($0.key, .string(valueForNewKey($0))) }))
@@ -351,8 +353,13 @@ extension ServerDraft {
             text = try JSONDocument.parse(text).removingMember(key, at: path)
         }
 
+        // OpenCode's local and remote entries accept different keys and refuse
+        // the other's, so a change of transport takes the old one's with it.
+        // That includes `headers` going local: the backup holds them.
         if (transport == .stdio) != (existingTransport == .stdio) {
-            try remove(transport == .stdio ? "url" : "command")
+            for key in transport == .stdio ? ["url", "headers", "oauth"] : ["command", "cwd", "environment"] {
+                try remove(key)
+            }
         }
         let type = transport == .stdio ? "local" : "remote"
         if node["type"]?.stringValue != type { try set("type", JSONText.string(type)) }
@@ -377,6 +384,7 @@ extension ServerDraft {
             if existing.url != url { try set("url", JSONText.string(url)) }
         }
 
+        guard transport == .stdio else { return text }
         return try splicingJSONEnvironment(into: text, at: path, key: "environment")
     }
 

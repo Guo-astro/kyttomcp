@@ -362,14 +362,14 @@ struct ServerDTO: Encodable {
         }
         isBundled = server.isBundled
         hasRelativePath = server.hasRelativePath
-        let known = server.knownTools.map(\.name)
+        // A server can list one tool name twice; the DTO speaks of names.
+        var seen = Set<String>()
+        let known = server.knownTools.map(\.name).filter { seen.insert($0).inserted }
         toolsOff = Dictionary(uniqueKeysWithValues: server.toolFilters.map { client, filter in
             (client.rawValue, filter.offTools(among: known))
         })
         lockedTools = Dictionary(uniqueKeysWithValues: server.toolFilters.map { client, filter in
-            (client.rawValue, Dictionary(uniqueKeysWithValues: known.compactMap { tool in
-                filter.blockingPattern(for: tool).map { (tool, $0) }
-            }))
+            (client.rawValue, filter.lockedTools(among: known))
         })
     }
 }

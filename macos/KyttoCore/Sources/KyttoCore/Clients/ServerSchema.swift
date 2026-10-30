@@ -53,11 +53,11 @@ public struct ServerSchema: Equatable, Sendable {
         statesDefaultTransport: true, acceptsSSE: true
     )
 
-    /// Every key a remote endpoint is found under, the written one first.
-    /// Antigravity documents `url` as an alternative, and an entry copied in by
-    /// hand from another client is still the user's endpoint.
+    /// Every key a remote endpoint is read under, the written one first.
+    /// Antigravity documents `url` as an alternative to its `serverUrl`; the
+    /// clients that write `url` do not read `serverUrl`, so neither does Kytto.
     var remoteURLKeys: [String] {
-        [remoteURLKey] + ["url", "serverUrl"].filter { $0 != remoteURLKey }
+        remoteURLKey == "url" ? ["url"] : [remoteURLKey, "url"]
     }
 
     /// The key holding environment variables.
@@ -153,7 +153,7 @@ public struct ServerSchema: Equatable, Sendable {
                 ?? from.remoteURLKeys.lazy.compactMap { document.root[$0]?.stringValue }.first
             guard let url else { return nil }
             for key in transportKeys { try remove(key) }
-            for key in remoteURLKeys where key != remoteURLKey { try remove(key) }
+            for key in Set(remoteURLKeys + from.remoteURLKeys) where key != remoteURLKey { try remove(key) }
             try set(remoteURLKey, JSONText.string(url))
             if let transportKey, statesDefaultTransport || transport != .http {
                 try set(transportKey, JSONText.string(transport.rawValue))

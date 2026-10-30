@@ -710,7 +710,7 @@ function toolSwitchNotice(serverId, result, tools, previous, { undoing = false }
     : `${off.size} of ${tools.length} tools of “${result.serverName}” are off in ${clientName}${saved > 0 ? `, about ${formatTokens(saved)} tokens less context` : ''}.`;
   return {
     kind: 'info',
-    message: `${undoing ? 'Undid the change. ' : ''}${what} A backup was created first; restart ${clientName} to apply it.`,
+    message: `${undoing ? 'Undid the change. ' : ''}${what}${result.backupID ? ' A backup was created first;' : ''} Restart ${clientName} to apply it.`,
     action: undoing
       ? undefined
       : {

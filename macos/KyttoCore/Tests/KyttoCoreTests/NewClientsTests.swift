@@ -374,6 +374,38 @@ struct OpenCodeTests {
         #expect(try harness.server("github").args == ["-y", "@modelcontextprotocol/server-github@1.2.4"])
     }
 
+    @Test("a remote entry never gets `environment`, and a transport change leaves no keys of the other kind")
+    func transportKeys() throws {
+        let harness = try makeHarness()
+        defer { harness.cleanUp() }
+
+        let remote = ServerDraft(name: "hosted", transport: .http, env: [EnvEntry(key: "TOKEN", value: "x")], url: "https://hosted.example.com/mcp")
+        #expect(try JSONDocument.parse(remote.definition(baseIndent: "", unit: "  ", schema: .openCode)).root["environment"] == nil)
+
+        let github = try harness.server("github")
+        var toRemote = ServerDraft(editing: github)
+        toRemote.transport = .http
+        toRemote.url = "https://github.example.com/mcp"
+        _ = try harness.authoring.update(toRemote, originalName: "github", server: github, existing: harness.discover().servers)
+        let remoteEntry = try #require(JSONDocument.parse(harness.text(openCodePath)).value(at: ["mcp", "github"]))
+        #expect(remoteEntry["type"]?.stringValue == "remote")
+        #expect(remoteEntry["command"] == nil)
+        #expect(remoteEntry["environment"] == nil)
+        #expect(remoteEntry["timeout"] != nil)
+
+        let context = try harness.server("context")
+        var toLocal = ServerDraft(editing: context)
+        toLocal.transport = .stdio
+        toLocal.command = "npx"
+        toLocal.args = ["-y", "context-mcp"]
+        _ = try harness.authoring.update(toLocal, originalName: "context", server: context, existing: harness.discover().servers)
+        let localEntry = try #require(JSONDocument.parse(harness.text(openCodePath)).value(at: ["mcp", "context"]))
+        #expect(localEntry["type"]?.stringValue == "local")
+        #expect(localEntry["url"] == nil)
+        #expect(localEntry["command"]?.elements?.count == 3)
+        #expect(localEntry["enabled"]?.boolValue == false)
+    }
+
     @Test("rotating a secret changes the value under `environment`")
     func rotateSecret() throws {
         let harness = try makeHarness()

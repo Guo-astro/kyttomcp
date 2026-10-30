@@ -125,10 +125,37 @@ struct ToolSwitchTests {
         #expect(tools["bash"]?.boolValue == true)
         #expect(tools["github_delete_branch"] == nil)
 
-        #expect(throws: ToolSwitchError.blockedByRule(tool: "delete_branch", rule: "github_delete_*")) {
-            try harness.toolSwitches.setDisabledTools([], among: githubTools, server: try harness.server("github"), in: .openCode)
+        #expect(server.toolFilters[.openCode]?.lockedTools(among: githubTools).isEmpty == true)
+
+        // Back on under a glob that keeps it off: the tool's own `true` answers the
+        // glob, and the glob itself is left as written.
+        _ = try harness.toolSwitches.setDisabledTools([], among: githubTools, server: try harness.server("github"), in: .openCode)
+        let after = try #require(JSONDocument.parse(harness.text(".config/opencode/opencode.json")).root["tools"])
+        #expect(after["github_delete_branch"]?.boolValue == true)
+        #expect(after["github_delete_*"]?.boolValue == false)
+        #expect(after["github_create_issue"] == nil)
+        #expect(try harness.server("github").toolFilters[.openCode]?.offTools(among: githubTools).isEmpty == true)
+    }
+
+    @Test("switching on a tool whose own rule sits under a broader one does not report a success it did not have")
+    func ownRuleUnderBroaderRule() throws {
+        let harness = try ToggleHarness()
+        defer { harness.cleanUp() }
+        try harness.home.write(Fixture.claudeCode.text, to: ".claude.json")
+        try harness.home.write(#"{"permissions":{"deny":["mcp__XcodeBuildMCP__build*","mcp__XcodeBuildMCP__build_sim"]}}"#, to: ".claude/settings.json")
+        let before = try harness.text(".claude/settings.json")
+        let server = try harness.server("XcodeBuildMCP")
+        #expect(server.toolFilters[.claudeCode]?.lockedTools(among: ["build_sim", "list_sims"]) == ["build_sim": "mcp__XcodeBuildMCP__build*"])
+        #expect(throws: ToolSwitchError.blockedByRule(tool: "build_sim", rule: "mcp__XcodeBuildMCP__build*")) {
+            try harness.toolSwitches.setDisabledTools([], among: ["build_sim", "list_sims"], server: server, in: .claudeCode)
         }
-        #expect(try harness.text(".config/opencode/opencode.json") == text)
+        #expect(try harness.text(".claude/settings.json") == before)
+    }
+
+    @Test("a tool name listed twice does not trap the lock map")
+    func duplicateToolNames() {
+        let filter = ToolFilter(prefix: "mcp__s__", wholeServerPatterns: ["mcp__s"])
+        #expect(filter.lockedTools(among: ["a", "a", "b"]) == ["a": "mcp__s", "b": "mcp__s"])
     }
 
     @Test("Claude Code: one mcp__server__tool deny rule per tool in settings.json")
