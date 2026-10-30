@@ -130,7 +130,7 @@ Kytto works with the files already on your computer.
 - No account, no sign-up, no cloud sync
 - MCP configurations and credentials never leave your machine
 - Backups and configuration changes are handled locally
-- No telemetry or analytics. The only request the app makes on its own is the update check; a package version lookup happens only when you ask for it. The platform READMEs list every request. (Builds up to 1.0.6.3 included opt-in anonymous diagnostics, off by default; the source here has removed them.)
+- No telemetry or analytics. The only request the app makes on its own is the update check; a package version lookup and a package safety check (osv.dev, and the npm registry for npm packages) happen only when you ask for them. The platform READMEs list every request. (Builds up to 1.0.6.3 included opt-in anonymous diagnostics, off by default; the source here has removed them.)
 - Gateway activity is metadata-only; payload capture is off
 
 See the [privacy policy](https://kytto.jakubhecht.sk/privacy.html) for details.

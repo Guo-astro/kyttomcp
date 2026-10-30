@@ -52,6 +52,9 @@ final class AppModel {
     /// only its key names ever become DTO fields.
     private var libraryCandidates: [UUID: MCPLibraryCandidate] = [:]
     private let provenanceLookup = MCPProvenanceLookup()
+    private let packageSafetyLookup = PackageSafetyLookup()
+    /// Package checks the user asked for this session, by server id (§7.10).
+    private var packageSafety: [String: PackageSafetyReport] = [:]
     private struct CheckedProvenance: Sendable {
         let kind: MCPProvenanceKind
         let packageName: String
@@ -446,6 +449,22 @@ final class AppModel {
             version: result.version,
             checkedAt: result.checkedAt
         )
+    }
+
+    func checkPackageSafety(serverID: String) async throws -> PackageSafetyReport {
+        guard let server = current().servers.first(where: { $0.id == serverID }) else {
+            throw AppError.unknownServer(serverID)
+        }
+        guard let launch = PackageSafety.launch(of: server) else {
+            throw PackageSafetyLookup.LookupError.notAPackage
+        }
+        let report = try await packageSafetyLookup.check(launch)
+        packageSafety[server.id] = report
+        return report
+    }
+
+    func packageSafetyReport(for serverID: String) -> PackageSafetyReport? {
+        packageSafety[serverID]
     }
 
     // MARK: - MCP library and agent import
@@ -1000,7 +1019,7 @@ final class AppModel {
 
     func doctorReports() -> [DoctorServerReport] {
         let result = current()
-        return MCPDoctor.reports(for: result.servers, clients: result.clients.map(\.id))
+        return MCPDoctor.reports(for: result.servers, clients: result.clients.map(\.id), packageSafety: packageSafety)
     }
 
     func contractAlerts() -> [ContractAlert] {

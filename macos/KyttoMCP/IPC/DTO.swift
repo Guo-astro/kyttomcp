@@ -332,8 +332,14 @@ struct ServerDTO: Encodable {
     /// Client id → tool → the broader rule keeping it off, which a switch for
     /// that one tool cannot undo.
     let lockedTools: [String: [String: String]]
+    /// The last package safety check the user asked for, while it still
+    /// describes what this server launches; null otherwise (§7.10).
+    let packageSafety: PackageSafetyDTO?
 
-    nonisolated init(_ server: Server, provenance: MCPProvenance? = nil) {
+    nonisolated init(_ server: Server, provenance: MCPProvenance? = nil, packageSafety report: PackageSafetyReport? = nil) {
+        packageSafety = PackageSafety.launch(of: server).flatMap { launch in
+            report.flatMap { $0.describes(launch) ? PackageSafetyDTO($0) : nil }
+        }
         health = server.health.map(HealthDTO.init)
         tokenWeight = server.tokenWeight.map(TokenWeightDTO.init)
         self.provenance = MCPProvenanceDTO(server, provenance: provenance)
@@ -409,7 +415,7 @@ struct StateDTO: Encodable {
             ClientDTO(client, toolBudget: model.toolBudget(for: client, in: result, routes: routes))
         }
         servers = result.servers.map { server in
-            ServerDTO(server, provenance: model.provenance(for: server))
+            ServerDTO(server, provenance: model.provenance(for: server), packageSafety: model.packageSafetyReport(for: server.id))
         }
         diagnostics = result.diagnostics.map(DiagnosticDTO.init)
         pendingRestarts = Dictionary(
@@ -539,6 +545,24 @@ struct GatewayMigrationResultDTO: Encodable {
         backupID = result.backupID
         pathDisplay = result.pathDisplay
         state = StateDTO(model)
+    }
+}
+
+struct PackageSafetyDTO: Encodable {
+    let packageName: String
+    let version: String?
+    let advisoryIDs: [String]
+    let malware: Bool
+    let installScripts: [String]
+    let checkedAt: Double
+
+    nonisolated init(_ report: PackageSafetyReport) {
+        packageName = report.packageName
+        version = report.version
+        advisoryIDs = report.advisories.map(\.id)
+        malware = report.advisories.contains(where: \.isMalware)
+        installScripts = report.installScripts.keys.sorted()
+        checkedAt = report.checkedAt.timeIntervalSince1970
     }
 }
 

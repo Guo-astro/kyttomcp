@@ -1406,6 +1406,32 @@ async function checkProvenanceLatest(serverId) {
   }
 }
 
+/// Asks osv.dev (and, for npm, the registry) about one server's package —
+/// only on this click (§7.10). The findings land in Doctor; the notice says
+/// the verdict in one line.
+async function checkPackageSafety(serverId) {
+  if (getState().packageSafetyBusyServerID) return;
+  setState({ packageSafetyBusyServerID: serverId, notice: null });
+  try {
+    applyState(await invoke('doctor.checkPackageSafety', { serverID: serverId }));
+    const server = getState().servers.find((entry) => entry.id === serverId);
+    const safety = server?.packageSafety;
+    let message = `Checked ${safety?.packageName ?? server?.name ?? 'the package'}: no known malware`;
+    if (safety?.malware) {
+      message = `${safety.packageName} is listed as malware (${safety.advisoryIDs.filter((id) => id.startsWith('MAL-')).join(', ')}). Switch it off and see MCP Doctor.`;
+    } else {
+      if (safety?.advisoryIDs.length) message += `, ${safety.advisoryIDs.length} known vulnerabilit${safety.advisoryIDs.length === 1 ? 'y' : 'ies'}`;
+      if (safety?.installScripts.length) message += `, runs ${safety.installScripts.join(' and ')} on install`;
+      message += '. Details are in MCP Doctor.';
+    }
+    setState({ notice: { kind: safety?.malware ? 'error' : safety?.advisoryIDs.length || safety?.installScripts.length ? 'warning' : 'info', message } });
+  } catch (error) {
+    reportFailure(error);
+  } finally {
+    setState({ packageSafetyBusyServerID: null });
+  }
+}
+
 const firstLine = (text) => String(text).split('\n')[0];
 
 async function restoreBackup(backupId, clientId) {
@@ -1825,6 +1851,9 @@ root.addEventListener('click', async (event) => {
       break;
     case 'check-provenance-latest':
       await checkProvenanceLatest(target.dataset.serverId);
+      break;
+    case 'check-package-safety':
+      await checkPackageSafety(target.dataset.serverId);
       break;
     case 'copy-diagnostic': {
       const server = state.servers.find((entry) => entry.id === target.dataset.serverId);

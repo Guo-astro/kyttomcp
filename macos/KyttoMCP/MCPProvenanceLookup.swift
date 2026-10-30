@@ -105,7 +105,7 @@ final class MCPProvenanceLookup {
         return components.url
     }
 
-    private static func isSafePackage(_ packageName: String, allowingScopedName: Bool) -> Bool {
+    static func isSafePackage(_ packageName: String, allowingScopedName: Bool) -> Bool {
         guard !packageName.isEmpty,
               packageName.count <= 200,
               !packageName.hasPrefix("/"),
@@ -123,7 +123,7 @@ final class MCPProvenanceLookup {
         return packageName.unicodeScalars.allSatisfy(allowed.contains)
     }
 
-    private static func isFirstPartyResponse(_ url: URL?, matching endpoint: URL) -> Bool {
+    static func isFirstPartyResponse(_ url: URL?, matching endpoint: URL) -> Bool {
         guard let url else { return false }
         return url.scheme == "https"
             && url.host == endpoint.host

@@ -823,7 +823,7 @@ const parseAgentImport = (text) => {
 
 const snapshot = () => ({
   clients: CLIENTS.map((client) => ({ ...client, toolBudget: toolBudget(client.id) })),
-  servers: structuredClone(world.servers).map((server) => ({ toolsOff: {}, lockedTools: {}, ...server })),
+  servers: structuredClone(world.servers).map((server) => ({ toolsOff: {}, lockedTools: {}, packageSafety: null, ...server })),
   diagnostics: structuredClone(world.diagnostics),
   pendingRestarts: { ...world.pendingRestarts },
   dismissedRestarts: [...world.dismissedRestarts],
@@ -981,7 +981,7 @@ const HANDLERS = {
   'app.info': () => ({
     version: '1.0',
     build: '1',
-    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'provenance', 'health.http', 'health.oauth', 'portable-setup'],
+    capabilities: ['config.read', 'config.write', 'backups', 'gateway.stdio', 'gateway.masking', 'updates', 'provenance', 'package-safety', 'health.http', 'health.oauth', 'portable-setup'],
     platformDisplayName: 'fixtures',
     // Deliberately neither "Keychain" nor "Credential Manager": the harness is
     // not pretending to be either platform, and a screen that reads correctly
@@ -1035,6 +1035,13 @@ const HANDLERS = {
       entry.provenance.latestCheckedAt = Date.now() / 1000;
       entry.provenance.maintenanceState = 'staleButResponsive';
     }
+    return snapshot();
+  },
+
+  'doctor.checkPackageSafety': ({ serverID }) => {
+    const entry = world.servers.find((item) => item.id === serverID);
+    if (!entry?.provenance?.packageName) throw Object.assign(new Error('This server does not fetch a package by name, so there is no package to check.'), { code: 'notAPackage' });
+    entry.packageSafety = { packageName: entry.provenance.packageName, version: null, advisoryIDs: [], malware: false, installScripts: [], checkedAt: Date.now() / 1000 };
     return snapshot();
   },
 

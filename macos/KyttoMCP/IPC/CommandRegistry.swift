@@ -70,7 +70,7 @@ enum CommandRegistry {
 
         router.register("servers.list") {
             model.current().servers.map { server in
-                ServerDTO(server, provenance: model.provenance(for: server))
+                ServerDTO(server, provenance: model.provenance(for: server), packageSafety: model.packageSafetyReport(for: server.id))
             }
         }
 
@@ -479,6 +479,11 @@ enum CommandRegistry {
             return StateDTO(model)
         }
 
+        router.register("doctor.checkPackageSafety") { (payload: HealthCheckPayload) -> StateDTO in
+            _ = try await model.checkPackageSafety(serverID: payload.serverID)
+            return StateDTO(model)
+        }
+
         // The web layer names a server; the URL that opens is the one the last
         // health check recorded from that server's own output, validated here.
         // The shell never opens a URL supplied by JavaScript — the same stance
@@ -541,7 +546,7 @@ enum CommandRegistry {
             build: info?["CFBundleVersion"] as? String ?? "0",
             // The UI enables features by asking for a capability, never by
             // guessing from the platform (§3.2). M4 adds `secrets`, M5 `health`.
-            capabilities: ["config.read", "config.write", "backups", "authoring", "catalog", "health", "health.http", "health.oauth", "portable-setup", "provenance", "secrets", "profiles", "inspector", "clipboard", "gateway.stdio", "gateway.masking", "doctor", "activity", "contract-guard", "context-optimizer", "drift", "updates", "library", "agent-import", "skills"],
+            capabilities: ["config.read", "config.write", "backups", "authoring", "catalog", "health", "health.http", "health.oauth", "portable-setup", "provenance", "package-safety", "secrets", "profiles", "inspector", "clipboard", "gateway.stdio", "gateway.masking", "doctor", "activity", "contract-guard", "context-optimizer", "drift", "updates", "library", "agent-import", "skills"],
             platformDisplayName: "macOS",
             secretStoreDisplayName: "Keychain"
         )

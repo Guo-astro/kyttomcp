@@ -569,6 +569,15 @@ not the package's release number. Where a version cannot be added without a new
 argument (`pipx run pkg`), the finding is advice only. Pinning fixes the
 package's own version; its dependencies still resolve within their ranges.
 
+**Package safety (1.0.9.1).** Doctor flags a package whose name imitates an
+official server — an unscoped `mcp-server-github` for
+`@modelcontextprotocol/server-github`, a scope or name one or two letters off —
+from a small built-in list, offline. "Check package safety" is an explicit
+request: osv.dev gets the package name, its ecosystem and a pinned version (if
+any), and for npm the registry's version document is read for install scripts.
+Findings say what was found and what to do; nothing is switched off
+automatically. PyPI install hooks are not inspected.
+
 Contract Guard compares each successful `tools/list` result against a baseline:
 the contract the user last acknowledged, or the first successful result when
 nothing has been acknowledged yet. Only those two events move the baseline; a

@@ -2,6 +2,7 @@
 // masked, transport, per-client enablement, and the way to edit or delete.
 
 import { el, button, busyButton, sheet, definitionList, formatTokens, clientIcon } from '../dom.js';
+import { packageSafetyAction } from './doctor.js';
 
 const CLIENT_STATE_LABEL = {
   enabled: 'Enabled',
@@ -166,8 +167,11 @@ function provenanceSection(state, server) {
     });
     check.disabled = busy;
     actions.append(check);
+    const safety = packageSafetyAction(state, server.id, 'button subtle');
+    if (safety) actions.append(safety);
     section.append(actions);
   }
+  if (server.packageSafety) section.append(el('p', 'field-hint', packageSafetySummary(server.packageSafety)));
 
   const note = provenance.maintenanceState === 'staleButResponsive'
     ? 'The server responded, but the trusted latest-release metadata is newer than the installed version.'
@@ -516,6 +520,16 @@ function healthSection(state, server) {
   }
 
   return section;
+}
+
+function packageSafetySummary(safety) {
+  const parts = [];
+  if (safety.malware) parts.push('listed as malware');
+  const others = safety.advisoryIDs.filter((id) => !id.startsWith('MAL-'));
+  if (others.length) parts.push(`${others.length} known vulnerabilit${others.length === 1 ? 'y' : 'ies'}`);
+  if (safety.installScripts.length) parts.push(`runs ${safety.installScripts.join(' and ')} on install`);
+  const when = new Date(safety.checkedAt * 1000).toLocaleString();
+  return `Package safety (${safety.packageName}${safety.version ? ` ${safety.version}` : ''}, checked ${when}): ${parts.length ? parts.join(', ') : 'no known malware or install scripts'}.`;
 }
 
 /// One button per client that can switch this server's tools in its own file

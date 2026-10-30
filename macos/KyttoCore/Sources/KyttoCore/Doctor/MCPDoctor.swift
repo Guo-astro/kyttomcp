@@ -11,6 +11,8 @@ public enum DoctorAction: String, Codable, Sendable {
     case pinResolvedCommand
     /// Pin a runner-launched package to an exact release the user confirmed.
     case pinPackageVersion
+    /// Ask osv.dev and the package registry about the package (§7.10).
+    case checkPackageSafety
 }
 
 public struct DoctorFinding: Codable, Equatable, Sendable {
@@ -66,12 +68,18 @@ public enum MCPDoctor {
     /// servers are only in each other's way because one client has both of them
     /// switched on. So they are worked out here, across the whole matrix, and
     /// then attached to each server involved.
-    public static func reports(for servers: [Server], clients: [ClientID]) -> [DoctorServerReport] {
+    /// - Parameter packageSafety: package checks the user asked for, by server id.
+    public static func reports(
+        for servers: [Server],
+        clients: [ClientID],
+        packageSafety: [String: PackageSafetyReport] = [:]
+    ) -> [DoctorServerReport] {
         let collisions = collisionFindings(servers: servers, clients: clients)
         return servers
             .map { server in
                 let report = analyze(server)
-                let extra = collisions[server.id] ?? []
+                let extra = PackageSafety.findings(for: server, report: packageSafety[server.id])
+                    + (collisions[server.id] ?? [])
                 guard !extra.isEmpty else { return report }
                 return DoctorServerReport(
                     serverID: report.serverID,

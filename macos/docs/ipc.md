@@ -230,6 +230,7 @@ No payload. Servers merged across clients: one entry per normalized name.
 | `tokenWeight` | `{ estimate, method, isMeasured, measuredAt, percentOfContext, referenceContextWindow }`, or null before a health check |
 | `provenance` | `{ sourceKind, packageName, sourceURL, installedVersion, latestVersion, latestCheckedAt, confidence, maintenanceState }` |
 | `toolsOff` | Client id → names of the server's known tools that client's own file keeps off (§7.11). Clients with no rules are absent |
+| `packageSafety` | The last `doctor.checkPackageSafety` result while it still describes what the server launches, or null |
 | `lockedTools` | Client id → `{ tool: rule }` for tools kept off by a broader rule (a glob, a whole-server deny) that switching one tool cannot undo |
 
 `isMeasured` is what decides whether the UI writes "~" in front of a token
@@ -889,6 +890,29 @@ are not called abandoned.
 `staleButResponsive` or `unchecked`. A stale result means the server responded
 successfully while a trusted comparable registry version was newer than the
 installed/server-reported version; it is not an automatic package update.
+
+### `doctor.checkPackageSafety` → `StateDTO`
+
+```json
+{ "serverID": "github" }
+```
+
+Capability `package-safety` (macOS). An explicit, read-only check of the package
+a stdio server fetches by name (§7.10). The native shell sends osv.dev
+(`POST https://api.osv.dev/v1/query`) the package name, its ecosystem (`npm` or
+`PyPI`) and the version only when the launch pins one; for npm it also reads
+`https://registry.npmjs.org/<name>/<version|latest>` to see whether that version
+declares `preinstall`/`install`/`postinstall` scripts. Nothing else leaves the
+Mac, and nothing is requested on launch, during discovery or during a health
+check. The result is kept in memory for the session and applies only while the
+server still launches the same package and version; it shows up as Doctor
+findings (`known-malware`, `known-vulnerabilities`, `install-script`) and as
+`ServerDTO.packageSafety`
+`{ packageName, version, advisoryIDs, malware, installScripts, checkedAt }`.
+Without a pinned version only `MAL-` (malware) records are kept, since OSV then
+answers for every release ever published. The offline `look-alike-package`
+finding needs no request and carries the `checkPackageSafety` action. Nothing
+is switched off automatically.
 
 ### `setup.export` → `PortableExportDTO`
 
