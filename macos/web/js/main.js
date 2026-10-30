@@ -706,11 +706,11 @@ function toolSwitchNotice(serverId, result, tools, previous, { undoing = false }
     .filter((tool) => off.has(tool.name) && tool.tokenCount != null)
     .reduce((total, tool) => total + tool.tokenCount, 0);
   const what = off.size === 0
-    ? `All of “${result.serverName}”’s tools are on in ${clientName} again.`
+    ? `All tools of “${result.serverName}” are on in ${clientName} again.`
     : `${off.size} of ${tools.length} tools of “${result.serverName}” are off in ${clientName}${saved > 0 ? `, about ${formatTokens(saved)} tokens less context` : ''}.`;
   return {
     kind: 'info',
-    message: `${undoing ? 'Undid the change. ' : ''}${what}${result.backupID ? ' A backup was created first;' : ''} Restart ${clientName} to apply it.`,
+    message: `${undoing ? 'Undid the change. ' : ''}${what}${result.backupID ? ' A backup was created first.' : ''} Restart ${clientName} to apply it.`,
     action: undoing
       ? undefined
       : {
@@ -1424,7 +1424,9 @@ async function checkPackageSafety(serverId) {
       if (safety?.installScripts.length) message += `, runs ${safety.installScripts.join(' and ')} on install`;
       message += '. Details are in MCP Doctor.';
     }
-    setState({ notice: { kind: safety?.malware ? 'error' : safety?.advisoryIDs.length || safety?.installScripts.length ? 'warning' : 'info', message } });
+    // A finding about the package, not a failure of Kytto: warning, never the
+    // error banner that offers to report a bug.
+    setState({ notice: { kind: safety?.malware || safety?.advisoryIDs.length || safety?.installScripts.length ? 'warning' : 'info', message } });
   } catch (error) {
     reportFailure(error);
   } finally {
