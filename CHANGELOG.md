@@ -9,6 +9,22 @@ without a backup.
 
 ## [Unreleased]
 
+## [1.0.9.1] — 2026-10-30
+
+macOS only. Three new clients, switches for single tools, a package safety
+check in MCP Doctor, and a faster, steadier window. The Windows build of
+1.0.9.1 is coming soon; until then Windows stays on 1.0.9.
+
+**Download**
+
+| Platform | File | Size | SHA-256 |
+|---|---|---:|---|
+| macOS (universal) | `KyttoMCP-1.0.9.1.dmg` | 6.0 MB | `cb69196b4c16a76265c9a4bbabfa1e8b3ab57e3ae7fba2805c02b8d0dd1c98fa` |
+| Windows x64 | Coming soon | | |
+
+The macOS build is ad-hoc signed rather than notarized. Verify the SHA-256
+checksum before bypassing Gatekeeper.
+
 ### Added (macOS)
 
 - Three new clients: Google Antigravity, Devin Desktop (Windsurf until June 2026) and OpenCode. Their servers appear in the matrix, and you can switch them on and off, add, edit, copy and remove them, use them in profiles and import them from a portable setup, with the usual preview, backup and Undo. Switching a server off keeps its definition in the file (`"disabled": true` in Antigravity and Devin Desktop, `"enabled": false` in OpenCode), so nothing has to be stored aside.

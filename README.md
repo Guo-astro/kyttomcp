@@ -97,7 +97,7 @@ Custom sources are read-only and are not an additional writable client. Want ano
 
 ## Install
 
-Download from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from GitHub Releases: Beta 1.0.9 for macOS ([v1.0.9](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9)) and Beta 1.0.9 for Windows ([v1.0.9-windows](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9-windows)).
+Download from [kytto.jakubhecht.sk](https://kytto.jakubhecht.sk/) or from GitHub Releases: Beta 1.0.9.1 for macOS ([v1.0.9.1](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9.1)) and Beta 1.0.9 for Windows ([v1.0.9-windows](https://github.com/heyitsjakub/KyttoMCP/releases/tag/v1.0.9-windows)). Windows 1.0.9.1, with the new clients, tool switches and package safety check, is coming soon.
 
 ### macOS
 
