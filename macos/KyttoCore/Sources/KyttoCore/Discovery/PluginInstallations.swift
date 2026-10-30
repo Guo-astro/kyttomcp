@@ -31,20 +31,24 @@ enum PluginInstallations {
         _ source: PluginRegistrySource,
         home: URL,
         codexConfig: URL?,
-        text: (URL) -> String?
+        text: (URL) -> String?,
+        // How a file's text becomes a document. Discovery passes its per-pass
+        // cache: the same registry and settings back every project scope.
+        json: (URL, String) -> JSONDocument? = { try? JSONDocument.parse($1) },
+        toml: (URL, String) -> TOMLDocument? = { try? TOMLDocument.parse($1) }
     ) -> Result {
         switch source {
         case .claudeCode(let installed, let settings, let project):
-            return claude(installed: installed.resolve(home: home), settings: settings.resolve(home: home), project: project, text: text)
+            return claude(installed: installed.resolve(home: home), settings: settings.resolve(home: home), project: project, text: text, json: json)
         case .codex(let config, let cache):
-            return codex(config: codexConfig ?? config.resolve(home: home), cache: cache.resolve(home: home), text: text)
+            return codex(config: codexConfig ?? config.resolve(home: home), cache: cache.resolve(home: home), text: text, json: json, toml: toml)
         }
     }
 
-    private static func claude(installed: URL, settings: URL, project: String?, text: (URL) -> String?) -> Result {
+    private static func claude(installed: URL, settings: URL, project: String?, text: (URL) -> String?, json: (URL, String) -> JSONDocument?) -> Result {
         var result = Result()
         guard let source = text(installed) else { return result }
-        guard let registry = try? JSONDocument.parse(source),
+        guard let registry = json(installed, source),
               registry.root["version"]?.numberValue == 2,
               let plugins = registry.root["plugins"]?.members
         else {
@@ -61,7 +65,7 @@ enum PluginInstallations {
         }
         for url in settingsURLs {
             guard let source = text(url) else { continue }
-            guard let document = try? JSONDocument.parse(source) else {
+            guard let document = json(url, source) else {
                 result.warnings.append("Claude Code plugin settings could not be read. Plugin discovery was skipped rather than guessing enablement.")
                 return result
             }
@@ -94,7 +98,7 @@ enum PluginInstallations {
             }
             let manifestURL = root.appending(path: ".claude-plugin/plugin.json")
             let manifestSource = text(manifestURL)
-            let manifest = manifestSource.flatMap { try? JSONDocument.parse($0) }
+            let manifest = manifestSource.flatMap { json(manifestURL, $0) }
             if manifestSource != nil && manifest == nil {
                 result.warnings.append("An installed Claude Code plugin has an unreadable manifest and was skipped.")
                 continue
@@ -109,9 +113,9 @@ enum PluginInstallations {
         return result
     }
 
-    private static func codex(config: URL, cache: URL, text: (URL) -> String?) -> Result {
+    private static func codex(config: URL, cache: URL, text: (URL) -> String?, json: (URL, String) -> JSONDocument?, toml: (URL, String) -> TOMLDocument?) -> Result {
         var result = Result()
-        guard let source = text(config), let document = try? TOMLDocument.parse(source) else { return result }
+        guard let source = text(config), let document = toml(config, source) else { return result }
         for table in document.tables where table.path.count == 2 && table.path.first == "plugins" {
             guard table.value("enabled")?.boolValue == true else { continue }
             let id = table.path[1]
@@ -130,7 +134,7 @@ enum PluginInstallations {
             }
             guard versions.count == 1, let root = versions.first,
                   let manifestSource = text(root.appending(path: ".codex-plugin/plugin.json")),
-                  let manifest = try? JSONDocument.parse(manifestSource)
+                  let manifest = json(root.appending(path: ".codex-plugin/plugin.json"), manifestSource)
             else {
                 if !versions.isEmpty {
                     result.warnings.append("An enabled Codex plugin has several cached versions or an unreadable manifest. Kytto skipped it because the active version is uncertain.")
